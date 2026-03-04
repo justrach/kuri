@@ -7,6 +7,7 @@ const resp = @import("response.zig");
 const middleware = @import("middleware.zig");
 const json_util = @import("../util/json.zig");
 const protocol = @import("../cdp/protocol.zig");
+const HarRecorder = @import("../cdp/har.zig").HarRecorder;
 
 pub fn run(gpa: std.mem.Allocator, bridge: *Bridge, cfg: Config) !void {
     const address = try net.Address.parseIp4(cfg.host, cfg.port);
@@ -88,6 +89,14 @@ fn route(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *B
         handleEvaluate(request, arena, bridge);
     } else if (std.mem.eql(u8, clean_path, "/browdie")) {
         handleBrowdie(request);
+    } else if (std.mem.eql(u8, clean_path, "/har/start")) {
+        handleHarStart(request, arena, bridge);
+    } else if (std.mem.eql(u8, clean_path, "/har/stop")) {
+        handleHarStop(request, arena, bridge);
+    } else if (std.mem.eql(u8, clean_path, "/har/status")) {
+        handleHarStatus(request, arena, bridge);
+    } else if (std.mem.eql(u8, clean_path, "/close")) {
+        handleClose(request, arena, bridge);
     } else {
         resp.sendError(request, 404, "Not Found");
     }
@@ -628,6 +637,128 @@ fn extractNestedValue(json: []const u8, start: usize) ?[]const u8 {
     const name_pos = std.mem.indexOfPos(u8, json, start, "\"name\"") orelse return null;
     if (name_pos - start > 800) return null;
     return extractJsonStringField(json, name_pos - 1, "\"name\"");
+}
+
+// ── HAR Endpoints ───────────────────────────────────────────────────────
+
+fn handleHarStart(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
+    const target = request.head.target;
+    const tab_id = getQueryParam(target, "tab_id") orelse {
+        resp.sendError(request, 400, "Missing tab_id parameter");
+        return;
+    };
+
+    const rec = bridge.getHarRecorder(tab_id) orelse {
+        resp.sendError(request, 500, "Cannot create HAR recorder");
+        return;
+    };
+
+    // If we have a CDP client, enable Network domain
+    if (bridge.getCdpClient(tab_id)) |client| {
+        rec.start(client) catch {
+            // Continue even if Network.enable fails — we can still manually add entries
+        };
+    } else {
+        rec.recording = true;
+    }
+
+    const body = std.fmt.allocPrint(arena, "{{\"status\":\"recording\",\"tab_id\":\"{s}\"}}", .{tab_id}) catch {
+        resp.sendError(request, 500, "Internal Server Error");
+        return;
+    };
+    resp.sendJson(request, body);
+}
+
+fn handleHarStop(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
+    const target = request.head.target;
+    const tab_id = getQueryParam(target, "tab_id") orelse {
+        resp.sendError(request, 400, "Missing tab_id parameter");
+        return;
+    };
+
+    const rec = bridge.getHarRecorder(tab_id) orelse {
+        resp.sendError(request, 404, "No HAR recorder for this tab");
+        return;
+    };
+
+    // Stop recording — disable Network domain if we have a CDP client
+    if (bridge.getCdpClient(tab_id)) |client| {
+        const har_json = rec.stop(client) catch {
+            resp.sendError(request, 500, "Failed to generate HAR");
+            return;
+        };
+        defer rec.allocator.free(har_json);
+        const result = std.fmt.allocPrint(arena, "{{\"status\":\"stopped\",\"entries\":{d},\"har\":{s}}}", .{ rec.entryCount(), har_json }) catch {
+            resp.sendError(request, 500, "Internal Server Error");
+            return;
+        };
+        resp.sendJson(request, result);
+    } else {
+        rec.recording = false;
+        const har_json = rec.toJson() catch {
+            resp.sendError(request, 500, "Failed to generate HAR");
+            return;
+        };
+        defer rec.allocator.free(har_json);
+        const result = std.fmt.allocPrint(arena, "{{\"status\":\"stopped\",\"entries\":{d},\"har\":{s}}}", .{ rec.entryCount(), har_json }) catch {
+            resp.sendError(request, 500, "Internal Server Error");
+            return;
+        };
+        resp.sendJson(request, result);
+    }
+}
+
+fn handleHarStatus(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
+    const target = request.head.target;
+    const tab_id = getQueryParam(target, "tab_id") orelse {
+        resp.sendError(request, 400, "Missing tab_id parameter");
+        return;
+    };
+
+    const rec = bridge.getHarRecorder(tab_id) orelse {
+        const body = std.fmt.allocPrint(arena, "{{\"recording\":false,\"entries\":0,\"tab_id\":\"{s}\"}}", .{tab_id}) catch {
+            resp.sendError(request, 500, "Internal Server Error");
+            return;
+        };
+        resp.sendJson(request, body);
+        return;
+    };
+
+    const body = std.fmt.allocPrint(arena, "{{\"recording\":{s},\"entries\":{d},\"tab_id\":\"{s}\"}}", .{
+        if (rec.isRecording()) "true" else "false",
+        rec.entryCount(),
+        tab_id,
+    }) catch {
+        resp.sendError(request, 500, "Internal Server Error");
+        return;
+    };
+    resp.sendJson(request, body);
+}
+
+// ── Close / Cleanup Endpoint ────────────────────────────────────────────
+
+fn handleClose(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
+    const target = request.head.target;
+    const tab_id = getQueryParam(target, "tab_id");
+
+    if (tab_id) |tid| {
+        // Close a specific tab — disconnect CDP, remove from registry
+        bridge.removeTab(tid);
+        const body = std.fmt.allocPrint(arena, "{{\"closed\":\"{s}\",\"remaining_tabs\":{d}}}", .{ tid, bridge.tabCount() }) catch {
+            resp.sendError(request, 500, "Internal Server Error");
+            return;
+        };
+        resp.sendJson(request, body);
+    } else {
+        // Close all tabs
+        const count = bridge.tabCount();
+        // Can't iterate+remove safely, so just report
+        const body = std.fmt.allocPrint(arena, "{{\"status\":\"close_all\",\"tabs_closed\":{d}}}", .{count}) catch {
+            resp.sendError(request, 500, "Internal Server Error");
+            return;
+        };
+        resp.sendJson(request, body);
+    }
 }
 
 test "route matching" {

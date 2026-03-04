@@ -1,5 +1,6 @@
 const std = @import("std");
 const CdpClient = @import("../cdp/client.zig").CdpClient;
+const HarRecorder = @import("../cdp/har.zig").HarRecorder;
 
 pub const TabEntry = struct {
     id: []const u8,
@@ -31,6 +32,7 @@ pub const Bridge = struct {
     tabs: std.StringHashMap(TabEntry),
     snapshots: std.StringHashMap(RefCache),
     cdp_clients: std.StringHashMap(CdpClient),
+    har_recorders: std.StringHashMap(HarRecorder),
     mu: std.Thread.RwLock,
 
     pub fn init(allocator: std.mem.Allocator) Bridge {
@@ -39,11 +41,18 @@ pub const Bridge = struct {
             .tabs = std.StringHashMap(TabEntry).init(allocator),
             .snapshots = std.StringHashMap(RefCache).init(allocator),
             .cdp_clients = std.StringHashMap(CdpClient).init(allocator),
+            .har_recorders = std.StringHashMap(HarRecorder).init(allocator),
             .mu = .{},
         };
     }
 
     pub fn deinit(self: *Bridge) void {
+        var har_it = self.har_recorders.valueIterator();
+        while (har_it.next()) |rec| {
+            rec.deinit();
+        }
+        self.har_recorders.deinit();
+
         var cdp_it = self.cdp_clients.valueIterator();
         while (cdp_it.next()) |client| {
             client.deinit();
@@ -120,6 +129,8 @@ pub const Bridge = struct {
             _ = self.snapshots.remove(tab_id);
             if (self.cdp_clients.getPtr(tab_id)) |client| client.deinit();
             _ = self.cdp_clients.remove(tab_id);
+            if (self.har_recorders.getPtr(tab_id)) |rec| rec.deinit();
+            _ = self.har_recorders.remove(tab_id);
             return;
         };
 
@@ -134,6 +145,8 @@ pub const Bridge = struct {
         _ = self.snapshots.remove(tab_id);
         if (self.cdp_clients.getPtr(tab_id)) |client| client.deinit();
         _ = self.cdp_clients.remove(tab_id);
+        if (self.har_recorders.getPtr(tab_id)) |rec| rec.deinit();
+        _ = self.har_recorders.remove(tab_id);
     }
 
     pub fn listTabs(self: *Bridge, allocator: std.mem.Allocator) ![]TabEntry {
@@ -163,6 +176,20 @@ pub const Bridge = struct {
         const client = CdpClient.init(self.allocator, tab.ws_url);
         self.cdp_clients.put(tab_id, client) catch return null;
         return self.cdp_clients.getPtr(tab_id);
+    }
+
+    /// Get or create a HAR recorder for a tab.
+    pub fn getHarRecorder(self: *Bridge, tab_id: []const u8) ?*HarRecorder {
+        self.mu.lock();
+        defer self.mu.unlock();
+
+        if (self.har_recorders.getPtr(tab_id)) |rec| {
+            return rec;
+        }
+
+        const rec = HarRecorder.init(self.allocator);
+        self.har_recorders.put(tab_id, rec) catch return null;
+        return self.har_recorders.getPtr(tab_id);
     }
 };
 

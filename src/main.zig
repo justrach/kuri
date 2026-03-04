@@ -2,6 +2,7 @@ const std = @import("std");
 const config = @import("bridge/config.zig");
 const server = @import("server/router.zig");
 const Bridge = @import("bridge/bridge.zig").Bridge;
+const launcher = @import("chrome/launcher.zig");
 
 pub fn main() !void {
     var gpa_impl: std.heap.GeneralPurposeAllocator(.{}) = .init;
@@ -13,11 +14,21 @@ pub fn main() !void {
     std.log.info("agentic-browdie v0.1.0", .{});
     std.log.info("listening on {s}:{d}", .{ cfg.host, cfg.port });
 
+    // Chrome lifecycle management
+    var chrome = launcher.Launcher.init(gpa, cfg);
+    defer chrome.deinit();
+
     if (cfg.cdp_url) |url| {
         std.log.info("connecting to existing Chrome at {s}", .{url});
     } else {
-        std.log.info("no CDP_URL set — will launch Chrome on first request", .{});
+        std.log.info("launching managed Chrome instance", .{});
     }
+
+    const cdp_port = chrome.start(cfg) catch |err| blk: {
+        std.log.warn("Chrome launch failed: {s}, continuing without Chrome", .{@errorName(err)});
+        break :blk @as(u16, 9222);
+    };
+    std.log.info("CDP port: {d}", .{cdp_port});
 
     // Initialize bridge (central state)
     var bridge = Bridge.init(gpa);
@@ -38,6 +49,7 @@ test {
     _ = @import("cdp/websocket.zig");
     _ = @import("cdp/actions.zig");
     _ = @import("cdp/stealth.zig");
+    _ = @import("cdp/har.zig");
     _ = @import("snapshot/a11y.zig");
     _ = @import("snapshot/diff.zig");
     _ = @import("snapshot/ref_cache.zig");
@@ -48,4 +60,6 @@ test {
     _ = @import("crawler/extractor.zig");
     _ = @import("util/json.zig");
     _ = @import("test/harness.zig");
+    _ = @import("chrome/launcher.zig");
+    _ = @import("test/integration.zig");
 }
