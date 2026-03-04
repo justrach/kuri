@@ -55,8 +55,13 @@ pub const Methods = struct {
     pub const target_attach_to_target = "Target.attachToTarget";
     pub const page_navigate = "Page.navigate";
     pub const page_add_script = "Page.addScriptToEvaluateOnNewDocument";
+    pub const page_reload = "Page.reload";
+    pub const page_get_layout_metrics = "Page.getLayoutMetrics";
     pub const runtime_evaluate = "Runtime.evaluate";
+    pub const runtime_call_function_on = "Runtime.callFunctionOn";
     pub const dom_get_document = "DOM.getDocument";
+    pub const dom_resolve_node = "DOM.resolveNode";
+    pub const dom_describe_node = "DOM.describeNode";
     pub const accessibility_get_full_tree = "Accessibility.getFullAXTree";
     pub const page_capture_screenshot = "Page.captureScreenshot";
 };

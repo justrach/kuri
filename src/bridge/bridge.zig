@@ -1,6 +1,7 @@
 const std = @import("std");
 const CdpClient = @import("../cdp/client.zig").CdpClient;
 const HarRecorder = @import("../cdp/har.zig").HarRecorder;
+const A11yNode = @import("../snapshot/a11y.zig").A11yNode;
 
 pub const TabEntry = struct {
     id: []const u8,
@@ -31,6 +32,7 @@ pub const Bridge = struct {
     allocator: std.mem.Allocator,
     tabs: std.StringHashMap(TabEntry),
     snapshots: std.StringHashMap(RefCache),
+    prev_snapshots: std.StringHashMap([]const A11yNode),
     cdp_clients: std.StringHashMap(CdpClient),
     har_recorders: std.StringHashMap(HarRecorder),
     mu: std.Thread.RwLock,
@@ -40,6 +42,7 @@ pub const Bridge = struct {
             .allocator = allocator,
             .tabs = std.StringHashMap(TabEntry).init(allocator),
             .snapshots = std.StringHashMap(RefCache).init(allocator),
+            .prev_snapshots = std.StringHashMap([]const A11yNode).init(allocator),
             .cdp_clients = std.StringHashMap(CdpClient).init(allocator),
             .har_recorders = std.StringHashMap(HarRecorder).init(allocator),
             .mu = .{},
@@ -58,6 +61,8 @@ pub const Bridge = struct {
             client.deinit();
         }
         self.cdp_clients.deinit();
+
+        self.prev_snapshots.deinit();
 
         var snap_it = self.snapshots.valueIterator();
         while (snap_it.next()) |cache| {
@@ -127,6 +132,7 @@ pub const Bridge = struct {
         const tab = self.tabs.get(tab_id) orelse {
             if (self.snapshots.getPtr(tab_id)) |cache| cache.deinit();
             _ = self.snapshots.remove(tab_id);
+            _ = self.prev_snapshots.remove(tab_id);
             if (self.cdp_clients.getPtr(tab_id)) |client| client.deinit();
             _ = self.cdp_clients.remove(tab_id);
             if (self.har_recorders.getPtr(tab_id)) |rec| rec.deinit();
@@ -143,6 +149,7 @@ pub const Bridge = struct {
 
         if (self.snapshots.getPtr(tab_id)) |cache| cache.deinit();
         _ = self.snapshots.remove(tab_id);
+        _ = self.prev_snapshots.remove(tab_id);
         if (self.cdp_clients.getPtr(tab_id)) |client| client.deinit();
         _ = self.cdp_clients.remove(tab_id);
         if (self.har_recorders.getPtr(tab_id)) |rec| rec.deinit();
