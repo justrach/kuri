@@ -31,7 +31,7 @@ pub const RateLimiter = struct {
         return .{
             .tokens = std.atomic.Value(u32).init(max_tokens),
             .max_tokens = max_tokens,
-            .last_refill = std.atomic.Value(i64).init(std.time.nanoTimestamp()),
+            .last_refill = std.atomic.Value(i64).init(@intCast(std.time.nanoTimestamp())),
             .refill_interval_ns = @as(i64, refill_interval_ms) * std.time.ns_per_ms,
         };
     }
@@ -51,7 +51,7 @@ pub const RateLimiter = struct {
     }
 
     fn maybeRefill(self: *RateLimiter) void {
-        const now = std.time.nanoTimestamp();
+        const now: i64 = @intCast(std.time.nanoTimestamp());
         const last = self.last_refill.load(.acquire);
         if (now - last >= self.refill_interval_ns) {
             if (self.last_refill.cmpxchgWeak(last, now, .release, .monotonic) == null) {

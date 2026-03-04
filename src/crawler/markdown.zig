@@ -110,10 +110,19 @@ fn extractTagName(tag: []const u8) []const u8 {
 }
 
 fn extractAttr(tag: []const u8, name: []const u8) ?[]const u8 {
-    const search = std.fmt.comptimePrint("{s}=\"", .{name});
-    const start = (std.mem.indexOf(u8, tag, search) orelse return null) + search.len;
-    const end = std.mem.indexOfScalarPos(u8, tag, start, '"') orelse return null;
-    return tag[start..end];
+    // Search for name="..." pattern in tag attributes
+    var pos: usize = 0;
+    while (pos < tag.len) {
+        const name_pos = std.mem.indexOfPos(u8, tag, pos, name) orelse return null;
+        const eq_pos = name_pos + name.len;
+        if (eq_pos + 1 < tag.len and tag[eq_pos] == '=' and tag[eq_pos + 1] == '"') {
+            const start = eq_pos + 2;
+            const end = std.mem.indexOfScalarPos(u8, tag, start, '"') orelse return null;
+            return tag[start..end];
+        }
+        pos = name_pos + 1;
+    }
+    return null;
 }
 
 test "basic HTML to Markdown" {

@@ -1,7 +1,7 @@
 const std = @import("std");
 
 /// Readability JS script embedded at comptime.
-pub const readability_script = @embedFile("../../js/readability.js");
+pub const readability_script = @embedFile("js/readability.js");
 
 /// Result from readability extraction.
 pub const ReadabilityResult = struct {

@@ -1,7 +1,7 @@
 const std = @import("std");
 
 /// Stealth JS script embedded at comptime.
-pub const stealth_script = @embedFile("../../js/stealth.js");
+pub const stealth_script = @embedFile("js/stealth.js");
 
 /// User agents for rotation.
 pub const user_agents = [_][]const u8{

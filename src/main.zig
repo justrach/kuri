@@ -34,7 +34,18 @@ test {
     _ = @import("server/response.zig");
     _ = @import("server/middleware.zig");
     _ = @import("cdp/protocol.zig");
+    _ = @import("cdp/client.zig");
+    _ = @import("cdp/websocket.zig");
+    _ = @import("cdp/actions.zig");
+    _ = @import("cdp/stealth.zig");
     _ = @import("snapshot/a11y.zig");
+    _ = @import("snapshot/diff.zig");
+    _ = @import("snapshot/ref_cache.zig");
     _ = @import("crawler/validator.zig");
+    _ = @import("crawler/markdown.zig");
+    _ = @import("crawler/fetcher.zig");
+    _ = @import("crawler/pipeline.zig");
+    _ = @import("crawler/extractor.zig");
     _ = @import("util/json.zig");
+    _ = @import("test/harness.zig");
 }
