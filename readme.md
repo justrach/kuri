@@ -4,13 +4,13 @@
 ![node_modules](https://img.shields.io/badge/node__modules-0_files-brightgreen?style=flat-square)
 ![status](https://img.shields.io/badge/status-experimental-orange?style=flat-square)
 
-# Agentic Browdie 🧁
+# Kuri 🌰
 
 **Browser automation & web crawling for AI agents. Written in Zig. Zero Node.js.**
 
-CDP automation · A11y snapshots · HAR recording · Standalone fetcher · QuickJS scripting
+CDP automation · A11y snapshots · HAR recording · Standalone fetcher · Interactive terminal browser · QuickJS scripting
 
-[Quick Start](#-quick-start) · [API](#-http-api) · [browdie-fetch](#-browdie-fetch) · [Architecture](#-architecture) · [Configuration](#-configuration)
+[Quick Start](#-quick-start) · [API](#-http-api) · [kuri-fetch](#-kuri-fetch) · [kuri-browse](#-kuri-browse) · [Architecture](#-architecture) · [Configuration](#-configuration)
 
 ---
 
@@ -18,11 +18,12 @@ CDP automation · A11y snapshots · HAR recording · Standalone fetcher · Quick
 
 Every browser automation tool drags in Playwright (~300 MB), a Node.js runtime, and a cascade of npm dependencies. Your AI agent just wants to read a page, click a button, and move on.
 
-**Browdie is a single Zig binary.** Two modes, zero runtime:
+**Kuri is a single Zig binary.** Three modes, zero runtime:
 
 ```
-agentic-browdie    →  CDP server (Chrome automation, a11y snapshots, HAR)
-browdie-fetch      →  standalone fetcher (no Chrome, QuickJS for JS, ~2 MB)
+kuri           →  CDP server (Chrome automation, a11y snapshots, HAR)
+kuri-fetch     →  standalone fetcher (no Chrome, QuickJS for JS, ~2 MB)
+kuri-browse    →  interactive terminal browser (navigate, follow links, search)
 ```
 
 ---
@@ -39,10 +40,13 @@ zig build              # build everything
 zig build test         # run 230+ tests
 
 # CDP mode — launches Chrome automatically
-./zig-out/bin/agentic-browdie
+./zig-out/bin/kuri
 
 # Standalone mode — no Chrome needed
-./zig-out/bin/browdie-fetch https://example.com
+./zig-out/bin/kuri-fetch https://example.com
+
+# Interactive browser — browse from your terminal
+./zig-out/bin/kuri-browse https://example.com
 ```
 
 ### Browse vercel.com in 4 commands
@@ -69,13 +73,14 @@ curl -s "http://localhost:8080/snapshot?tab_id=ABC123&filter=interactive"
 
 ## 📊 vs Alternatives
 
-|  | **Agentic Browdie** | **Playwright** | **Lightpanda** |
+|  | **Kuri** | **Playwright** | **Lightpanda** |
 |---|---|---|---|
 | Runtime | None (native binary) | Node.js ≥ 18 | None (Zig) |
 | `node_modules` | **0 files** | ~300 MB | **0 files** |
 | Binary size | **~2–5 MB** | N/A (interpreted) | ~15 MB |
 | Cold start | **< 5 ms** | ~1–3 s | < 5 ms |
-| Standalone fetcher | ✅ `browdie-fetch` | ❌ | ❌ |
+| Standalone fetcher | ✅ `kuri-fetch` | ❌ | ❌ |
+| Terminal browser | ✅ `kuri-browse` | ❌ | ❌ |
 | JS execution (no Chrome) | ✅ QuickJS | ❌ | ❌ |
 | A11y snapshots | ✅ `@eN` refs | Via CDP | ✅ |
 | HAR recording | ✅ CDP Network | ✅ | ✅ |
@@ -85,7 +90,7 @@ curl -s "http://localhost:8080/snapshot?tab_id=ABC123&filter=interactive"
 
 ## 🌐 HTTP API
 
-All endpoints return JSON. Optional auth via `BROWDIE_SECRET` env var.
+All endpoints return JSON. Optional auth via `KURI_SECRET` env var.
 
 ### Core
 
@@ -94,7 +99,7 @@ All endpoints return JSON. Optional auth via `BROWDIE_SECRET` env var.
 | `GET /health` | Server status, tab count, version |
 | `GET /tabs` | List all registered tabs |
 | `GET /discover` | Auto-discover Chrome tabs via CDP |
-| `GET /browdie` | 🧁 |
+| `GET /browdie` | 🌰 (easter egg) |
 
 ### Browser Control
 
@@ -165,7 +170,7 @@ All endpoints return JSON. Optional auth via `BROWDIE_SECRET` env var.
 
 ---
 
-## 🔧 browdie-fetch
+## 🔧 kuri-fetch
 
 Standalone HTTP fetcher — no Chrome, no Playwright, no npm. Ships as a ~2 MB binary with built-in QuickJS for JS execution.
 
@@ -173,22 +178,22 @@ Standalone HTTP fetcher — no Chrome, no Playwright, no npm. Ships as a ~2 MB b
 zig build fetch    # build + run
 
 # Default: convert to Markdown
-browdie-fetch https://example.com
+kuri-fetch https://example.com
 
 # Extract links
-browdie-fetch -d links https://news.ycombinator.com
+kuri-fetch -d links https://news.ycombinator.com
 
 # Structured JSON output
-browdie-fetch --json https://example.com
+kuri-fetch --json https://example.com
 
 # Execute inline scripts via QuickJS
-browdie-fetch --js https://example.com
+kuri-fetch --js https://example.com
 
 # Write to file, quiet mode
-browdie-fetch -o page.md -q https://example.com
+kuri-fetch -o page.md -q https://example.com
 
 # Pipe-friendly: content → stdout, status → stderr
-browdie-fetch -d text https://example.com | wc -w
+kuri-fetch -d text https://example.com | wc -w
 ```
 
 ### Features
@@ -202,10 +207,59 @@ browdie-fetch -d text https://example.com | wc -w
 - **Custom UA** — `--user-agent` flag
 - **Quiet mode** — `-q` suppresses stderr status
 
+---
+
+## 🌐 kuri-browse
+
+Interactive terminal browser — browse the web from your terminal. No Chrome needed.
+
+```bash
+zig build browse   # build + run
+
+kuri-browse https://example.com
 ```
-$ browdie-fetch --version
-browdie-fetch 0.2.0
+
 ```
+🌰 kuri-browse — terminal browser
+→ loading https://example.com
+
+# Example Domain
+This domain is for use in documentation examples...
+Learn more [1]
+
+───── Links ─────
+  [1] https://iana.org/domains/example
+
+✓ 528 bytes, 1 links (133ms)
+[nav] https://example.com> 1     ← type 1 to follow the link
+```
+
+### Commands
+
+| Command | Action |
+|---------|--------|
+| `<number>` | Follow link [N] |
+| `<url>` | Navigate (if contains `.`) |
+| `:go <url>` | Navigate to URL |
+| `:back`, `:b` | Go back in history |
+| `:forward`, `:f` | Go forward |
+| `:reload`, `:r` | Re-fetch current page |
+| `:links`, `:l` | Show link index |
+| `/<term>` | Search in page (highlights matches) |
+| `:search <t>` | Search in page |
+| `:n`, `:next` | Re-highlight search |
+| `:history` | Show navigation history |
+| `:help`, `:h` | Show all commands |
+| `:quit`, `:q` | Exit |
+
+### Features
+
+- **Colored markdown rendering** — headings, links, code blocks, bold, blockquotes
+- **Numbered links** — every link gets `[N]`, type the number to follow it
+- **Navigation history** — back/forward like a real browser
+- **In-page search** — `/term` highlights all matches
+- **Relative URL resolution** — follows links naturally across pages
+- **Smart filtering** — skips `javascript:` and `mailto:` hrefs
 
 ---
 
@@ -216,15 +270,15 @@ browdie-fetch 0.2.0
 │                     HTTP API Layer                        │
 │         (std.http.Server, thread-per-connection)          │
 ├──────────────┬──────────────────┬────────────────────────┤
-│   Browser    │  Crawler Engine  │   browdie-fetch         │
-│   Bridge     │                  │   (standalone CLI)      │
+│   Browser    │  Crawler Engine  │   kuri-fetch / browse   │
+│   Bridge     │                  │   (standalone CLIs)     │
 ├──────────────┼──────────────────┼────────────────────────┤
 │ CDP Client   │ URL Validator    │ std.http.Client         │
 │ Tab Registry │ HTML→Markdown    │ QuickJS JS Engine       │
 │ A11y Snapshot│ Link Extractor   │ DOM Stubs (Layer 3)     │
 │ Ref Cache    │ Text Extractor   │ SSRF Validator          │
-│ HAR Recorder │                  │                         │
-│ Stealth JS   │                  │                         │
+│ HAR Recorder │                  │ Colored Renderer        │
+│ Stealth JS   │                  │ History + REPL          │
 ├──────────────┴──────────────────┴────────────────────────┤
 │  Chrome Lifecycle Manager                                 │
 │  (launch, health-check, auto-restart, port detection)     │
@@ -250,12 +304,13 @@ browdie-fetch 0.2.0
 ## 📁 Structure
 
 ```
-agentic-browdie/
+kuri/
 ├── build.zig                  # Build system (Zig 0.15.2)
 ├── build.zig.zon              # Package manifest + QuickJS dep
 ├── src/
 │   ├── main.zig               # CDP server entry point
-│   ├── fetch_main.zig         # browdie-fetch CLI entry point
+│   ├── fetch_main.zig         # kuri-fetch CLI entry point
+│   ├── browse_main.zig        # kuri-browse CLI entry point
 │   ├── js_engine.zig          # QuickJS wrapper + DOM stubs
 │   ├── bench.zig              # Benchmark harness
 │   ├── chrome/
@@ -286,14 +341,13 @@ agentic-browdie/
 │   │   └── pipeline.zig       # Parallel crawl pipeline
 │   ├── storage/
 │   │   ├── local.zig          # Local file writer
-│   │   ├── kafka.zig          # Kafka producer
 │   │   └── r2.zig             # R2/S3 uploader
 │   ├── util/
 │   │   └── json.zig           # JSON helpers
 │   └── test/
 │       ├── harness.zig        # Test HTTP client
 │       ├── integration.zig    # Integration tests
-│       └── merjs_e2e.zig      # E2E tests (merjs + browdie + Chrome)
+│       └── merjs_e2e.zig      # E2E tests
 └── js/
     ├── stealth.js             # Bot detection bypass
     └── readability.js         # Content extraction
@@ -308,8 +362,8 @@ agentic-browdie/
 | `HOST` | `127.0.0.1` | Server bind address |
 | `PORT` | `8080` | Server port |
 | `CDP_URL` | *(none)* | Connect to existing Chrome (`ws://127.0.0.1:9222`) |
-| `BROWDIE_SECRET` | *(none)* | Auth secret for API requests |
-| `STATE_DIR` | `.browdie` | Session state directory |
+| `KURI_SECRET` | *(none)* | Auth secret for API requests |
+| `STATE_DIR` | `.kuri` | Session state directory |
 | `REQUEST_TIMEOUT_MS` | `30000` | HTTP request timeout |
 | `NAVIGATE_TIMEOUT_MS` | `30000` | Navigation timeout |
 | `STALE_TAB_INTERVAL_S` | `30` | Stale tab cleanup interval |
@@ -337,8 +391,9 @@ Open an issue before submitting a large PR so we can align on the approach.
 ```bash
 git clone https://github.com/justrach/agentic-browdie.git
 cd agentic-browdie
-zig build test        # 230+ tests must pass
-zig build test-fetch  # browdie-fetch tests (66 tests)
+zig build test         # 230+ tests must pass
+zig build test-fetch   # kuri-fetch tests (66 tests)
+zig build test-browse  # kuri-browse tests
 ```
 
 See [CONTRIBUTORS.md](CONTRIBUTORS.md) for guidelines.
