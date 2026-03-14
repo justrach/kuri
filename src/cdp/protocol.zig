@@ -85,9 +85,40 @@ pub const Methods = struct {
     pub const fetch_disable = "Fetch.disable";
     pub const fetch_continue_request = "Fetch.continueRequest";
     pub const fetch_fulfill_request = "Fetch.fulfillRequest";
+
+    // Network domain (cookies, headers)
+    pub const network_get_cookies = "Network.getCookies";
+    pub const network_set_cookies = "Network.setCookies";
+    pub const network_delete_cookies = "Network.deleteCookies";
+    pub const network_set_extra_http_headers = "Network.setExtraHTTPHeaders";
+    pub const network_enable = "Network.enable";
+    pub const network_disable = "Network.disable";
+
+    // Page domain (PDF, stop, script injection)
+    pub const page_print_to_pdf = "Page.printToPDF";
+    pub const page_stop_loading = "Page.stopLoading";
+
+    // DOM domain (query, HTML)
+    pub const dom_query_selector = "DOM.querySelector";
+    pub const dom_query_selector_all = "DOM.querySelectorAll";
+    pub const dom_get_outer_html = "DOM.getOuterHTML";
 };
 
 test "methods are valid strings" {
     try std.testing.expectEqualStrings("Page.navigate", Methods.page_navigate);
     try std.testing.expectEqualStrings("Accessibility.getFullAXTree", Methods.accessibility_get_full_tree);
+}
+
+test "lightpanda parity CDP methods" {
+    try std.testing.expectEqualStrings("Network.getCookies", Methods.network_get_cookies);
+    try std.testing.expectEqualStrings("Network.setCookies", Methods.network_set_cookies);
+    try std.testing.expectEqualStrings("Network.deleteCookies", Methods.network_delete_cookies);
+    try std.testing.expectEqualStrings("Network.setExtraHTTPHeaders", Methods.network_set_extra_http_headers);
+    try std.testing.expectEqualStrings("Network.enable", Methods.network_enable);
+    try std.testing.expectEqualStrings("Network.disable", Methods.network_disable);
+    try std.testing.expectEqualStrings("Page.printToPDF", Methods.page_print_to_pdf);
+    try std.testing.expectEqualStrings("Page.stopLoading", Methods.page_stop_loading);
+    try std.testing.expectEqualStrings("DOM.querySelector", Methods.dom_query_selector);
+    try std.testing.expectEqualStrings("DOM.querySelectorAll", Methods.dom_query_selector_all);
+    try std.testing.expectEqualStrings("DOM.getOuterHTML", Methods.dom_get_outer_html);
 }

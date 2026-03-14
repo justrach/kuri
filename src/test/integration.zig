@@ -455,3 +455,48 @@ test "isInteractive roles" {
     try std.testing.expect(!a11y.isInteractive("generic"));
     try std.testing.expect(!a11y.isInteractive(""));
 }
+
+// ─── Lightpanda Parity Protocol Tests ──────────────────────────────────
+
+const protocol = @import("../cdp/protocol.zig");
+
+test "lightpanda parity: network domain methods defined" {
+    try std.testing.expectEqualStrings("Network.getCookies", protocol.Methods.network_get_cookies);
+    try std.testing.expectEqualStrings("Network.setCookies", protocol.Methods.network_set_cookies);
+    try std.testing.expectEqualStrings("Network.deleteCookies", protocol.Methods.network_delete_cookies);
+    try std.testing.expectEqualStrings("Network.setExtraHTTPHeaders", protocol.Methods.network_set_extra_http_headers);
+}
+
+test "lightpanda parity: page domain methods defined" {
+    try std.testing.expectEqualStrings("Page.printToPDF", protocol.Methods.page_print_to_pdf);
+    try std.testing.expectEqualStrings("Page.stopLoading", protocol.Methods.page_stop_loading);
+    try std.testing.expectEqualStrings("Page.addScriptToEvaluateOnNewDocument", protocol.Methods.page_add_script);
+}
+
+test "lightpanda parity: DOM domain methods defined" {
+    try std.testing.expectEqualStrings("DOM.querySelector", protocol.Methods.dom_query_selector);
+    try std.testing.expectEqualStrings("DOM.querySelectorAll", protocol.Methods.dom_query_selector_all);
+    try std.testing.expectEqualStrings("DOM.getOuterHTML", protocol.Methods.dom_get_outer_html);
+    try std.testing.expectEqualStrings("DOM.getDocument", protocol.Methods.dom_get_document);
+    try std.testing.expectEqualStrings("DOM.resolveNode", protocol.Methods.dom_resolve_node);
+}
+
+test "lightpanda parity: all new methods are unique strings" {
+    const methods = [_][]const u8{
+        protocol.Methods.network_get_cookies,
+        protocol.Methods.network_set_cookies,
+        protocol.Methods.network_delete_cookies,
+        protocol.Methods.network_set_extra_http_headers,
+        protocol.Methods.page_print_to_pdf,
+        protocol.Methods.page_stop_loading,
+        protocol.Methods.dom_query_selector,
+        protocol.Methods.dom_query_selector_all,
+        protocol.Methods.dom_get_outer_html,
+    };
+    // Verify no duplicates
+    for (methods, 0..) |m1, i| {
+        for (methods[i + 1 ..]) |m2| {
+            try std.testing.expect(!std.mem.eql(u8, m1, m2));
+        }
+    }
+}

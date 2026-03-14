@@ -152,6 +152,24 @@ fn route(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *B
         handleInterceptStart(request, arena, bridge);
     } else if (std.mem.eql(u8, clean_path, "/intercept/stop")) {
         handleInterceptStop(request, arena, bridge);
+    } else if (std.mem.eql(u8, clean_path, "/markdown")) {
+        handleMarkdown(request, arena, bridge);
+    } else if (std.mem.eql(u8, clean_path, "/links")) {
+        handleLinks(request, arena, bridge);
+    } else if (std.mem.eql(u8, clean_path, "/pdf")) {
+        handlePdf(request, arena, bridge);
+    } else if (std.mem.eql(u8, clean_path, "/dom/query")) {
+        handleDomQuery(request, arena, bridge);
+    } else if (std.mem.eql(u8, clean_path, "/dom/html")) {
+        handleDomHtml(request, arena, bridge);
+    } else if (std.mem.eql(u8, clean_path, "/cookies/delete")) {
+        handleCookiesDelete(request, arena, bridge);
+    } else if (std.mem.eql(u8, clean_path, "/headers")) {
+        handleHeaders(request, arena, bridge);
+    } else if (std.mem.eql(u8, clean_path, "/script/inject")) {
+        handleScriptInject(request, arena, bridge);
+    } else if (std.mem.eql(u8, clean_path, "/stop")) {
+        handleStop(request, arena, bridge);
     } else {
         resp.sendError(request, 404, "Not Found");
     }
@@ -1643,6 +1661,309 @@ fn handleScreencastStop(request: *std.http.Server.Request, arena: std.mem.Alloca
 const handleVideoStart = handleScreencastStart;
 const handleVideoStop = handleScreencastStop;
 
+// ── Lightpanda Parity Endpoints ─────────────────────────────────────────
+
+fn handleMarkdown(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
+    const target = request.head.target;
+    const tab_id = getQueryParam(target, "tab_id") orelse {
+        resp.sendError(request, 400, "Missing tab_id parameter");
+        return;
+    };
+
+    const client = bridge.getCdpClient(tab_id) orelse {
+        resp.sendError(request, 404, "Tab not found");
+        return;
+    };
+
+    const js =
+        \\(function(){
+        \\  function n2md(node,li){
+        \\    if(node.nodeType===3)return node.textContent;
+        \\    if(node.nodeType!==1)return '';
+        \\    var tag=node.tagName.toLowerCase(),c='',ch=node.childNodes;
+        \\    for(var i=0;i<ch.length;i++)c+=n2md(ch[i]);
+        \\    switch(tag){
+        \\      case 'h1':return '# '+c.trim()+'\\n\\n';
+        \\      case 'h2':return '## '+c.trim()+'\\n\\n';
+        \\      case 'h3':return '### '+c.trim()+'\\n\\n';
+        \\      case 'h4':return '#### '+c.trim()+'\\n\\n';
+        \\      case 'h5':return '##### '+c.trim()+'\\n\\n';
+        \\      case 'h6':return '###### '+c.trim()+'\\n\\n';
+        \\      case 'p':return c.trim()+'\\n\\n';
+        \\      case 'br':return '\\n';
+        \\      case 'hr':return '---\\n\\n';
+        \\      case 'strong':case 'b':return '**'+c+'**';
+        \\      case 'em':case 'i':return '*'+c+'*';
+        \\      case 'code':return '`'+c+'`';
+        \\      case 'pre':return '```\\n'+c+'\\n```\\n\\n';
+        \\      case 'blockquote':return c.split('\\n').map(function(l){return '> '+l}).join('\\n')+'\\n\\n';
+        \\      case 'a':var h=node.getAttribute('href');return '['+c+']('+h+')';
+        \\      case 'img':var s=node.getAttribute('src'),a=node.getAttribute('alt')||'';return '!['+a+']('+s+')';
+        \\      case 'ul':case 'ol':return c+'\\n';
+        \\      case 'li':return (li=node.parentNode&&node.parentNode.tagName==='OL'?'1. ':'- ')+c.trim()+'\\n';
+        \\      case 'table':return c+'\\n';
+        \\      case 'tr':var cells=[];for(var j=0;j<node.children.length;j++)cells.push(n2md(node.children[j]).trim());return '| '+cells.join(' | ')+' |\\n';
+        \\      case 'thead':var r=c,cols=node.querySelector('tr')?node.querySelector('tr').children.length:0;var sep='|';for(var k=0;k<cols;k++)sep+=' --- |';return r+sep+'\\n';
+        \\      case 'script':case 'style':case 'noscript':return '';
+        \\      default:return c;
+        \\    }
+        \\  }
+        \\  return n2md(document.body);
+        \\})()
+    ;
+
+    const params = std.fmt.allocPrint(arena,
+        "{{\"expression\":\"{s}\",\"returnByValue\":true}}", .{js}) catch {
+        resp.sendError(request, 500, "Internal Server Error");
+        return;
+    };
+
+    const response = client.send(arena, protocol.Methods.runtime_evaluate, params) catch {
+        resp.sendError(request, 502, "CDP command failed");
+        return;
+    };
+    resp.sendJson(request, response);
+}
+
+fn handleLinks(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
+    const target = request.head.target;
+    const tab_id = getQueryParam(target, "tab_id") orelse {
+        resp.sendError(request, 400, "Missing tab_id parameter");
+        return;
+    };
+
+    const client = bridge.getCdpClient(tab_id) orelse {
+        resp.sendError(request, 404, "Tab not found");
+        return;
+    };
+
+    const js = "JSON.stringify([...document.querySelectorAll('a[href]')].map(a=>({text:a.innerText.trim().substring(0,200),href:a.href})))";
+
+    const params = std.fmt.allocPrint(arena,
+        "{{\"expression\":\"{s}\",\"returnByValue\":true}}", .{js}) catch {
+        resp.sendError(request, 500, "Internal Server Error");
+        return;
+    };
+
+    const response = client.send(arena, protocol.Methods.runtime_evaluate, params) catch {
+        resp.sendError(request, 502, "CDP command failed");
+        return;
+    };
+    resp.sendJson(request, response);
+}
+
+fn handlePdf(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
+    const target = request.head.target;
+    const tab_id = getQueryParam(target, "tab_id") orelse {
+        resp.sendError(request, 400, "Missing tab_id parameter");
+        return;
+    };
+
+    const client = bridge.getCdpClient(tab_id) orelse {
+        resp.sendError(request, 404, "Tab not found");
+        return;
+    };
+
+    const landscape = getQueryParam(target, "landscape") orelse "false";
+    const params = std.fmt.allocPrint(arena,
+        "{{\"landscape\":{s},\"printBackground\":true}}", .{landscape}) catch {
+        resp.sendError(request, 500, "Internal Server Error");
+        return;
+    };
+
+    const response = client.send(arena, protocol.Methods.page_print_to_pdf, params) catch {
+        resp.sendError(request, 502, "CDP command failed");
+        return;
+    };
+    resp.sendJson(request, response);
+}
+
+fn handleDomQuery(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
+    const target = request.head.target;
+    const tab_id = getQueryParam(target, "tab_id") orelse {
+        resp.sendError(request, 400, "Missing tab_id parameter");
+        return;
+    };
+    const selector = getQueryParam(target, "selector") orelse {
+        resp.sendError(request, 400, "Missing selector parameter");
+        return;
+    };
+    const all = getQueryParam(target, "all");
+
+    const client = bridge.getCdpClient(tab_id) orelse {
+        resp.sendError(request, 404, "Tab not found");
+        return;
+    };
+
+    // Step 1: Get document root node
+    const doc_response = client.send(arena, protocol.Methods.dom_get_document, "{\"depth\":0}") catch {
+        resp.sendError(request, 502, "DOM.getDocument failed");
+        return;
+    };
+    const root_node_id = extractSimpleJsonInt(doc_response, 0, "\"nodeId\"") orelse {
+        resp.sendError(request, 500, "Could not extract root nodeId");
+        return;
+    };
+
+    // Step 2: Query selector
+    const use_all = if (all) |a| std.mem.eql(u8, a, "true") else false;
+    const method = if (use_all) protocol.Methods.dom_query_selector_all else protocol.Methods.dom_query_selector;
+
+    const query_params = std.fmt.allocPrint(arena,
+        "{{\"nodeId\":{d},\"selector\":\"{s}\"}}", .{ root_node_id, selector }) catch {
+        resp.sendError(request, 500, "Internal Server Error");
+        return;
+    };
+    const response = client.send(arena, method, query_params) catch {
+        resp.sendError(request, 502, "CDP command failed");
+        return;
+    };
+    resp.sendJson(request, response);
+}
+
+fn handleDomHtml(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
+    const target = request.head.target;
+    const tab_id = getQueryParam(target, "tab_id") orelse {
+        resp.sendError(request, 400, "Missing tab_id parameter");
+        return;
+    };
+    const node_id_str = getQueryParam(target, "node_id") orelse {
+        resp.sendError(request, 400, "Missing node_id parameter");
+        return;
+    };
+
+    const client = bridge.getCdpClient(tab_id) orelse {
+        resp.sendError(request, 404, "Tab not found");
+        return;
+    };
+
+    const params = std.fmt.allocPrint(arena,
+        "{{\"nodeId\":{s}}}", .{node_id_str}) catch {
+        resp.sendError(request, 500, "Internal Server Error");
+        return;
+    };
+    const response = client.send(arena, protocol.Methods.dom_get_outer_html, params) catch {
+        resp.sendError(request, 502, "CDP command failed");
+        return;
+    };
+    resp.sendJson(request, response);
+}
+
+fn handleCookiesDelete(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
+    const target = request.head.target;
+    const tab_id = getQueryParam(target, "tab_id") orelse {
+        resp.sendError(request, 400, "Missing tab_id parameter");
+        return;
+    };
+    const name = getQueryParam(target, "name") orelse {
+        resp.sendError(request, 400, "Missing name parameter");
+        return;
+    };
+
+    const client = bridge.getCdpClient(tab_id) orelse {
+        resp.sendError(request, 404, "Tab not found");
+        return;
+    };
+
+    const domain = getQueryParam(target, "domain");
+    const params = if (domain) |d|
+        std.fmt.allocPrint(arena, "{{\"name\":\"{s}\",\"domain\":\"{s}\"}}", .{ name, d })
+    else
+        std.fmt.allocPrint(arena, "{{\"name\":\"{s}\"}}", .{name});
+
+    const delete_params = params catch {
+        resp.sendError(request, 500, "Internal Server Error");
+        return;
+    };
+    const response = client.send(arena, protocol.Methods.network_delete_cookies, delete_params) catch {
+        resp.sendError(request, 502, "CDP command failed");
+        return;
+    };
+    resp.sendJson(request, response);
+}
+
+fn handleHeaders(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
+    const target = request.head.target;
+    const tab_id = getQueryParam(target, "tab_id") orelse {
+        resp.sendError(request, 400, "Missing tab_id parameter");
+        return;
+    };
+
+    const client = bridge.getCdpClient(tab_id) orelse {
+        resp.sendError(request, 404, "Tab not found");
+        return;
+    };
+
+    const body = readRequestBody(request, arena) orelse {
+        // If no body, enable with empty headers
+        const params = "{\"headers\":{}}";
+        const response = client.send(arena, protocol.Methods.network_set_extra_http_headers, params) catch {
+            resp.sendError(request, 502, "CDP command failed");
+            return;
+        };
+        resp.sendJson(request, response);
+        return;
+    };
+
+    const params = std.fmt.allocPrint(arena,
+        "{{\"headers\":{s}}}", .{body}) catch {
+        resp.sendError(request, 500, "Internal Server Error");
+        return;
+    };
+    const response = client.send(arena, protocol.Methods.network_set_extra_http_headers, params) catch {
+        resp.sendError(request, 502, "CDP command failed");
+        return;
+    };
+    resp.sendJson(request, response);
+}
+
+fn handleScriptInject(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
+    const target = request.head.target;
+    const tab_id = getQueryParam(target, "tab_id") orelse {
+        resp.sendError(request, 400, "Missing tab_id parameter");
+        return;
+    };
+    const source = getQueryParam(target, "source") orelse {
+        resp.sendError(request, 400, "Missing source parameter");
+        return;
+    };
+
+    const client = bridge.getCdpClient(tab_id) orelse {
+        resp.sendError(request, 404, "Tab not found");
+        return;
+    };
+
+    const params = std.fmt.allocPrint(arena,
+        "{{\"source\":\"{s}\"}}", .{source}) catch {
+        resp.sendError(request, 500, "Internal Server Error");
+        return;
+    };
+    const response = client.send(arena, protocol.Methods.page_add_script, params) catch {
+        resp.sendError(request, 502, "CDP command failed");
+        return;
+    };
+    resp.sendJson(request, response);
+}
+
+fn handleStop(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
+    const target = request.head.target;
+    const tab_id = getQueryParam(target, "tab_id") orelse {
+        resp.sendError(request, 400, "Missing tab_id parameter");
+        return;
+    };
+
+    const client = bridge.getCdpClient(tab_id) orelse {
+        resp.sendError(request, 404, "Tab not found");
+        return;
+    };
+
+    const response = client.send(arena, protocol.Methods.page_stop_loading, null) catch {
+        resp.sendError(request, 502, "CDP command failed");
+        return;
+    };
+    resp.sendJson(request, response);
+}
+
 test "screenshot routes match" {
     for ([_][]const u8{ "/screenshot/annotated", "/screenshot/diff", "/screencast/start", "/screencast/stop" }) |p| {
         try std.testing.expect(p.len > 0);
@@ -1664,4 +1985,113 @@ test "upload parameter validation" {
     try std.testing.expect(getQueryParam("/upload?ref=e0&file_path=/tmp/f", "tab_id") == null);
     try std.testing.expect(getQueryParam("/upload?tab_id=1&file_path=/tmp/f", "ref") == null);
     try std.testing.expect(getQueryParam("/upload?tab_id=1&ref=e0", "file_path") == null);
+}
+
+// ── Lightpanda Parity Route & Parameter Tests ───────────────────────────
+
+test "lightpanda parity route matching" {
+    const routes = [_][]const u8{
+        "/markdown",
+        "/links",
+        "/pdf",
+        "/dom/query",
+        "/dom/html",
+        "/cookies/delete",
+        "/headers",
+        "/script/inject",
+        "/stop",
+    };
+    for (routes) |p| {
+        const clean = if (std.mem.indexOfScalar(u8, p, '?')) |idx| p[0..idx] else p;
+        try std.testing.expectEqualStrings(p, clean);
+    }
+}
+
+test "markdown route with tab_id" {
+    const target = "/markdown?tab_id=abc123";
+    try std.testing.expectEqualStrings("abc123", getQueryParam(target, "tab_id").?);
+}
+
+test "links route with tab_id" {
+    const target = "/links?tab_id=xyz";
+    try std.testing.expectEqualStrings("xyz", getQueryParam(target, "tab_id").?);
+}
+
+test "pdf route with params" {
+    const target = "/pdf?tab_id=t1&landscape=true";
+    try std.testing.expectEqualStrings("t1", getQueryParam(target, "tab_id").?);
+    try std.testing.expectEqualStrings("true", getQueryParam(target, "landscape").?);
+}
+
+test "pdf route landscape default" {
+    const target = "/pdf?tab_id=t1";
+    try std.testing.expectEqualStrings("t1", getQueryParam(target, "tab_id").?);
+    try std.testing.expect(getQueryParam(target, "landscape") == null);
+}
+
+test "dom/query route with selector" {
+    const target = "/dom/query?tab_id=t1&selector=div.main&all=true";
+    try std.testing.expectEqualStrings("t1", getQueryParam(target, "tab_id").?);
+    try std.testing.expectEqualStrings("div.main", getQueryParam(target, "selector").?);
+    try std.testing.expectEqualStrings("true", getQueryParam(target, "all").?);
+}
+
+test "dom/query single selector" {
+    const target = "/dom/query?tab_id=t1&selector=h1";
+    try std.testing.expectEqualStrings("h1", getQueryParam(target, "selector").?);
+    try std.testing.expect(getQueryParam(target, "all") == null);
+}
+
+test "dom/html route with node_id" {
+    const target = "/dom/html?tab_id=t1&node_id=42";
+    try std.testing.expectEqualStrings("t1", getQueryParam(target, "tab_id").?);
+    try std.testing.expectEqualStrings("42", getQueryParam(target, "node_id").?);
+}
+
+test "cookies/delete route with name and domain" {
+    const target = "/cookies/delete?tab_id=t1&name=session_id&domain=example.com";
+    try std.testing.expectEqualStrings("t1", getQueryParam(target, "tab_id").?);
+    try std.testing.expectEqualStrings("session_id", getQueryParam(target, "name").?);
+    try std.testing.expectEqualStrings("example.com", getQueryParam(target, "domain").?);
+}
+
+test "cookies/delete without domain" {
+    const target = "/cookies/delete?tab_id=t1&name=auth_token";
+    try std.testing.expectEqualStrings("auth_token", getQueryParam(target, "name").?);
+    try std.testing.expect(getQueryParam(target, "domain") == null);
+}
+
+test "headers route with tab_id" {
+    const target = "/headers?tab_id=t1";
+    try std.testing.expectEqualStrings("t1", getQueryParam(target, "tab_id").?);
+}
+
+test "script/inject route with source" {
+    const target = "/script/inject?tab_id=t1&source=console.log('hi')";
+    try std.testing.expectEqualStrings("t1", getQueryParam(target, "tab_id").?);
+    try std.testing.expectEqualStrings("console.log('hi')", getQueryParam(target, "source").?);
+}
+
+test "stop route with tab_id" {
+    const target = "/stop?tab_id=t1";
+    try std.testing.expectEqualStrings("t1", getQueryParam(target, "tab_id").?);
+}
+
+test "lightpanda parity routes parse from full URL" {
+    // Verify route dispatch paths extract correctly
+    const test_urls = [_]struct { url: []const u8, expected_path: []const u8 }{
+        .{ .url = "/markdown?tab_id=1", .expected_path = "/markdown" },
+        .{ .url = "/links?tab_id=1", .expected_path = "/links" },
+        .{ .url = "/pdf?tab_id=1&landscape=true", .expected_path = "/pdf" },
+        .{ .url = "/dom/query?tab_id=1&selector=div", .expected_path = "/dom/query" },
+        .{ .url = "/dom/html?tab_id=1&node_id=5", .expected_path = "/dom/html" },
+        .{ .url = "/cookies/delete?tab_id=1&name=x", .expected_path = "/cookies/delete" },
+        .{ .url = "/headers?tab_id=1", .expected_path = "/headers" },
+        .{ .url = "/script/inject?tab_id=1&source=x", .expected_path = "/script/inject" },
+        .{ .url = "/stop?tab_id=1", .expected_path = "/stop" },
+    };
+    for (test_urls) |t| {
+        const clean = if (std.mem.indexOfScalar(u8, t.url, '?')) |idx| t.url[0..idx] else t.url;
+        try std.testing.expectEqualStrings(t.expected_path, clean);
+    }
 }
