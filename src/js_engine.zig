@@ -391,16 +391,16 @@ const dom_shim_js =
     \\
     \\  // --- navigator ---
     \\  globalThis.navigator = {
-    \\    userAgent: 'browdie-fetch/0.1',
+    \\    userAgent: 'kuri-fetch/0.1',
     \\    language: 'en-US',
     \\    languages: ['en-US', 'en'],
-    \\    platform: 'browdie',
+    \\    platform: 'kuri',
     \\    cookieEnabled: false,
     \\    onLine: true,
     \\    hardwareConcurrency: 1,
     \\    maxTouchPoints: 0,
     \\    vendor: '',
-    \\    appName: 'browdie',
+    \\    appName: 'kuri',
     \\    appVersion: '0.1',
     \\    product: 'Gecko',
     \\    productSub: '20030107',
@@ -639,7 +639,7 @@ test "DOM stubs: navigator properties" {
     const output = try evalHtmlScripts(html, std.testing.allocator);
     defer if (output) |o| std.testing.allocator.free(o);
     try std.testing.expect(output != null);
-    try std.testing.expectEqualStrings("browdie-fetch/0.1", output.?);
+    try std.testing.expectEqualStrings("kuri-fetch/0.1", output.?);
 }
 
 test "DOM stubs: document.createElement" {

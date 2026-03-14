@@ -11,7 +11,7 @@ pub fn main() !void {
 
     const cfg = config.load();
 
-    std.log.info("agentic-browdie v0.1.0", .{});
+    std.log.info("kuri v0.1.0", .{});
     std.log.info("listening on {s}:{d}", .{ cfg.host, cfg.port });
 
     // Chrome lifecycle management

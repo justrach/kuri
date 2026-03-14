@@ -39,7 +39,7 @@ pub fn main() !void {
             opts.user_agent = args[i];
         } else if (std.mem.eql(u8, args[i], "--version") or std.mem.eql(u8, args[i], "-V")) {
             const stdout = std.fs.File.stdout();
-            stdout.writeAll("browdie-fetch " ++ version ++ "\n") catch {};
+            stdout.writeAll("kuri-fetch " ++ version ++ "\n") catch {};
             return;
         } else if (std.mem.eql(u8, args[i], "--help") or std.mem.eql(u8, args[i], "-h")) {
             printUsage();
@@ -48,7 +48,7 @@ pub fn main() !void {
             opts.url = args[i];
         } else {
             std.debug.print("error: unknown flag '{s}'\n", .{args[i]});
-            std.debug.print("Run 'browdie-fetch --help' for usage.\n", .{});
+            std.debug.print("Run 'kuri-fetch --help' for usage.\n", .{});
             std.process.exit(1);
         }
     }
@@ -215,7 +215,7 @@ const Options = struct {
     quiet: bool = false,
     no_color: bool = false,
     output_file: ?[]const u8 = null,
-    user_agent: []const u8 = "browdie-fetch/" ++ version,
+    user_agent: []const u8 = "kuri-fetch/" ++ version,
 };
 
 const DumpMode = enum { markdown, html, links, text, json };
@@ -231,17 +231,17 @@ fn parseDumpMode(s: []const u8) ?DumpMode {
 
 fn fatal(msg: []const u8) noreturn {
     std.debug.print("error: {s}\n", .{msg});
-    std.debug.print("Run 'browdie-fetch --help' for usage.\n", .{});
+    std.debug.print("Run 'kuri-fetch --help' for usage.\n", .{});
     std.process.exit(1);
 }
 
 fn printUsage() void {
     std.debug.print(
         \\
-        \\  browdie-fetch 🧁 — lightweight HTTP fetcher (no Chrome needed)
+        \\  kuri 🌰 — lightweight HTTP fetcher (no Chrome needed)
         \\
         \\  USAGE
-        \\    browdie-fetch [options] <url>
+        \\    kuri-fetch [options] <url>
         \\
         \\  OUTPUT FORMATS
         \\    -d, --dump <fmt>   Output format (default: markdown)
@@ -262,11 +262,11 @@ fn printUsage() void {
         \\    -h, --help         Show this help
         \\
         \\  EXAMPLES
-        \\    browdie-fetch https://example.com
-        \\    browdie-fetch -d links https://news.ycombinator.com
-        \\    browdie-fetch --json --js https://example.com
-        \\    browdie-fetch -o page.md https://example.com
-        \\    browdie-fetch -d text https://example.com | wc -w
+        \\    kuri-fetch https://example.com
+        \\    kuri-fetch -d links https://news.ycombinator.com
+        \\    kuri-fetch --json --js https://example.com
+        \\    kuri-fetch -o page.md https://example.com
+        \\    kuri-fetch -d text https://example.com | wc -w
         \\
         \\  ENVIRONMENT
         \\    NO_COLOR   Disable colors (https://no-color.org)

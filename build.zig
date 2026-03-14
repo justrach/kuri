@@ -6,7 +6,7 @@ pub fn build(b: *std.Build) void {
 
     // Main executable
     const exe = b.addExecutable(.{
-        .name = "agentic-browdie",
+        .name = "kuri",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
             .target = target,
@@ -49,7 +49,7 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(merjs_e2e);
     const run_merjs_e2e = b.addRunArtifact(merjs_e2e);
-    const merjs_e2e_step = b.step("merjs-e2e", "Run merjs E2E tests (requires merjs + browdie + Chrome live)");
+    const merjs_e2e_step = b.step("merjs-e2e", "Run merjs E2E tests (requires merjs + kuri + Chrome live)");
     merjs_e2e_step.dependOn(&run_merjs_e2e.step);
 
     // QuickJS dependency
@@ -58,7 +58,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    // browdie-fetch standalone CLI (no Chrome dependency)
+    // kuri-fetch standalone CLI (no Chrome dependency)
     const fetch_mod = b.createModule(.{
         .root_source_file = b.path("src/fetch_main.zig"),
         .target = target,
@@ -66,7 +66,7 @@ pub fn build(b: *std.Build) void {
     });
     fetch_mod.addImport("quickjs", quickjs_dep.module("quickjs"));
     const fetch_exe = b.addExecutable(.{
-        .name = "browdie-fetch",
+        .name = "kuri-fetch",
         .root_module = fetch_mod,
     });
     fetch_exe.linkLibrary(quickjs_dep.artifact("quickjs-ng"));
@@ -76,10 +76,10 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| {
         run_fetch.addArgs(args);
     }
-    const fetch_step = b.step("fetch", "Run browdie-fetch standalone CLI");
+    const fetch_step = b.step("fetch", "Run kuri-fetch standalone CLI");
     fetch_step.dependOn(&run_fetch.step);
 
-    // browdie-fetch tests
+    // kuri-fetch tests
     const fetch_test_mod = b.createModule(.{
         .root_source_file = b.path("src/fetch_main.zig"),
         .target = target,
@@ -91,12 +91,42 @@ pub fn build(b: *std.Build) void {
     });
     fetch_tests.linkLibrary(quickjs_dep.artifact("quickjs-ng"));
     const run_fetch_tests = b.addRunArtifact(fetch_tests);
-    const fetch_test_step = b.step("test-fetch", "Run browdie-fetch unit tests");
+    const fetch_test_step = b.step("test-fetch", "Run kuri-fetch unit tests");
     fetch_test_step.dependOn(&run_fetch_tests.step);
+
+    // kuri-browse interactive terminal browser
+    const browse_exe = b.addExecutable(.{
+        .name = "kuri-browse",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/browse_main.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    b.installArtifact(browse_exe);
+    const run_browse = b.addRunArtifact(browse_exe);
+    run_browse.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        run_browse.addArgs(args);
+    }
+    const browse_step = b.step("browse", "Run kuri-browse interactive terminal browser");
+    browse_step.dependOn(&run_browse.step);
+
+    // kuri-browse tests
+    const browse_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/browse_main.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_browse_tests = b.addRunArtifact(browse_tests);
+    const browse_test_step = b.step("test-browse", "Run kuri-browse unit tests");
+    browse_test_step.dependOn(&run_browse_tests.step);
 
     // Benchmarks
     const bench = b.addExecutable(.{
-        .name = "browdie-bench",
+        .name = "kuri-bench",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/bench.zig"),
             .target = target,
