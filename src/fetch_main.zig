@@ -1,6 +1,7 @@
 const std = @import("std");
 const validator = @import("crawler/validator.zig");
 const markdown = @import("crawler/markdown.zig");
+const js_engine = @import("js_engine.zig");
 
 pub fn main() !void {
     var gpa_impl: std.heap.GeneralPurposeAllocator(.{}) = .init;
@@ -12,6 +13,7 @@ pub fn main() !void {
 
     var dump_mode: DumpMode = .markdown;
     var url: ?[]const u8 = null;
+    var run_js = false;
 
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
@@ -19,6 +21,8 @@ pub fn main() !void {
             i += 1;
             if (i >= args.len) fatal("--dump requires a value: markdown|html|links|text");
             dump_mode = parseDumpMode(args[i]) orelse fatal("invalid --dump value: use markdown|html|links|text");
+        } else if (std.mem.eql(u8, args[i], "--js") or std.mem.eql(u8, args[i], "-j")) {
+            run_js = true;
         } else if (std.mem.eql(u8, args[i], "--help") or std.mem.eql(u8, args[i], "-h")) {
             printUsage();
             return;
@@ -44,10 +48,22 @@ pub fn main() !void {
     defer arena_impl.deinit();
     const arena = arena_impl.allocator();
 
-    const html = fetchHttp(arena, target_url) catch |err| {
+    var html = fetchHttp(arena, target_url) catch |err| {
         std.debug.print("fetch failed: {s}\n", .{@errorName(err)});
         std.process.exit(1);
     };
+
+    // Optional: run inline <script> tags through QuickJS
+    if (run_js) {
+        if (js_engine.evalHtmlScripts(html, arena)) |maybe_output| {
+            if (maybe_output) |js_output| {
+                if (js_output.len > 0) {
+                    const combined = std.fmt.allocPrint(arena, "{s}\n<!-- browdie-js-output -->\n{s}", .{ html, js_output }) catch html;
+                    html = combined;
+                }
+            }
+        } else |_| {}
+    }
 
     const stdout = std.fs.File.stdout();
 
@@ -90,7 +106,7 @@ fn printUsage() void {
     std.debug.print(
         \\browdie-fetch — standalone HTTP fetcher (no Chrome needed)
         \\
-        \\Usage: browdie-fetch [--dump markdown|html|links|text] URL
+        \\Usage: browdie-fetch [--dump markdown|html|links|text] [--js] URL
         \\
         \\Options:
         \\  --dump, -d   Output format (default: markdown)
@@ -98,6 +114,7 @@ fn printUsage() void {
         \\               html      Raw HTML
         \\               links     Extract all <a href> links
         \\               text      Plain text (tags stripped)
+        \\  --js, -j     Execute inline <script> tags via QuickJS
         \\  --help, -h   Show this help
         \\
     , .{});
@@ -362,4 +379,5 @@ test "findAttrValue not found" {
 test {
     _ = @import("crawler/validator.zig");
     _ = @import("crawler/markdown.zig");
+    _ = @import("js_engine.zig");
 }
