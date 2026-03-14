@@ -83,18 +83,25 @@ Measured on Apple M3 Pro, macOS 15.3. `kuri` built with `-Doptimize=ReleaseFast`
 
 ### vs agent-browser (Rust)
 
+Both are native binaries — agent-browser is Rust, kuri is Zig. Measured with agent-browser v0.20.0.
+
 ```
                         agent-browser        kuri             delta
                         (Rust, v0.20)        (Zig, v0.2)
 ─────────────────────────────────────────────────────────────────────
-Binary size             6.0 MB               464 KB           13× smaller
-Cold start              3.4 ms               3.0 ms           ~same
-Install size            33 MB (npm)          3.3 MB (3 bins)  10× smaller
-node_modules            34 files             0 files          ∞× less
-Standalone fetcher      ❌                    ✅ kuri-fetch
-Terminal browser        ❌                    ✅ kuri-browse
-JS engine (no Chrome)   ❌                    ✅ QuickJS
+CLI binary              6.0 MB               464 KB           13× smaller
+Cold start (--version)  3.4 ms               3.0 ms           ~same
+Install (npm)           33 MB                3.3 MB (3 bins)  10× smaller
+Commands                140+                 40+ endpoints    different focus
+Standalone fetcher      ❌                    ✅ kuri-fetch     no Chrome needed
+Terminal browser        ❌                    ✅ kuri-browse    interactive REPL
+JS engine (no Chrome)   ❌                    ✅ QuickJS        SSR-style DOM
+HTTP API server         ❌ (CLI only)         ✅ kuri           thread-per-conn
 ```
+
+> **Note:** agent-browser has significantly more browser automation commands (140+) including
+> drag-and-drop, file upload/download, iOS simulator support, auth vault, and video recording.
+> Kuri focuses on being a lightweight HTTP API server for AI agent integration.
 
 ### vs Playwright / Lightpanda
 
