@@ -427,6 +427,7 @@ See [CONTRIBUTORS.md](CONTRIBUTORS.md) for guidelines.
 | [Pinchtab](https://github.com/pinchtab/pinchtab) | Browser control architecture for AI agents |
 | [Pathik](https://github.com/justrach/pathik) | High-performance crawling patterns |
 | [QuickJS-ng](https://github.com/nicklausw/quickjs-ng) via [mitchellh/zig-quickjs-ng](https://github.com/mitchellh/zig-quickjs-ng) | JS engine for `kuri-fetch` |
+| [Lightpanda](https://github.com/lightpanda-io/browser) | Zig-native headless browser pioneer, CDP compatibility patterns |
 | [Zig 0.15.2](https://ziglang.org) | The whole stack |
 
 ## License
