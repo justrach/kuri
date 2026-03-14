@@ -94,6 +94,36 @@ pub fn build(b: *std.Build) void {
     const fetch_test_step = b.step("test-fetch", "Run browdie-fetch unit tests");
     fetch_test_step.dependOn(&run_fetch_tests.step);
 
+    // browdie-browse interactive terminal browser
+    const browse_exe = b.addExecutable(.{
+        .name = "browdie-browse",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/browse_main.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    b.installArtifact(browse_exe);
+    const run_browse = b.addRunArtifact(browse_exe);
+    run_browse.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        run_browse.addArgs(args);
+    }
+    const browse_step = b.step("browse", "Run browdie-browse interactive terminal browser");
+    browse_step.dependOn(&run_browse.step);
+
+    // browdie-browse tests
+    const browse_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/browse_main.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_browse_tests = b.addRunArtifact(browse_tests);
+    const browse_test_step = b.step("test-browse", "Run browdie-browse unit tests");
+    browse_test_step.dependOn(&run_browse_tests.step);
+
     // Benchmarks
     const bench = b.addExecutable(.{
         .name = "browdie-bench",
