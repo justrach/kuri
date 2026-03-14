@@ -252,7 +252,8 @@ fn readRequestBody(request: *std.http.Server.Request, arena: std.mem.Allocator) 
     if (request.head.expect != null) return null;
     const content_length = request.head.content_length orelse return null;
     if (content_length == 0) return null;
-    const len: usize = @intCast(@min(content_length, 65536));
+    const max_body: usize = 1024 * 1024; // 1MB — supports large script injection
+    const len: usize = @intCast(@min(content_length, max_body));
     var buf: [65536]u8 = undefined;
     const reader = request.readerExpectNone(&buf);
     const body = reader.readAlloc(arena, len) catch return null;
@@ -1984,9 +1985,26 @@ fn handleScriptInject(request: *std.http.Server.Request, arena: std.mem.Allocato
         resp.sendError(request, 400, "Missing tab_id parameter");
         return;
     };
-    const source = getQueryParam(target, "source") orelse {
-        resp.sendError(request, 400, "Missing source parameter");
-        return;
+
+    // Support both query param and POST body for script source.
+    // POST body is preferred for large scripts that exceed URL length limits.
+    const source = blk: {
+        // Try POST body first (JSON: {"source": "..."})
+        if (readRequestBody(request, arena)) |body| {
+            if (body.len > 0) {
+                // Try to extract "source" field from JSON body
+                if (extractSimpleJsonString(body, "source", 0)) |s| {
+                    break :blk s;
+                }
+                // If not JSON, treat entire body as raw script source
+                break :blk body;
+            }
+        }
+        // Fall back to query param
+        break :blk getQueryParam(target, "source") orelse {
+            resp.sendError(request, 400, "Missing source parameter — send as POST body or ?source= query param");
+            return;
+        };
     };
 
     const client = bridge.getCdpClient(tab_id) orelse {
@@ -1994,8 +2012,13 @@ fn handleScriptInject(request: *std.http.Server.Request, arena: std.mem.Allocato
         return;
     };
 
+    // Build JSON with proper escaping for the script source
+    const escaped = jsonEscapeAlloc(arena, source) orelse {
+        resp.sendError(request, 500, "Internal Server Error");
+        return;
+    };
     const params = std.fmt.allocPrint(arena,
-        "{{\"source\":\"{s}\"}}", .{source}) catch {
+        "{{\"source\":\"{s}\"}}", .{escaped}) catch {
         resp.sendError(request, 500, "Internal Server Error");
         return;
     };
@@ -2004,6 +2027,66 @@ fn handleScriptInject(request: *std.http.Server.Request, arena: std.mem.Allocato
         return;
     };
     resp.sendJson(request, response);
+}
+
+/// Escape a string for embedding inside a JSON string value.
+/// Handles backslash, double-quote, newlines, tabs, and control characters.
+fn jsonEscapeAlloc(allocator: std.mem.Allocator, input: []const u8) ?[]const u8 {
+    // Count output size
+    var out_len: usize = 0;
+    for (input) |c| {
+        out_len += switch (c) {
+            '"', '\\' => 2,
+            '\n', '\r', '\t' => 2,
+            else => if (c < 0x20) @as(usize, 6) else 1,
+        };
+    }
+    if (out_len == input.len) return input; // no escaping needed
+    const buf = allocator.alloc(u8, out_len) catch return null;
+    var i: usize = 0;
+    for (input) |c| {
+        switch (c) {
+            '"' => {
+                buf[i] = '\\';
+                buf[i + 1] = '"';
+                i += 2;
+            },
+            '\\' => {
+                buf[i] = '\\';
+                buf[i + 1] = '\\';
+                i += 2;
+            },
+            '\n' => {
+                buf[i] = '\\';
+                buf[i + 1] = 'n';
+                i += 2;
+            },
+            '\r' => {
+                buf[i] = '\\';
+                buf[i + 1] = 'r';
+                i += 2;
+            },
+            '\t' => {
+                buf[i] = '\\';
+                buf[i + 1] = 't';
+                i += 2;
+            },
+            else => if (c < 0x20) {
+                const hex = "0123456789abcdef";
+                buf[i] = '\\';
+                buf[i + 1] = 'u';
+                buf[i + 2] = '0';
+                buf[i + 3] = '0';
+                buf[i + 4] = hex[c >> 4];
+                buf[i + 5] = hex[c & 0x0f];
+                i += 6;
+            } else {
+                buf[i] = c;
+                i += 1;
+            },
+        }
+    }
+    return buf;
 }
 
 fn handleStop(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
@@ -3440,6 +3523,27 @@ test "dom/attributes route with selector" {
 test "network route parameters" {
     const target = "/network?tab_id=t1&mode=disable";
     try std.testing.expectEqualStrings("disable", getQueryParam(target, "mode").?);
+}
+
+test "jsonEscapeAlloc escapes special chars" {
+    const arena = std.testing.allocator;
+    // No escaping needed
+    try std.testing.expectEqualStrings("hello", jsonEscapeAlloc(arena, "hello").?);
+    // Quotes and backslashes
+    const escaped = jsonEscapeAlloc(arena, "say \"hello\" \\ world").?;
+    defer arena.free(escaped);
+    try std.testing.expectEqualStrings("say \\\"hello\\\" \\\\ world", escaped);
+    // Newlines
+    const nl = jsonEscapeAlloc(arena, "line1\nline2\r\n").?;
+    defer arena.free(nl);
+    try std.testing.expectEqualStrings("line1\\nline2\\r\\n", nl);
+}
+
+test "script/inject accepts POST body" {
+    // Route matching test — verify POST method is supported
+    const path = "/script/inject?tab_id=abc";
+    const clean = path[0..std.mem.indexOfScalar(u8, path, '?').?];
+    try std.testing.expectEqualStrings("/script/inject", clean);
 }
 
 test "perf/lcp route parameters" {

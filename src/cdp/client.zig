@@ -111,9 +111,10 @@ pub const CdpClient = struct {
 
         ws.sendText(msg) catch return error.ConnectionRefused;
 
-        // Read responses, buffer events, max 50 attempts
+        // Read responses, buffer events, max 100 attempts
+        // (needs headroom for event-heavy operations like cookies/network)
         var attempts: u32 = 0;
-        while (attempts < 50) : (attempts += 1) {
+        while (attempts < 100) : (attempts += 1) {
             const response = ws.receiveMessageAlloc(allocator, 2 * 1024 * 1024) catch |err| switch (err) {
                 error.ConnectionClosed => return error.ConnectionRefused,
                 else => return error.ConnectionRefused,
