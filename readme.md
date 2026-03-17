@@ -22,6 +22,58 @@ CDP automation · A11y snapshots · HAR recording · Standalone fetcher · Inter
 
 ---
 
+## Why Kuri Wins for Agents
+
+Most browser tooling was built for QA engineers. Kuri is built for agent loops: read the page, keep token cost low, act on stable refs, and move on.
+
+- The product story is not "most commands." It is "useful state from real pages at the lowest model cost."
+- A tiny output only counts if the page actually rendered. Empty-shell output is a failure mode, not a win.
+- The best proof is same-page, same-session, same-tokenizer comparisons.
+
+### Proof on a live page: Google Flights `SIN → TYO`
+
+Same Chrome session, measured with `tiktoken` `cl100k_base`.
+
+| Tool / Mode | Bytes | Tokens | vs `kuri` default | Note |
+|---|---:|---:|---:|---|
+| `kuri snap` (compact, default) | 7,935 | 2,841 | 1.0x | Baseline |
+| `kuri snap --interactive` | 5,129 | 1,888 | 0.7x | Lowest useful output |
+| `kuri snap --semantic` | 7,935 | 2,841 | 1.0x | Same as default |
+| `kuri snap --all` | 67,018 | 29,303 | 10.3x | Full verbose tree |
+| `kuri snap --json` | 156,801 | 49,182 | 17.3x | Old default, too expensive |
+| `kuri snap --text` | 70,517 | 26,583 | 9.4x | Text-heavy dump |
+| `agent-browser snapshot` | 15,880 | 4,591 | 1.6x | More verbose on same page |
+| `agent-browser snapshot -i` | 7,226 | 2,499 | 0.9x | Close, still larger |
+| `lightpanda semantic_tree` | 68,084 | 26,433 | 9.3x | Raw DOM JSON, no useful compression |
+| `lightpanda semantic_tree_text` | 1,909 | 507 | 0.2x | Google Flights did not render; nav shell only |
+
+**How to read this benchmark**
+
+- On the same live page, `kuri` default was **38% leaner** than `agent-browser` (`2,841` vs `4,591` tokens).
+- `kuri --interactive` stayed useful at **1,888 tokens**, which is **25% fewer** than `agent-browser snapshot -i`.
+- Lightpanda's tiny output is not a win here. Google Flights is a JS-heavy SPA, and its smallest result was a failed render with no flight data.
+- kuri's old JSON default was **17.3x more expensive** than the new compact default. The new framing should make that upgrade obvious.
+
+### Small binary, fast start
+
+Measured on Apple M3 Pro, macOS 15.3. `kuri` built with `-Doptimize=ReleaseFast`. `agent-browser` v0.20.0.
+
+```
+                        agent-browser        kuri             delta
+                        (v0.20)              (v0.2)
+─────────────────────────────────────────────────────────────────────
+CLI binary              6.0 MB               464 KB           13× smaller
+Cold start (--version)  3.4 ms               3.0 ms           ~same
+Install (npm)           33 MB                3.3 MB (3 bins)  10× smaller
+Commands                140+                 40+ endpoints    different focus
+Standalone fetcher      ❌                    ✅ kuri-fetch     no Chrome needed
+Terminal browser        ❌                    ✅ kuri-browse    interactive REPL
+JS engine (no Chrome)   ❌                    ✅ QuickJS        SSR-style DOM
+HTTP API server         ❌ (CLI only)         ✅ kuri           thread-per-conn
+```
+
+> agent-browser exposes a broader browser-control surface. Kuri is intentionally narrower: a lightweight HTTP API and CLI stack optimized for agent integration, token economy, and deployment simplicity.
+
 ## The Problem
 
 Every browser automation tool drags in Playwright (~300 MB), a Node.js runtime, and a cascade of npm dependencies. Your AI agent just wants to read a page, click a button, and move on.
@@ -35,26 +87,29 @@ kuri-agent     →  agentic CLI (scriptable Chrome automation + security testing
 ```
 
 ---
-
 ## 📦 Installation
 
-### Pre-built binaries
+### One-line install (macOS / Linux)
 
-Download the latest release for your platform from [GitHub Releases](https://github.com/justrach/kuri/releases/latest).
-
-```bash
-# macOS Apple Silicon
-curl -L https://github.com/justrach/kuri/releases/latest/download/kuri-$(curl -s https://api.github.com/repos/justrach/kuri/releases/latest | grep tag_name | cut -d '"' -f4)-aarch64-macos.tar.gz | tar xz
-
-# macOS Intel
-curl -L https://github.com/justrach/kuri/releases/latest/download/kuri-$(curl -s https://api.github.com/repos/justrach/kuri/releases/latest | grep tag_name | cut -d '"' -f4)-x86_64-macos.tar.gz | tar xz
-
-# Linux amd64
-curl -L https://github.com/justrach/kuri/releases/latest/download/kuri-$(curl -s https://api.github.com/repos/justrach/kuri/releases/latest | grep tag_name | cut -d '"' -f4)-x86_64-linux.tar.gz | tar xz
-
-# Linux arm64
-curl -L https://github.com/justrach/kuri/releases/latest/download/kuri-$(curl -s https://api.github.com/repos/justrach/kuri/releases/latest | grep tag_name | cut -d '"' -f4)-aarch64-linux.tar.gz | tar xz
+```sh
+curl -fsSL https://raw.githubusercontent.com/justrach/kuri/main/install.sh | sh
 ```
+
+Detects your platform, downloads the right binary, installs to `~/.local/bin`.
+macOS binaries are notarized — no Gatekeeper prompt.
+
+### bun / npm
+
+```sh
+bun install -g kuri-agent
+# or: npm install -g kuri-agent
+```
+
+Downloads the correct native binary for your platform at install time.
+
+### Manual
+
+Download the tarball for your platform from [GitHub Releases](https://github.com/justrach/kuri/releases/latest) and unpack it to your `$PATH`.
 
 ### Build from source
 
@@ -64,7 +119,7 @@ Requires [Zig ≥ 0.15.0](https://ziglang.org/download/).
 git clone https://github.com/justrach/kuri.git
 cd kuri
 zig build -Doptimize=ReleaseFast
-# Binaries in zig-out/bin/: kuri, kuri-fetch, kuri-browse
+# Binaries in zig-out/bin/: kuri  kuri-agent  kuri-fetch  kuri-browse
 ```
 
 ---
@@ -109,81 +164,6 @@ curl -s "http://localhost:8080/snapshot?tab_id=ABC123&filter=interactive"
 # → [{"ref":"e0","role":"link","name":"VercelLogotype"},
 #    {"ref":"e1","role":"button","name":"Ask AI"}, ...]
 ```
-
----
-
-## 📊 Benchmarks
-
-Measured on Apple M3 Pro, macOS 15.3. `kuri` built with `-Doptimize=ReleaseFast`. `agent-browser` v0.20.0 (Rust native binary).
-
-### What matters to an agent
-
-- `kuri` is optimized for the thing agents pay for: low-token snapshots of real pages, not full DOM dumps.
-- The strongest story is not "we have more features"; it is "we return the right amount of state for the next model step."
-- On JS-heavy pages, a tiny output is only good if the page actually rendered. Empty-shell output is a failure mode, not a win.
-
-### vs agent-browser (Rust)
-
-Both are native binaries — agent-browser is Rust, kuri is Zig. Measured with agent-browser v0.20.0.
-
-```
-                        agent-browser        kuri             delta
-                        (Rust, v0.20)        (Zig, v0.2)
-─────────────────────────────────────────────────────────────────────
-CLI binary              6.0 MB               464 KB           13× smaller
-Cold start (--version)  3.4 ms               3.0 ms           ~same
-Install (npm)           33 MB                3.3 MB (3 bins)  10× smaller
-Commands                140+                 40+ endpoints    different focus
-Standalone fetcher      ❌                    ✅ kuri-fetch     no Chrome needed
-Terminal browser        ❌                    ✅ kuri-browse    interactive REPL
-JS engine (no Chrome)   ❌                    ✅ QuickJS        SSR-style DOM
-HTTP API server         ❌ (CLI only)         ✅ kuri           thread-per-conn
-```
-
-> **Note:** agent-browser has significantly more browser automation commands (140+) including
-> drag-and-drop, file upload/download, iOS simulator support, auth vault, and video recording.
-> Kuri focuses on being a lightweight HTTP API server for AI agent integration.
-
-### Real page token benchmark: Google Flights `SIN → TYO`
-
-Same Chrome session, measured with `tiktoken` `cl100k_base`.
-
-| Tool / Mode | Bytes | Tokens | vs `kuri` default | Note |
-|---|---:|---:|---:|---|
-| `kuri snap` (compact, default) | 7,935 | 2,841 | 1.0x | Baseline |
-| `kuri snap --interactive` | 5,129 | 1,888 | 0.7x | Lowest useful output |
-| `kuri snap --semantic` | 7,935 | 2,841 | 1.0x | Same as default |
-| `kuri snap --all` | 67,018 | 29,303 | 10.3x | Full verbose tree |
-| `kuri snap --json` | 156,801 | 49,182 | 17.3x | Old default, too expensive |
-| `kuri snap --text` | 70,517 | 26,583 | 9.4x | Text-heavy dump |
-| `agent-browser snapshot` | 15,880 | 4,591 | 1.6x | More verbose on same page |
-| `agent-browser snapshot -i` | 7,226 | 2,499 | 0.9x | Close, still larger |
-| `lightpanda semantic_tree` | 68,084 | 26,433 | 9.3x | Raw DOM JSON — no useful compression |
-| `lightpanda semantic_tree_text` | 1,909 | 507 | 0.2x | ⚠ Google Flights did not render — 507 tokens of nav chrome, zero flight data |
-
-> **Why lightpanda scores so low here:** Lightpanda is a headless browser without a full V8/Blink JS engine. Google Flights is a JS-heavy SPA that fetches flight data at runtime via `fetch()` and renders it entirely client-side. Lightpanda fetched the HTML shell and executed what it could, but the SPA never populated — so `semantic_tree_text` returned 507 tokens of navigation links with no prices, no airlines, no results. The 507-token number is not efficiency; it is a failed render. kuri and agent-browser both connect to a real Chrome tab where the page has fully loaded.
-
-**What this shows**
-
-- On the same live page, `kuri` default was **38% leaner** than `agent-browser` (`2,841` vs `4,591` tokens).
-- `kuri --interactive` stayed useful at **1,888 tokens** — **25% fewer** than `agent-browser snapshot -i`.
-- Lightpanda's tiny output is a failure mode on JS-heavy SPAs, not a win — the page data was missing entirely.
-- kuri's old JSON default was **17.3x more expensive** than the new compact default; the upgrade matters.
-
-### vs Playwright / Lightpanda
-
-|  | **Kuri** | **Playwright** | **Lightpanda** |
-|---|---|---|---|
-| Runtime | None (native binary) | Node.js ≥ 18 | None (Zig) |
-| `node_modules` | **0 files** | ~300 MB | **0 files** |
-| Binary size | **464 KB** server | N/A (interpreted) | ~15 MB |
-| Cold start | **~3 ms** | ~1–3 s | < 5 ms |
-| Standalone fetcher | ✅ `kuri-fetch` | ❌ | ❌ |
-| Terminal browser | ✅ `kuri-browse` | ❌ | ❌ |
-| JS execution (no Chrome) | ✅ QuickJS | ❌ | ❌ |
-| A11y snapshots | ✅ `@eN` refs | Via CDP | ✅ |
-| HAR recording | ✅ CDP Network | ✅ | ✅ |
-| Token cost reduction | **97%** (interactive filter) | Manual | Varies |
 
 ---
 
