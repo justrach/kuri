@@ -20,8 +20,8 @@ pub const EventBuffer = struct {
             self.items[self.len] = event;
             self.len += 1;
         } else {
-            // Ring buffer: overwrite oldest
-            self.allocator.free(self.items[0].?);
+            // Ring buffer: overwrite oldest, don't free — events may be
+            // arena-allocated by different request threads
             var i: usize = 0;
             while (i < 31) : (i += 1) {
                 self.items[i] = self.items[i + 1];
@@ -86,8 +86,14 @@ pub const CdpClient = struct {
     }
 
     /// Connect to Chrome CDP WebSocket endpoint.
+    /// Connect to Chrome CDP WebSocket endpoint.
     pub fn connectWs(self: *CdpClient) !void {
         if (self.connected) return;
+        // Close stale WS before reconnecting
+        if (self.ws) |*ws| {
+            ws.close();
+            self.ws = null;
+        }
         self.ws = WebSocketClient.connect(
             self.allocator,
             self.cdp_url,
@@ -97,35 +103,47 @@ pub const CdpClient = struct {
         self.connected = true;
     }
 
-    /// Send a CDP command and receive the response. Allocates result.
     /// Send a CDP command and receive the matching response. Allocates result.
     /// Skips CDP events (messages without matching id) and correlates by command ID.
+    /// Auto-reconnects on connection failure.
     pub fn send(self: *CdpClient, allocator: std.mem.Allocator, method: []const u8, params_json: ?[]const u8) ![]const u8 {
-        if (!self.connected) try self.connectWs();
+        // Try up to 2 times — reconnect on first failure
+        var retry: u32 = 0;
+        while (retry < 2) : (retry += 1) {
+            if (!self.connected) self.connectWs() catch return error.ConnectionRefused;
 
-        var ws = &(self.ws orelse return error.ConnectionRefused);
+            var ws = &(self.ws orelse return error.ConnectionRefused);
 
-        const msg = try self.buildMessage(allocator, method, params_json);
-        const sent_id = self.next_id.load(.monotonic) - 1; // ID we just used
-        defer allocator.free(msg);
+            const msg = try self.buildMessage(allocator, method, params_json);
+            const sent_id = self.next_id.load(.monotonic) - 1;
+            defer allocator.free(msg);
 
-        ws.sendText(msg) catch return error.ConnectionRefused;
-
-        // Read responses, buffer events, max 100 attempts
-        // (needs headroom for event-heavy operations like cookies/network)
-        var attempts: u32 = 0;
-        while (attempts < 100) : (attempts += 1) {
-            const response = ws.receiveMessageAlloc(allocator, 2 * 1024 * 1024) catch |err| switch (err) {
-                error.ConnectionClosed => return error.ConnectionRefused,
-                else => return error.ConnectionRefused,
+            ws.sendText(msg) catch {
+                // Connection died — mark disconnected and retry
+                self.connected = false;
+                continue;
             };
 
-            if (matchesResponseId(response, sent_id)) {
-                return response;
+            // Read responses, buffer events, max 100 attempts
+            var attempts: u32 = 0;
+            while (attempts < 100) : (attempts += 1) {
+                const response = ws.receiveMessageAlloc(allocator, 2 * 1024 * 1024) catch {
+                    // Connection died during read — mark disconnected and retry
+                    self.connected = false;
+                    break;
+                };
+
+                if (matchesResponseId(response, sent_id)) {
+                    return response;
+                }
+
+                // Buffer event instead of discarding
+                self.event_buf.push(response);
             }
 
-            // Buffer event instead of discarding
-            self.event_buf.push(response);
+            // If we broke out of the read loop due to disconnect, retry
+            if (!self.connected) continue;
+            return error.ConnectionRefused;
         }
 
         return error.ConnectionRefused;

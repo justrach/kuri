@@ -43,7 +43,7 @@ fn handleConnection(gpa: std.mem.Allocator, bridge: *Bridge, cfg: Config, conn: 
     defer arena_impl.deinit();
     const arena = arena_impl.allocator();
 
-    var read_buf: [8192]u8 = undefined;
+    var read_buf: [65536]u8 = undefined;
     var net_reader = net.Stream.Reader.init(conn.stream, &read_buf);
     var write_buf: [8192]u8 = undefined;
     var net_writer = net.Stream.Writer.init(conn.stream, &write_buf);
@@ -662,9 +662,25 @@ fn handleEvaluate(request: *std.http.Server.Request, arena: std.mem.Allocator, b
         resp.sendError(request, 400, "Missing tab_id parameter");
         return;
     };
-    const expr = getQueryParam(target, "expression") orelse {
-        resp.sendError(request, 400, "Missing expression parameter");
-        return;
+
+    // Support both query param and POST body for expression.
+    // POST body is preferred for large scripts that exceed URL length limits.
+    const expr = blk: {
+        // Try POST body first (JSON: {"expression": "..."} or raw text)
+        if (readRequestBody(request, arena)) |body| {
+            if (body.len > 0) {
+                if (extractSimpleJsonString(body, 0, "\"expression\"")) |s| {
+                    break :blk s;
+                }
+                // Treat entire body as raw expression
+                break :blk body;
+            }
+        }
+        // Fall back to query param
+        break :blk getQueryParam(target, "expression") orelse {
+            resp.sendError(request, 400, "Missing expression parameter — send as POST body or ?expression= query param");
+            return;
+        };
     };
 
     const client = bridge.getCdpClient(tab_id) orelse {
@@ -672,8 +688,13 @@ fn handleEvaluate(request: *std.http.Server.Request, arena: std.mem.Allocator, b
         return;
     };
 
+    // JSON-escape the expression to handle quotes, backslashes, newlines etc.
+    const escaped = jsonEscapeAlloc(arena, expr) orelse {
+        resp.sendError(request, 500, "Internal Server Error");
+        return;
+    };
     const params = std.fmt.allocPrint(arena,
-        "{{\"expression\":\"{s}\",\"returnByValue\":true}}", .{expr}) catch {
+        "{{\"expression\":\"{s}\",\"returnByValue\":true}}", .{escaped}) catch {
         resp.sendError(request, 500, "Internal Server Error");
         return;
     };
@@ -699,8 +720,10 @@ fn handleBrowdie(request: *std.http.Server.Request) void {
 }
 
 fn handleDiscover(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge, cfg: Config) void {
-    const cdp_base = cfg.cdp_url orelse {
-        resp.sendError(request, 400, "No CDP_URL configured");
+    // Accept cdp_url as query param (overrides env), fall back to config
+    const target = request.head.target;
+    const cdp_base = getQueryParam(target, "cdp_url") orelse cfg.cdp_url orelse {
+        resp.sendError(request, 400, "No CDP_URL configured. Pass ?cdp_url=ws://host:port or set CDP_URL env var.");
         return;
     };
 
