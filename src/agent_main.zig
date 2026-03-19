@@ -62,6 +62,12 @@ pub fn main() !void {
         try cmdTabs(arena, port);
         return;
     }
+    if (std.mem.eql(u8, cmd, "open")) {
+        const port = parsePortFlag(rest) orelse DEFAULT_CDP_PORT;
+        const url = if (rest.len > 0 and rest[0][0] != '-') rest[0] else null;
+        try cmdOpen(arena, port, url);
+        return;
+    }
     if (std.mem.eql(u8, cmd, "use")) {
         if (rest.len < 1) fatal("use: requires <ws_url>\n", .{});
         try cmdUse(arena, rest[0]);
@@ -253,6 +259,75 @@ fn cmdUse(arena: std.mem.Allocator, ws_url: []const u8) !void {
     const out = try std.fmt.allocPrint(arena, "{{\"ok\":true,\"cdp_url\":\"{s}\"}}\n", .{ws_url});
     stdout.writeAll(out) catch {};
 }
+
+/// Launch a visible (non-headless) Chrome with CDP, wait for it, auto-attach.
+/// This is the "human mode" — real browser, real user, agent rides alongside.
+fn cmdOpen(arena: std.mem.Allocator, port: u16, url: ?[]const u8) !void {
+    // Check if Chrome is already running on this port
+    const existing = fetchChromeTabs(arena, "127.0.0.1", port) catch null;
+    if (existing) |json| {
+        // Already running — just attach to first tab
+        if (extractString(json, 0, "\"webSocketDebuggerUrl\"")) |ws| {
+            const type_val = extractString(json, 0, "\"type\"") orelse "page";
+            if (std.mem.eql(u8, type_val, "page")) {
+                // Navigate if URL provided
+                if (url) |u| {
+                    var session = Session.init(arena);
+                    session.cdp_url = try arena.dupe(u8, ws);
+                    try saveSession(arena, &session);
+                    var client = CdpClient.init(arena, ws);
+                    defer client.deinit();
+                    try cmdNavigate(arena, &client, u);
+                }
+                try cmdUse(arena, ws);
+                return;
+            }
+        }
+    }
+
+    // Find Chrome binary
+    const chrome_bin: []const u8 = switch (@import("builtin").os.tag) {
+        .macos => "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        else => blk: {
+            // Try common Linux paths
+            const paths = [_][]const u8{ "google-chrome", "chromium-browser", "chromium" };
+            for (paths) |p| {
+                if (std.fs.cwd().access(p, .{})) |_| {
+                    break :blk p;
+                } else |_| {}
+            }
+            break :blk "google-chrome";
+        },
+    };
+
+    // Build args: visible Chrome (NOT headless) with CDP port
+    var argv: std.ArrayList([]const u8) = .empty;
+    try argv.append(arena, chrome_bin);
+    const port_flag = try std.fmt.allocPrint(arena, "--remote-debugging-port={d}", .{port});
+    try argv.append(arena, port_flag);
+    if (url) |u| try argv.append(arena, u);
+
+    // Spawn Chrome in background
+    var child = std.process.Child.init(argv.items, arena);
+    try child.spawn();
+
+    // Wait for CDP to come up (poll /json)
+    std.debug.print("Launching Chrome (port {d})...\n", .{port});
+    var attempts: u32 = 0;
+    while (attempts < 30) : (attempts += 1) {
+        std.Thread.sleep(500_000_000);
+        const json = fetchChromeTabs(arena, "127.0.0.1", port) catch continue;
+        if (extractString(json, 0, "\"webSocketDebuggerUrl\"")) |ws| {
+            const type_val = extractString(json, 0, "\"type\"") orelse "page";
+            if (std.mem.eql(u8, type_val, "page")) {
+                try cmdUse(arena, ws);
+                return;
+            }
+        }
+    }
+    fatal("Chrome didn't start within 15s. Is it installed?\n", .{});
+}
+
 
 fn cmdStatus(arena: std.mem.Allocator) !void {
     var session = loadSession(arena) catch {
@@ -1261,55 +1336,52 @@ fn printUsage() void {
     std.debug.print(
         \\kuri-agent — drive Chrome from the command line
         \\
-        \\  kuri-agent tabs                 find Chrome tabs
-        \\  kuri-agent use <ws_url>         attach to a tab
-        \\  kuri-agent go <url>             navigate
-        \\  kuri-agent snap                 page snapshot (a11y tree, ~2k tokens)
-        \\  kuri-agent click <ref>          click element from snapshot
-        \\  kuri-agent type <ref> <text>    type into element
+        \\  kuri-agent open https://example.com     launch Chrome + attach (one step)
+        \\  kuri-agent snap                          read the page (~2k tokens)
+        \\  kuri-agent click @e3                     act on it
         \\
         \\Setup:
-        \\  tabs [--port N]        list Chrome tabs (default port 9222)
-        \\  use <ws_url>           attach to a tab
+        \\  open [url] [--port N]  launch visible Chrome, auto-attach
+        \\  tabs [--port N]        list tabs on running Chrome
+        \\  use <ws_url>           attach to a specific tab
         \\  status                 show session
-        \\  stealth                anti-bot mode (persists across commands)
+        \\  stealth                anti-bot mode (persists)
         \\
         \\Navigate:
         \\  go <url>               open URL
-        \\  back / forward         history navigation
-        \\  reload                 reload page
+        \\  back / forward         history
+        \\  reload                 reload
         \\
         \\Read:
-        \\  snap [flags]           a11y snapshot — compact text-tree by default
-        \\    --interactive          only buttons, links, inputs (~1.3k tokens)
+        \\  snap [flags]           a11y tree (compact text-tree default)
+        \\    --interactive          buttons, links, inputs only (~1.3k tokens)
         \\    --json / --text        alternate formats
         \\    --depth N              limit depth
-        \\  text [selector]        page text (or CSS-selected text)
+        \\  text [selector]        page text
         \\  shot [--out file.png]  screenshot
         \\  eval <js>              run JavaScript
         \\
         \\Act:
-        \\  click <ref>            click (use @e3 or e3 from snap)
+        \\  click <ref>            click element
         \\  type <ref> <text>      type text
         \\  fill <ref> <text>      clear + fill
-        \\  select <ref> <value>   dropdown
+        \\  select <ref> <val>     dropdown
         \\  hover / focus <ref>    hover or focus
         \\  scroll                 scroll down
-        \\  grab <ref>             click + follow popup redirect in-tab
+        \\  grab <ref>             click + follow popup in-tab
         \\
         \\Security:
-        \\  cookies                cookies with security flags
-        \\  headers                response header audit
-        \\  audit                  full security scan
-        \\  storage [local|session] dump web storage
+        \\  cookies / headers      inspect
+        \\  audit                  full scan
+        \\  storage [local|session] web storage
         \\  jwt                    find + decode JWTs
-        \\  fetch <GET|POST> <url> fetch as the browser (with cookies)
+        \\  fetch <GET|POST> <url> browser-authenticated fetch
         \\  probe <url/{{id}}> <N> <M>  IDOR enumeration
         \\
         \\Headers (persisted):
-        \\  set-header <k> <v>     add auth header (e.g. Authorization)
+        \\  set-header <k> <v>     add header
         \\  clear-headers          remove all
-        \\  show-headers           print current
+        \\  show-headers           list
         \\
         \\Session: ~/.kuri/session.json
         \\
