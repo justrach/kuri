@@ -18,7 +18,7 @@ CDP automation · A11y snapshots · HAR recording · Standalone fetcher · Inter
 
 [Quick Start](#-quick-start) · [API](#-http-api) · [kuri-agent](#-kuri-agent) · [kuri-fetch](#-kuri-fetch) · [kuri-browse](#-kuri-browse) · [Security Testing](#-security-testing) · [Architecture](#-architecture) · [Configuration](#-configuration)
 
-> **Why teams switch to Kuri:** 464 KB server binary, ~3 ms cold start, and on a live Google Flights page the default compact snapshot used **2,841 tokens** vs **4,591** for agent-browser.
+> **Why teams switch to Kuri:** 464 KB binary, ~3 ms cold start. On Google Flights, a full agent loop (go→snap→click→snap→eval) costs **4,110 tokens** vs **4,880** for agent-browser — **16% less per cycle**, compounding across multi-step tasks.
 
 ---
 
@@ -30,29 +30,33 @@ Most browser tooling was built for QA engineers. Kuri is built for agent loops: 
 - A tiny output only counts if the page actually rendered. Empty-shell output is a failure mode, not a win.
 - The best proof is same-page, same-session, same-tokenizer comparisons.
 
-### Proof on a live page: Google Flights `SIN → TYO`
+### Snapshot tokens: Google Flights `SIN → TPE`
 
-Same Chrome session, measured with `tiktoken` `cl100k_base`.
+Same Chrome session, measured with `tiktoken` `cl100k_base`. Run `./bench/token_benchmark.sh` to reproduce.
 
-| Tool / Mode | Bytes | Tokens | vs `kuri` default | Note |
+| Tool / Mode | Bytes | Tokens | vs `kuri` | Note |
 |---|---:|---:|---:|---|
-| `kuri snap` (compact, default) | 7,935 | 2,841 | 1.0x | Baseline |
-| `kuri snap --interactive` | 5,129 | 1,888 | 0.7x | Lowest useful output |
-| `kuri snap --semantic` | 7,935 | 2,841 | 1.0x | Same as default |
-| `kuri snap --all` | 67,018 | 29,303 | 10.3x | Full verbose tree |
-| `kuri snap --json` | 156,801 | 49,182 | 17.3x | Old default, too expensive |
-| `kuri snap --text` | 70,517 | 26,583 | 9.4x | Text-heavy dump |
-| `agent-browser snapshot` | 15,880 | 4,591 | 1.6x | More verbose on same page |
-| `agent-browser snapshot -i` | 7,226 | 2,499 | 0.9x | Close, still larger |
-| `lightpanda semantic_tree` | 68,084 | 26,433 | 9.3x | Raw DOM JSON, no useful compression |
-| `lightpanda semantic_tree_text` | 1,909 | 507 | 0.2x | Google Flights did not render; nav shell only |
+| `kuri snap` (compact) | 13,479 | **4,328** | baseline | |
+| `kuri snap --interactive` | 7,024 | **1,927** | 0.4x | Best for agent loops |
+| `kuri snap --json` | 102,124 | 31,280 | 7.2x | Old default |
+| `agent-browser snapshot` | 17,103 | 4,641 | 1.1x | |
+| `agent-browser snapshot -i` | 8,704 | 2,425 | 0.6x | |
+| `lightpanda semantic_tree` | 67,830 | 26,244 | 6.1x | ⚠ no JS — raw DOM |
+| `lightpanda semantic_tree_text` | 1,909 | 507 | 0.1x | ⚠ no JS — empty shell |
 
-**How to read this benchmark**
+### Full workflow cost: `go → snap → click → snap → eval`
 
-- On the same live page, `kuri` default was **38% leaner** than `agent-browser` (`2,841` vs `4,591` tokens).
-- `kuri --interactive` stayed useful at **1,888 tokens**, which is **25% fewer** than `agent-browser snapshot -i`.
-- Lightpanda's tiny output is not a win here. Google Flights is a JS-heavy SPA, and its smallest result was a failed render with no flight data.
-- kuri's old JSON default was **17.3x more expensive** than the new compact default. The new framing should make that upgrade obvious.
+| Tool | Tokens per cycle |
+|---|---:|
+| **kuri-agent** | **4,110** |
+| agent-browser | 4,880 |
+
+kuri saves **16% tokens per workflow cycle** — compounding across multi-step tasks.
+
+Action responses are flat JSON (`{"ok":true}`) instead of nested CDP, which adds up:
+`click` = 9 tokens, `back` = 5 tokens, `scroll` = 5 tokens.
+
+> **Why lightpanda scores low:** Lightpanda can't execute JS-heavy SPAs. Google Flights renders via client-side `fetch()` — lightpanda returns a 507-token empty nav shell with zero flight data. The low token count is a failed render, not efficiency.
 
 ### Small binary, fast start
 
