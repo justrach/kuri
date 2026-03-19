@@ -276,6 +276,10 @@ fn cmdOpen(arena: std.mem.Allocator, port: u16, url: ?[]const u8) !void {
     try argv.append(arena, chrome_bin);
     const port_flag = try std.fmt.allocPrint(arena, "--remote-debugging-port={d}", .{port});
     try argv.append(arena, port_flag);
+    // Chrome requires a data dir for CDP; use default profile so cookies/logins persist
+    const home = std.posix.getenv("HOME") orelse "/tmp";
+    const data_dir = try std.fmt.allocPrint(arena, "--user-data-dir={s}/.kuri/chrome-profile", .{home});
+    try argv.append(arena, data_dir);
     if (url) |u| try argv.append(arena, u);
 
     var child = std.process.Child.init(argv.items, arena);
@@ -648,23 +652,27 @@ fn cmdSimpleNav(arena: std.mem.Allocator, client: *CdpClient, method: []const u8
 }
 
 // ── Tab following ─────────────────────────────────────────────────────────────
-
-/// Override window.open → location.href, then click a ref so the redirect
-/// happens in the same tab instead of a blocked popup. Solves Google Flights
-/// style "book with X" buttons that open airline sites in new windows.
+/// Intercept popups + form target="_blank", click a ref, follow the redirect
+/// in the same tab. Works with Google Flights booking buttons that use
+/// dynamically created forms with target="_blank".
 fn cmdGrab(arena: std.mem.Allocator, client: *CdpClient, session: *Session, ref: []const u8) !void {
-    // 1. Inject window.open override that redirects in-tab
+    // 1. Hook window.open AND form target to force same-tab navigation
     const inject_js =
         \\(function(){
-        \\  window.__kuriOpenUrl = null;
-        \\  var orig = window.open;
-        \\  window.open = function(url, name, features) {
-        \\    if (url && url !== 'about:blank') {
-        \\      window.__kuriOpenUrl = url;
-        \\      location.href = url;
-        \\      return null;
+        \\  window.open = function(url) {
+        \\    if (url && url !== 'about:blank') location.href = url;
+        \\    return null;
+        \\  };
+        \\  var oc = document.createElement.bind(document);
+        \\  document.createElement = function(t) {
+        \\    var el = oc(t);
+        \\    if (t.toLowerCase() === 'form') {
+        \\      Object.defineProperty(el, 'target', {
+        \\        set: function() {},
+        \\        get: function() { return '_self'; }
+        \\      });
         \\    }
-        \\    return orig.call(window, url, name, features);
+        \\    return el;
         \\  };
         \\  return 'hooked';
         \\})()
@@ -674,35 +682,43 @@ fn cmdGrab(arena: std.mem.Allocator, client: *CdpClient, session: *Session, ref:
         "{{\"expression\":\"{s}\",\"returnByValue\":true}}", .{inject_escaped});
     _ = client.send(arena, protocol.Methods.runtime_evaluate, inject_params) catch {};
 
-    // 2. Click the element via the normal action flow
+    // 2. Click the element
     try cmdAction(arena, client, session, "click", ref, null);
 
-    // 3. Wait briefly then report what happened
-    std.Thread.sleep(3_000_000_000);
-
-    // Check if we navigated to a new URL
-    const check_js = "location.href";
-    const check_escaped = try escapeForJson(arena, check_js);
-    const check_params = try std.fmt.allocPrint(arena,
-        "{{\"expression\":\"{s}\",\"returnByValue\":true}}", .{check_escaped});
-    const check_resp = client.send(arena, protocol.Methods.runtime_evaluate, check_params) catch {
-        // Connection lost means the page navigated away
-        const out = try std.fmt.allocPrint(arena,
-            "{{\"ok\":true,\"action\":\"navigated\",\"note\":\"page navigated, run snap to see new page\"}}\n", .{});
-        std.fs.File.stdout().writeAll(out) catch {};
-        return;
+    // 3. Wait for navigation (up to 8s)
+    var attempts: u32 = 0;
+    const orig_url = blk: {
+        const r = client.send(arena, protocol.Methods.runtime_evaluate,
+            "{\"expression\":\"location.href\",\"returnByValue\":true}") catch break :blk "";
+        const s = std.mem.indexOf(u8, r, "\"value\":\"") orelse break :blk "";
+        const b = s + 9;
+        const e = std.mem.indexOfPos(u8, r, b, "\"") orelse break :blk "";
+        break :blk r[b..e];
     };
-    const url_start = std.mem.indexOf(u8, check_resp, "\"value\":\"") orelse {
-        std.fs.File.stdout().writeAll("{\"ok\":true,\"action\":\"clicked\",\"note\":\"no redirect detected — check tabs\"}\n") catch {};
-        return;
-    };
-    const val_begin = url_start + 9;
-    const val_end = std.mem.indexOfPos(u8, check_resp, val_begin, "\"") orelse check_resp.len;
-    const new_url = check_resp[val_begin..val_end];
 
-    const out = try std.fmt.allocPrint(arena,
-        "{{\"ok\":true,\"action\":\"navigated\",\"url\":\"{s}\"}}\n", .{new_url});
-    std.fs.File.stdout().writeAll(out) catch {};
+    while (attempts < 16) : (attempts += 1) {
+        std.Thread.sleep(500_000_000);
+        const resp = client.send(arena, protocol.Methods.runtime_evaluate,
+            "{\"expression\":\"location.href\",\"returnByValue\":true}") catch {
+            // Connection lost = page navigated away
+            const out = try std.fmt.allocPrint(arena,
+                "{{\"ok\":true,\"action\":\"navigated\",\"note\":\"page navigated, run snap to see new page\"}}\n", .{});
+            std.fs.File.stdout().writeAll(out) catch {};
+            return;
+        };
+        if (std.mem.indexOf(u8, resp, "\"value\":\"")) |s| {
+            const b = s + 9;
+            const e = std.mem.indexOfPos(u8, resp, b, "\"") orelse continue;
+            const new_url = resp[b..e];
+            if (!std.mem.eql(u8, new_url, orig_url)) {
+                const out = try std.fmt.allocPrint(arena,
+                    "{{\"ok\":true,\"action\":\"navigated\",\"url\":\"{s}\"}}\n", .{new_url});
+                std.fs.File.stdout().writeAll(out) catch {};
+                return;
+            }
+        }
+    }
+    std.fs.File.stdout().writeAll("{\"ok\":true,\"action\":\"clicked\",\"note\":\"no redirect detected — check tabs\"}\n") catch {};
 }
 
 /// Poll Chrome /json for a new tab, auto-switch to it.
