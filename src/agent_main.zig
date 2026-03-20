@@ -80,7 +80,7 @@ pub fn main() !void {
 
     // All other commands need a session with a valid cdp_url
     var session = loadSession(arena) catch |err| {
-        std.debug.print("error: no session found ({s}). Run `kuri-agent tabs` then `kuri-agent use <ws_url>`\n", .{@errorName(err)});
+        jsonError("no session found ({s}). Run `kuri-agent tabs` then `kuri-agent use <ws_url>`", .{@errorName(err)});
         std.process.exit(1);
     };
     defer session.deinit();
@@ -117,7 +117,7 @@ pub fn main() !void {
     }
 
     if (session.cdp_url.len == 0) {
-        std.debug.print("error: no tab attached. Run `kuri-agent use <ws_url>`\n", .{});
+        jsonError("no tab attached. Run `kuri-agent use <ws_url>`", .{});
         std.process.exit(1);
     }
 
@@ -212,16 +212,14 @@ pub fn main() !void {
     } else if (std.mem.eql(u8, cmd, "stealth")) {
         try cmdStealth(arena, &client);
     } else {
-        std.debug.print("error: unknown command '{s}'\n", .{cmd});
-        printUsage();
-        std.process.exit(1);
+        fatal("unknown command '{s}'. Run kuri-agent with no args for help.", .{cmd});
     }
 }
 // ── Commands ─────────────────────────────────────────────────────────────────
 
 fn cmdTabs(arena: std.mem.Allocator, port: u16) !void {
     const json = fetchChromeTabs(arena, "127.0.0.1", port) catch |err| {
-        std.debug.print("error: cannot connect to Chrome on port {d}: {s}\n", .{ port, @errorName(err) });
+        jsonError("cannot connect to Chrome on port {d}: {s}", .{ port, @errorName(err) });
         std.process.exit(1);
     };
 
@@ -363,7 +361,7 @@ fn cmdNavigate(arena: std.mem.Allocator, client: *CdpClient, url: []const u8) !v
     const escaped_url = try escapeForJson(arena, url);
     const params = try std.fmt.allocPrint(arena, "{{\"url\":\"{s}\"}}", .{escaped_url});
     _ = client.send(arena, protocol.Methods.page_navigate, params) catch |err| {
-        std.debug.print("error: navigate failed: {s}\n", .{@errorName(err)});
+        jsonError("navigate failed: {s}", .{@errorName(err)});
         std.process.exit(1);
     };
     const out = try std.fmt.allocPrint(arena, "{{\"ok\":true,\"url\":\"{s}\"}}\n", .{escaped_url});
@@ -379,12 +377,12 @@ fn cmdSnap(arena: std.mem.Allocator, client: *CdpClient, session: *Session, flag
     const depth = parseDepthFlag(flags);
 
     const raw = client.send(arena, protocol.Methods.accessibility_get_full_tree, null) catch |err| {
-        std.debug.print("error: CDP accessibility failed: {s}\n", .{@errorName(err)});
+        jsonError("CDP accessibility failed: {s}", .{@errorName(err)});
         std.process.exit(1);
     };
 
     const nodes = parseA11yNodes(arena, raw) catch {
-        std.debug.print("error: failed to parse a11y tree\n", .{});
+        jsonError("failed to parse a11y tree", .{});
         std.process.exit(1);
     };
 
@@ -398,7 +396,7 @@ fn cmdSnap(arena: std.mem.Allocator, client: *CdpClient, session: *Session, flag
     };
 
     const snapshot = a11y.buildSnapshot(nodes, opts, arena) catch {
-        std.debug.print("error: failed to build snapshot\n", .{});
+        jsonError("failed to build snapshot", .{});
         std.process.exit(1);
     };
 
@@ -495,19 +493,19 @@ fn cmdAction(arena: std.mem.Allocator, client: *CdpClient, session: *Session, ac
     }
 
     const bid = session.refs.get(clean_ref) orelse {
-        std.debug.print("error: ref '{s}' not found. Run `kuri-agent snap` first.\n", .{ref});
+        jsonError("ref '{s}' not found. Run `kuri-agent snap` first.", .{ref});
         std.process.exit(1);
     };
 
     // Step 1: resolve backend node → objectId
     const resolve_params = try std.fmt.allocPrint(arena, "{{\"backendNodeId\":{d}}}", .{bid});
     const resolve_resp = client.send(arena, protocol.Methods.dom_resolve_node, resolve_params) catch |err| {
-        std.debug.print("error: DOM.resolveNode failed: {s}\n", .{@errorName(err)});
+        jsonError("DOM.resolveNode failed: {s}", .{@errorName(err)});
         std.process.exit(1);
     };
 
     const object_id = extractString(resolve_resp, 0, "\"objectId\"") orelse {
-        std.debug.print("error: could not extract objectId from resolveNode response\n", .{});
+        jsonError("could not extract objectId from resolveNode response", .{});
         std.process.exit(1);
     };
 
@@ -522,7 +520,7 @@ fn cmdAction(arena: std.mem.Allocator, client: *CdpClient, session: *Session, ac
         if (std.mem.eql(u8, action, "uncheck")) break :blk "function() { if (this.checked) { this.click(); } return 'unchecked'; }";
         if (std.mem.eql(u8, action, "type") or std.mem.eql(u8, action, "fill")) {
             const v = value orelse {
-                std.debug.print("error: {s} requires a value\n", .{action});
+                jsonError("{s} requires a value", .{action});
                 std.process.exit(1);
             };
             break :blk try std.fmt.allocPrint(arena,
@@ -531,14 +529,14 @@ fn cmdAction(arena: std.mem.Allocator, client: *CdpClient, session: *Session, ac
         }
         if (std.mem.eql(u8, action, "select")) {
             const v = value orelse {
-                std.debug.print("error: select requires a value\n", .{});
+                jsonError("select requires a value", .{});
                 std.process.exit(1);
             };
             break :blk try std.fmt.allocPrint(arena,
                 "function() {{ this.value = '{s}'; this.dispatchEvent(new Event('change', {{bubbles:true}})); return 'selected'; }}",
                 .{v});
         }
-        std.debug.print("error: unknown action '{s}'\n", .{action});
+        jsonError("unknown action '{s}'", .{action});
         std.process.exit(1);
     };
 
@@ -550,7 +548,7 @@ fn cmdAction(arena: std.mem.Allocator, client: *CdpClient, session: *Session, ac
         "{{\"objectId\":\"{s}\",\"functionDeclaration\":\"{s}\",\"returnByValue\":true}}",
         .{ object_id, escaped_fn });
     const response = client.send(arena, protocol.Methods.runtime_call_function_on, call_params) catch |err| {
-        std.debug.print("error: Runtime.callFunctionOn failed: {s}\n", .{@errorName(err)});
+        jsonError("Runtime.callFunctionOn failed: {s}", .{@errorName(err)});
         std.process.exit(1);
     };
     const val = extractCdpValue(response);
@@ -561,7 +559,7 @@ fn cmdAction(arena: std.mem.Allocator, client: *CdpClient, session: *Session, ac
 fn cmdScroll(arena: std.mem.Allocator, client: *CdpClient) !void {
     const params = "{\"expression\":\"window.scrollBy(0, 500) || 'scrolled'\",\"returnByValue\":true}";
     const response = client.send(arena, protocol.Methods.runtime_evaluate, @constCast(params)) catch |err| {
-        std.debug.print("error: scroll failed: {s}\n", .{@errorName(err)});
+        jsonError("scroll failed: {s}", .{@errorName(err)});
         std.process.exit(1);
     };
     _ = response;
@@ -589,7 +587,7 @@ fn cmdViewport(arena: std.mem.Allocator, client: *CdpClient, args: []const []con
         } else {
             // numeric width — expect viewport <w> <h> [--dpr N]
             width = std.fmt.parseInt(u32, preset, 10) catch {
-                std.debug.print("error: unknown viewport preset '{s}'. Use mobile/tablet/desktop or <width> <height>\n", .{preset});
+                jsonError("unknown viewport preset '{s}'. Use mobile/tablet/desktop or <width> <height>", .{preset});
                 std.process.exit(1);
             };
             height = if (args.len > 1) std.fmt.parseInt(u32, args[1], 10) catch 900 else 900;
@@ -611,7 +609,7 @@ fn cmdViewport(arena: std.mem.Allocator, client: *CdpClient, args: []const []con
         .{ width, height, dpr, if (mobile) "true" else "false" });
 
     const response = client.send(arena, protocol.Methods.emulation_set_device_metrics, params) catch |err| {
-        std.debug.print("error: viewport failed: {s}\n", .{@errorName(err)});
+        jsonError("viewport failed: {s}", .{@errorName(err)});
         std.process.exit(1);
     };
     _ = response;
@@ -626,7 +624,7 @@ fn cmdEval(arena: std.mem.Allocator, client: *CdpClient, expr: []const u8) !void
     const escaped = try escapeForJson(arena, expr);
     const params = try std.fmt.allocPrint(arena, "{{\"expression\":\"{s}\",\"returnByValue\":true}}", .{escaped});
     const response = client.send(arena, protocol.Methods.runtime_evaluate, params) catch |err| {
-        std.debug.print("error: eval failed: {s}\n", .{@errorName(err)});
+        jsonError("eval failed: {s}", .{@errorName(err)});
         std.process.exit(1);
     };
     const val = unescapeJson(arena, extractCdpValue(response));
@@ -641,7 +639,7 @@ fn cmdText(arena: std.mem.Allocator, client: *CdpClient, selector: ?[]const u8) 
         @as([]const u8, "{\"expression\":\"document.body.innerText\",\"returnByValue\":true}");
 
     const response = client.send(arena, protocol.Methods.runtime_evaluate, @constCast(params)) catch |err| {
-        std.debug.print("error: text failed: {s}\n", .{@errorName(err)});
+        jsonError("text failed: {s}", .{@errorName(err)});
         std.process.exit(1);
     };
     const val = unescapeJson(arena, extractCdpValue(response));
@@ -652,24 +650,24 @@ fn cmdText(arena: std.mem.Allocator, client: *CdpClient, selector: ?[]const u8) 
 fn cmdScreenshot(arena: std.mem.Allocator, client: *CdpClient, out_path: ?[]const u8) !void {
     const params = "{\"format\":\"png\",\"quality\":80}";
     const response = client.send(arena, protocol.Methods.page_capture_screenshot, @constCast(params)) catch |err| {
-        std.debug.print("error: screenshot failed: {s}\n", .{@errorName(err)});
+        jsonError("screenshot failed: {s}", .{@errorName(err)});
         std.process.exit(1);
     };
 
     // Extract base64 data from response
     const b64 = extractString(response, 0, "\"data\"") orelse {
-        std.debug.print("error: no data field in screenshot response\n", .{});
+        jsonError("no data field in screenshot response", .{});
         std.process.exit(1);
     };
 
     // Decode base64
     const decoded_len = std.base64.standard.Decoder.calcSizeForSlice(b64) catch {
-        std.debug.print("error: invalid base64 in screenshot\n", .{});
+        jsonError("invalid base64 in screenshot", .{});
         std.process.exit(1);
     };
     const decoded = try arena.alloc(u8, decoded_len);
     std.base64.standard.Decoder.decode(decoded, b64) catch {
-        std.debug.print("error: base64 decode failed\n", .{});
+        jsonError("base64 decode failed", .{});
         std.process.exit(1);
     };
 
@@ -683,7 +681,7 @@ fn cmdScreenshot(arena: std.mem.Allocator, client: *CdpClient, out_path: ?[]cons
     };
 
     const file = std.fs.cwd().createFile(path, .{}) catch |err| {
-        std.debug.print("error: cannot create file '{s}': {s}\n", .{ path, @errorName(err) });
+        jsonError("cannot create file '{s}': {s}", .{ path, @errorName(err) });
         std.process.exit(1);
     };
     defer file.close();
@@ -695,7 +693,7 @@ fn cmdScreenshot(arena: std.mem.Allocator, client: *CdpClient, out_path: ?[]cons
 
 fn cmdSimpleNav(arena: std.mem.Allocator, client: *CdpClient, method: []const u8) !void {
     const response = client.send(arena, method, null) catch |err| {
-        std.debug.print("error: {s} failed: {s}\n", .{ method, @errorName(err) });
+        jsonError("{s} failed: {s}", .{ method, @errorName(err) });
         std.process.exit(1);
     };
     _ = response;
@@ -883,7 +881,7 @@ fn cmdStealth(arena: std.mem.Allocator, client: *CdpClient) !void {
 /// List all cookies with security flag annotations (Secure, HttpOnly, SameSite).
 fn cmdCookies(arena: std.mem.Allocator, client: *CdpClient) !void {
     const response = client.send(arena, protocol.Methods.network_get_cookies, null) catch |err| {
-        std.debug.print("error: Network.getCookies failed: {s}\n", .{@errorName(err)});
+        jsonError("Network.getCookies failed: {s}", .{@errorName(err)});
         std.process.exit(1);
     };
     const stdout = std.fs.File.stdout();
@@ -953,7 +951,7 @@ fn cmdHeaders(arena: std.mem.Allocator, client: *CdpClient) !void {
     const params = try std.fmt.allocPrint(arena,
         "{{\"expression\":\"{s}\",\"returnByValue\":true,\"awaitPromise\":true}}", .{escaped});
     const response = client.send(arena, protocol.Methods.runtime_evaluate, params) catch |err| {
-        std.debug.print("error: headers eval failed: {s}\n", .{@errorName(err)});
+        jsonError("headers eval failed: {s}", .{@errorName(err)});
         std.process.exit(1);
     };
     std.fs.File.stdout().writeAll(response) catch {};
@@ -987,7 +985,7 @@ fn cmdAudit(arena: std.mem.Allocator, client: *CdpClient) !void {
     const params = try std.fmt.allocPrint(arena,
         "{{\"expression\":\"{s}\",\"returnByValue\":true,\"awaitPromise\":true}}", .{escaped});
     const response = client.send(arena, protocol.Methods.runtime_evaluate, params) catch |err| {
-        std.debug.print("error: audit eval failed: {s}\n", .{@errorName(err)});
+        jsonError("audit eval failed: {s}", .{@errorName(err)});
         std.process.exit(1);
     };
     std.fs.File.stdout().writeAll(response) catch {};
@@ -1028,7 +1026,7 @@ fn cmdStorage(arena: std.mem.Allocator, client: *CdpClient, which: []const u8) !
     const params = try std.fmt.allocPrint(arena,
         "{{\"expression\":\"{s}\",\"returnByValue\":true}}", .{escaped});
     const response = client.send(arena, protocol.Methods.runtime_evaluate, params) catch |err| {
-        std.debug.print("error: storage eval failed: {s}\n", .{@errorName(err)});
+        jsonError("storage eval failed: {s}", .{@errorName(err)});
         std.process.exit(1);
     };
     std.fs.File.stdout().writeAll(response) catch {};
@@ -1053,7 +1051,7 @@ fn cmdJwt(arena: std.mem.Allocator, client: *CdpClient) !void {
     const params = try std.fmt.allocPrint(arena,
         "{{\"expression\":\"{s}\",\"returnByValue\":true}}", .{escaped});
     const response = client.send(arena, protocol.Methods.runtime_evaluate, params) catch |err| {
-        std.debug.print("error: jwt scan failed: {s}\n", .{@errorName(err)});
+        jsonError("jwt scan failed: {s}", .{@errorName(err)});
         std.process.exit(1);
     };
     std.fs.File.stdout().writeAll(response) catch {};
@@ -1084,7 +1082,7 @@ fn cmdFetch(arena: std.mem.Allocator, client: *CdpClient, method: []const u8, ur
     const params = try std.fmt.allocPrint(arena,
         "{{\"expression\":\"{s}\",\"returnByValue\":true,\"awaitPromise\":true}}", .{escaped});
     const response = client.send(arena, protocol.Methods.runtime_evaluate, params) catch |err| {
-        std.debug.print("error: fetch failed: {s}\n", .{@errorName(err)});
+        jsonError("fetch failed: {s}", .{@errorName(err)});
         std.process.exit(1);
     };
     std.fs.File.stdout().writeAll(response) catch {};
@@ -1117,7 +1115,7 @@ fn cmdProbe(arena: std.mem.Allocator, client: *CdpClient, tmpl: []const u8, star
     const params = try std.fmt.allocPrint(arena,
         "{{\"expression\":\"{s}\",\"returnByValue\":true,\"awaitPromise\":true}}", .{escaped});
     const response = client.send(arena, protocol.Methods.runtime_evaluate, params) catch |err| {
-        std.debug.print("error: probe failed: {s}\n", .{@errorName(err)});
+        jsonError("probe failed: {s}", .{@errorName(err)});
         std.process.exit(1);
     };
     std.fs.File.stdout().writeAll(response) catch {};
@@ -1276,8 +1274,20 @@ fn fetchChromeTabs(arena: std.mem.Allocator, host: []const u8, port: u16) ![]con
 /// Handles: {"id":N,"result":{"result":{"type":"string","value":"..."}}}
 /// Returns the raw value string, or the full response if not parseable.
 fn extractCdpValue(resp: []const u8) []const u8 {
-    // Check for error first
-    if (std.mem.indexOf(u8, resp, "\"exceptionDetails\"")) |_| return resp;
+    // Check for error — extract just the description string
+    if (std.mem.indexOf(u8, resp, "\"exceptionDetails\"")) |_| {
+        // Find "description":"Error: ..."
+        if (std.mem.indexOf(u8, resp, "\"description\":\"")) |desc_pos| {
+            const start = desc_pos + 15;
+            var i = start;
+            while (i < resp.len) {
+                if (resp[i] == '\\') { i += 2; continue; }
+                if (resp[i] == '"') return resp[start..i];
+                i += 1;
+            }
+        }
+        return resp;
+    }
     // Find "value": and extract
     const marker = "\"value\":";
     const pos = std.mem.indexOf(u8, resp, marker) orelse return resp;
@@ -1469,8 +1479,24 @@ fn parseOutFlag(flags: []const []const u8) ?[]const u8 {
     return null;
 }
 
+fn jsonError(comptime fmt: []const u8, args: anytype) void {
+    var buf: [512]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, fmt, args) catch "unknown error";
+    const clean = std.mem.trimRight(u8, msg, "\n");
+    var out_buf: [600]u8 = undefined;
+    const out = std.fmt.bufPrint(&out_buf, "{{\"error\":\"{s}\"}}\n", .{clean}) catch "{\"error\":\"unknown\"}\n";
+    std.fs.File.stdout().writeAll(out) catch {};
+}
+
 fn fatal(comptime fmt: []const u8, args: anytype) noreturn {
-    std.debug.print(fmt, args);
+    // Output JSON error to stdout so agents can parse it
+    var buf: [512]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, fmt, args) catch "unknown error";
+    // Strip trailing newline
+    const clean = std.mem.trimRight(u8, msg, "\n");
+    var out_buf: [600]u8 = undefined;
+    const out = std.fmt.bufPrint(&out_buf, "{{\"error\":\"{s}\"}}\n", .{clean}) catch "{\"error\":\"fatal\"}\n";
+    std.fs.File.stdout().writeAll(out) catch {};
     std.process.exit(1);
 }
 
