@@ -139,7 +139,7 @@ pub fn buildSnapshot(
             if (!isSemantic(node.role) and node.name.len == 0) continue;
         }
 
-        // Compact mode: same noise filtering as semantic
+        // Compact mode: skip noise + deduplicate StaticText
         if (opts.compact and !opts.filter_interactive) {
             if (isNoise(node.role)) continue;
             if (node.name.len == 0 and !isInteractive(node.role)) continue;
@@ -147,8 +147,8 @@ pub fn buildSnapshot(
 
         const ref = try std.fmt.allocPrint(allocator, "e{d}", .{result.items.len});
 
-        // Truncate name at 120 chars
-        const name = if (node.name.len > 120) node.name[0..120] else node.name;
+        // Truncate name — 70 chars captures all useful info without waste
+        const name = if (node.name.len > 70) node.name[0..70] else node.name;
 
         try result.append(allocator, .{
             .ref = ref,
@@ -160,7 +160,50 @@ pub fn buildSnapshot(
         });
     }
 
+    // Compact mode: drop StaticText whose name already appears in a non-StaticText node
+    if (opts.compact) {
+        // Collect all non-StaticText names
+        var name_set: std.StringHashMap(void) = .init(allocator);
+        for (result.items) |node| {
+            if (!std.mem.eql(u8, node.role, "StaticText") and node.name.len > 2) {
+                try name_set.put(node.name, {});
+            }
+        }
+        // Filter: keep StaticText only if its name is NOT in the set
+        var filtered: std.ArrayList(A11yNode) = .empty;
+        var ref_idx: usize = 0;
+        for (result.items) |node| {
+            if (std.mem.eql(u8, node.role, "StaticText")) {
+                // Drop whitespace-only
+                const trimmed = std.mem.trim(u8, node.name, " \t\n\r");
+                if (trimmed.len <= 1) continue;
+                // Drop if text appears in a non-StaticText node's name
+                if (name_set.contains(node.name)) continue;
+                // Drop if mostly non-ASCII (unicode separators, bullets, etc.)
+                var ascii_count: usize = 0;
+                for (trimmed) |c| {
+                    if (c >= 0x20 and c < 0x7f) ascii_count += 1;
+                }
+                if (trimmed.len > 2 and ascii_count * 3 < trimmed.len) continue;
+            }
+            // Only assign refs to interactive elements — agents only click/type those
+            const is_act = isInteractive(node.role);
+            const new_ref = if (is_act) try std.fmt.allocPrint(allocator, "e{d}", .{ref_idx}) else "";
+            if (is_act) ref_idx += 1;
+            try filtered.append(allocator, .{
+                .ref = new_ref,
+                .role = node.role,
+                .name = node.name,
+                .value = node.value,
+                .backend_node_id = node.backend_node_id,
+                .depth = node.depth,
+            });
+        }
+        return filtered.toOwnedSlice(allocator);
+    }
+
     return result.toOwnedSlice(allocator);
+
 }
 
 /// Compact text-tree format: `role "name" @ref` — agent-browser style.
@@ -178,7 +221,7 @@ pub fn formatCompact(nodes: []const A11yNode, allocator: std.mem.Allocator) ![]c
         if (node.name.len > 0) {
             try w.print(" \"{s}\"", .{node.name});
         }
-        try w.print(" @{s}", .{node.ref});
+        if (node.ref.len > 0) try w.print(" @{s}", .{node.ref});
         if (node.value.len > 0) {
             try w.print(" = {s}", .{node.value});
         }
