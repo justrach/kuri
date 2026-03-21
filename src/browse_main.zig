@@ -665,11 +665,15 @@ fn truncateUrl(url: []const u8, max: usize) []const u8 {
     return url[0..max];
 }
 
+fn getenv(name: []const u8) ?[]const u8 {
+    return std.process.getEnvVarOwned(std.heap.page_allocator, name) catch null;
+}
+
 fn shouldUseColor() bool {
-    if (std.posix.getenv("NO_COLOR")) |v| {
+    if (getenv("NO_COLOR")) |v| {
         if (v.len > 0) return false;
     }
-    if (std.posix.getenv("TERM")) |term| {
+    if (getenv("TERM")) |term| {
         if (std.mem.eql(u8, term, "dumb")) return false;
     }
     return std.posix.isatty(std.fs.File.stderr().handle);

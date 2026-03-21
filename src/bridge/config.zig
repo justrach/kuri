@@ -13,33 +13,37 @@ pub const Config = struct {
     headless: bool,
 };
 
+fn getenv(name: []const u8) ?[]const u8 {
+    return std.process.getEnvVarOwned(std.heap.page_allocator, name) catch null;
+}
+
 pub fn load() Config {
     return .{
-        .host = std.posix.getenv("HOST") orelse "127.0.0.1",
+        .host = getenv("HOST") orelse "127.0.0.1",
         .port = parsePort() orelse 8080,
-        .cdp_url = std.posix.getenv("CDP_URL"),
-        .auth_secret = std.posix.getenv("BROWDIE_SECRET"),
-        .state_dir = std.posix.getenv("STATE_DIR") orelse ".browdie",
+        .cdp_url = getenv("CDP_URL"),
+        .auth_secret = getenv("BROWDIE_SECRET"),
+        .state_dir = getenv("STATE_DIR") orelse ".browdie",
         .stale_tab_interval_s = parseU32("STALE_TAB_INTERVAL_S") orelse 30,
         .request_timeout_ms = parseU32("REQUEST_TIMEOUT_MS") orelse 30_000,
         .navigate_timeout_ms = parseU32("NAVIGATE_TIMEOUT_MS") orelse 30_000,
-        .extensions = std.posix.getenv("BROWDIE_EXTENSIONS"),
+        .extensions = getenv("BROWDIE_EXTENSIONS"),
         .headless = parseBool("HEADLESS") orelse true,
     };
 }
 
 fn parsePort() ?u16 {
-    const val = std.posix.getenv("PORT") orelse return null;
+    const val = getenv("PORT") orelse return null;
     return std.fmt.parseInt(u16, val, 10) catch null;
 }
 
 fn parseU32(name: []const u8) ?u32 {
-    const val = std.posix.getenv(name) orelse return null;
+    const val = getenv(name) orelse return null;
     return std.fmt.parseInt(u32, val, 10) catch null;
 }
 
 fn parseBool(name: []const u8) ?bool {
-    const val = std.posix.getenv(name) orelse return null;
+    const val = getenv(name) orelse return null;
     if (std.mem.eql(u8, val, "false") or std.mem.eql(u8, val, "0")) return false;
     return true;
 }

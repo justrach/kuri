@@ -268,6 +268,10 @@ fn cmdUse(arena: std.mem.Allocator, ws_url: []const u8) !void {
 
 /// Launch a visible (non-headless) Chrome with CDP, wait for it, auto-attach.
 /// This is the "human mode" — real browser, real user, agent rides alongside.
+fn getenv(allocator: std.mem.Allocator, name: []const u8) ?[]const u8 {
+    return std.process.getEnvVarOwned(allocator, name) catch null;
+}
+
 fn cmdOpen(arena: std.mem.Allocator, port: u16, url: ?[]const u8) !void {
     // 1. Check if Chrome CDP is already available on this port
     if (tryAttach(arena, port, url)) return;
@@ -283,7 +287,7 @@ fn cmdOpen(arena: std.mem.Allocator, port: u16, url: ?[]const u8) !void {
     const port_flag = try std.fmt.allocPrint(arena, "--remote-debugging-port={d}", .{port});
     try argv.append(arena, port_flag);
     // Chrome requires a data dir for CDP; use default profile so cookies/logins persist
-    const home = std.posix.getenv("HOME") orelse "/tmp";
+    const home = getenv(arena, "HOME") orelse "/tmp";
     const data_dir = try std.fmt.allocPrint(arena, "--user-data-dir={s}/.kuri/chrome-profile", .{home});
     try argv.append(arena, data_dir);
     if (url) |u| try argv.append(arena, u);
@@ -673,7 +677,7 @@ fn cmdScreenshot(arena: std.mem.Allocator, client: *CdpClient, out_path: ?[]cons
 
     // Determine output path — default to ~/.kuri/screenshots/<timestamp>.png
     const path: []const u8 = out_path orelse blk: {
-        const home = std.posix.getenv("HOME") orelse ".";
+        const home = getenv(arena, "HOME") orelse ".";
         const shots_dir = try std.fmt.allocPrint(arena, "{s}/.kuri/screenshots", .{home});
         std.fs.cwd().makePath(shots_dir) catch {};
         const ts = std.time.timestamp();
@@ -1126,7 +1130,7 @@ fn cmdProbe(arena: std.mem.Allocator, client: *CdpClient, tmpl: []const u8, star
 // ── Session I/O ───────────────────────────────────────────────────────────────
 
 fn sessionPath(arena: std.mem.Allocator) ![]const u8 {
-    const home = std.posix.getenv("HOME") orelse ".";
+    const home = getenv(arena, "HOME") orelse ".";
     return std.fmt.allocPrint(arena, "{s}/{s}", .{ home, SESSION_FILE });
 }
 
@@ -1206,7 +1210,7 @@ fn saveSession(arena: std.mem.Allocator, session: *Session) !void {
     const path = try sessionPath(arena);
 
     // Ensure ~/.kuri exists
-    const home = std.posix.getenv("HOME") orelse ".";
+    const home = getenv(arena, "HOME") orelse ".";
     const dir_path = try std.fmt.allocPrint(arena, "{s}/.kuri", .{home});
     std.fs.cwd().makeDir(dir_path) catch |err| switch (err) {
         error.PathAlreadyExists => {},

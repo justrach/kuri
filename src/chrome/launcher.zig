@@ -106,7 +106,7 @@ pub const Launcher = struct {
             try argv_list.append(self.allocator, "--disable-gpu");
         } else {
             // Visible mode: needs a data dir for CDP to work on macOS
-            const home = std.posix.getenv("HOME") orelse "/tmp";
+            const home = std.process.getEnvVarOwned(self.allocator, "HOME") catch "/tmp";
             const data_dir = try std.fmt.allocPrint(self.allocator, "--user-data-dir={s}/.kuri/chrome-profile", .{home});
             try argv_list.append(self.allocator, data_dir);
         }
@@ -134,10 +134,7 @@ pub const Launcher = struct {
         try child.spawn();
         self.child = child;
 
-        std.log.info("launched Chrome (pid={d}) on CDP port {d}", .{
-            child.id,
-            self.cdp_port,
-        });
+        std.log.info("launched Chrome on CDP port {d}", .{self.cdp_port});
         // Give Chrome a moment to start
         std.Thread.sleep(500 * std.time.ns_per_ms);
     }

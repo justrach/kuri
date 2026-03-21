@@ -197,12 +197,16 @@ fn elapsed(start: i128) u64 {
     return if (diff > 0) @as(u64, @intCast(diff)) / std.time.ns_per_ms else 0;
 }
 
+fn getenv(name: []const u8) ?[]const u8 {
+    return std.process.getEnvVarOwned(std.heap.page_allocator, name) catch null;
+}
+
 fn shouldUseColor(force_no_color: bool) bool {
     if (force_no_color) return false;
-    if (std.posix.getenv("NO_COLOR")) |v| {
+    if (getenv("NO_COLOR")) |v| {
         if (v.len > 0) return false;
     }
-    if (std.posix.getenv("TERM")) |term| {
+    if (getenv("TERM")) |term| {
         if (std.mem.eql(u8, term, "dumb")) return false;
     }
     return std.posix.isatty(std.fs.File.stderr().handle);

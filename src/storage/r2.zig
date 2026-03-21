@@ -1,5 +1,9 @@
 const std = @import("std");
 
+fn getenv(name: []const u8) ?[]const u8 {
+    return std.process.getEnvVarOwned(std.heap.page_allocator, name) catch null;
+}
+
 pub const R2Config = struct {
     endpoint_url: []const u8,
     access_key: []const u8,
@@ -8,10 +12,10 @@ pub const R2Config = struct {
 };
 
 pub fn loadConfig() ?R2Config {
-    const endpoint = std.posix.getenv("R2_ENDPOINT_URL") orelse return null;
-    const access_key = std.posix.getenv("R2_ACCESS_KEY") orelse return null;
-    const secret_key = std.posix.getenv("R2_SECRET_KEY") orelse return null;
-    const bucket = std.posix.getenv("R2_BUCKET_NAME") orelse return null;
+    const endpoint = getenv("R2_ENDPOINT_URL") orelse return null;
+    const access_key = getenv("R2_ACCESS_KEY") orelse return null;
+    const secret_key = getenv("R2_SECRET_KEY") orelse return null;
+    const bucket = getenv("R2_BUCKET_NAME") orelse return null;
 
     return .{
         .endpoint_url = endpoint,
