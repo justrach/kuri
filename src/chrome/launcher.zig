@@ -25,6 +25,17 @@ pub const Launcher = struct {
         ws_url: ?[]const u8,
     };
 
+    pub const StartResult = struct {
+        cdp_port: u16,
+        cdp_url: []const u8,
+    };
+
+    const ParsedUrl = struct {
+        host: []const u8,
+        port: u16,
+        path: []const u8,
+    };
+
     const default_cdp_port: u16 = 9222;
     const max_restarts: u8 = 3;
     const health_timeout_ms: u32 = 2_000;
@@ -35,6 +46,7 @@ pub const Launcher = struct {
             "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
         },
         else => &[_][]const u8{
+            "chrome",
             "google-chrome",
             "chromium-browser",
             "chromium",
@@ -58,23 +70,26 @@ pub const Launcher = struct {
     }
 
     /// Start Chrome or connect to an existing instance.
-    /// Returns the CDP port to connect to.
-    pub fn start(self: *Launcher, cfg: config.Config) !u16 {
+    /// Returns the resolved websocket CDP endpoint and port.
+    pub fn start(self: *Launcher, cfg: config.Config) !StartResult {
         switch (self.mode) {
             .external => {
-                // Validate the external Chrome is reachable
-                const status = self.healthCheck();
-                if (!status.alive) {
-                    std.log.warn("external Chrome at port {d} is not reachable", .{self.cdp_port});
-                }
-                return self.cdp_port;
+                const raw_url = cfg.cdp_url orelse return error.MissingCdpUrl;
+                try self.resolveExternal(raw_url);
+                return .{
+                    .cdp_port = self.cdp_port,
+                    .cdp_url = self.cdpUrl() orelse return error.MissingDebuggerUrl,
+                };
             },
             .managed => {
-                _ = cfg;
                 // Find a free CDP port
                 self.cdp_port = try findFreePort(default_cdp_port);
                 try self.launchChrome();
-                return self.cdp_port;
+                try self.waitForDebuggerUrl();
+                return .{
+                    .cdp_port = self.cdp_port,
+                    .cdp_url = self.cdpUrl() orelse return error.MissingDebuggerUrl,
+                };
             },
         }
     }
@@ -147,6 +162,11 @@ pub const Launcher = struct {
         return httpProbeJsonVersion(self.cdp_port);
     }
 
+    pub fn cdpUrl(self: *const Launcher) ?[]const u8 {
+        if (self.ws_url_len == 0) return null;
+        return self.ws_url_buf[0..self.ws_url_len];
+    }
+
     /// Supervise Chrome — call periodically. Restarts on crash.
     pub fn supervise(self: *Launcher) !void {
         if (self.mode == .external) return;
@@ -195,6 +215,53 @@ pub const Launcher = struct {
             return path;
         }
         return null;
+    }
+
+    fn resolveExternal(self: *Launcher, raw_url: []const u8) !void {
+        if (std.mem.startsWith(u8, raw_url, "ws://") or std.mem.startsWith(u8, raw_url, "wss://")) {
+            const parsed = parseSocketUrl(raw_url) orelse return error.InvalidCdpUrl;
+            self.cdp_port = parsed.port;
+            try self.storeWsUrl(raw_url);
+
+            const status = httpProbe(raw_url, parsed.host, parsed.port, "/json/version");
+            if (!status.alive) return error.ConnectionRefused;
+            return;
+        }
+
+        if (std.mem.startsWith(u8, raw_url, "http://")) {
+            const parsed = parseHttpUrl(raw_url) orelse return error.InvalidCdpUrl;
+            self.cdp_port = parsed.port;
+            const status = httpProbe(raw_url, parsed.host, parsed.port, parsed.path);
+            if (!status.alive) return error.ConnectionRefused;
+            const ws_url = status.ws_url orelse return error.MissingDebuggerUrl;
+            try self.storeWsUrl(ws_url);
+            return;
+        }
+
+        if (std.mem.startsWith(u8, raw_url, "https://")) {
+            return error.UnsupportedCdpScheme;
+        }
+
+        return error.InvalidCdpUrl;
+    }
+
+    fn waitForDebuggerUrl(self: *Launcher) !void {
+        var attempts: u8 = 0;
+        while (attempts < 20) : (attempts += 1) {
+            const status = self.healthCheck();
+            if (status.alive and status.ws_url != null) {
+                try self.storeWsUrl(status.ws_url.?);
+                return;
+            }
+            std.Thread.sleep(250 * std.time.ns_per_ms);
+        }
+        return error.ConnectionRefused;
+    }
+
+    fn storeWsUrl(self: *Launcher, ws_url: []const u8) !void {
+        if (ws_url.len > self.ws_url_buf.len) return error.NameTooLong;
+        @memcpy(self.ws_url_buf[0..ws_url.len], ws_url);
+        self.ws_url_len = ws_url.len;
     }
 };
 
@@ -265,13 +332,19 @@ pub fn isPortInUse(port: u16) bool {
 /// Probe Chrome's /json/version endpoint via raw TCP HTTP GET.
 /// Returns alive status and optional webSocketDebuggerUrl.
 fn httpProbeJsonVersion(port: u16) Launcher.ChromeStatus {
-    const addr = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, port);
-    var stream = std.net.tcpConnectToAddress(addr) catch
+    return httpProbe("/json/version", "127.0.0.1", port, "/json/version");
+}
+
+fn httpProbe(raw_url: []const u8, host: []const u8, port: u16, path: []const u8) Launcher.ChromeStatus {
+    const connect_host = normalizeHost(host);
+    var stream = std.net.tcpConnectToHost(std.heap.page_allocator, connect_host, port) catch
         return .{ .alive = false, .ws_url = null };
 
     defer stream.close();
 
-    const request = "GET /json/version HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    var req_buf: [512]u8 = undefined;
+    const request = std.fmt.bufPrint(&req_buf, "GET {s} HTTP/1.1\r\nHost: {s}:{d}\r\nConnection: close\r\n\r\n", .{ path, host, port }) catch
+        return .{ .alive = false, .ws_url = null };
     _ = stream.write(request) catch
         return .{ .alive = false, .ws_url = null };
 
@@ -292,7 +365,51 @@ fn httpProbeJsonVersion(port: u16) Launcher.ChromeStatus {
 
     // Try to extract webSocketDebuggerUrl
     const ws_url = extractWsUrl(body);
+    _ = raw_url;
     return .{ .alive = true, .ws_url = ws_url };
+}
+
+fn normalizeHost(host: []const u8) []const u8 {
+    if (std.mem.eql(u8, host, "localhost")) return "127.0.0.1";
+    return host;
+}
+
+fn parseSocketUrl(url: []const u8) ?Launcher.ParsedUrl {
+    var remainder = url;
+    if (std.mem.startsWith(u8, url, "ws://")) {
+        remainder = url[5..];
+    } else if (std.mem.startsWith(u8, url, "wss://")) {
+        remainder = url[6..];
+    } else {
+        return null;
+    }
+    return parseHostPortPath(remainder, Launcher.default_cdp_port, "/");
+}
+
+fn parseHttpUrl(url: []const u8) ?Launcher.ParsedUrl {
+    if (!std.mem.startsWith(u8, url, "http://")) return null;
+    return parseHostPortPath(url[7..], 80, "/json/version");
+}
+
+fn parseHostPortPath(remainder: []const u8, default_port: u16, default_path: []const u8) ?Launcher.ParsedUrl {
+    const slash = std.mem.indexOfScalar(u8, remainder, '/') orelse remainder.len;
+    const host_port = remainder[0..slash];
+    if (host_port.len == 0) return null;
+
+    var host = host_port;
+    var port = default_port;
+    if (std.mem.indexOfScalar(u8, host_port, ':')) |colon| {
+        host = host_port[0..colon];
+        port = std.fmt.parseInt(u16, host_port[colon + 1 ..], 10) catch return null;
+    }
+    if (host.len == 0) return null;
+
+    const path = if (slash < remainder.len) remainder[slash..] else default_path;
+    return .{
+        .host = normalizeHost(host),
+        .port = port,
+        .path = path,
+    };
 }
 
 /// Extract the webSocketDebuggerUrl value from a JSON response body.
@@ -343,6 +460,20 @@ test "extractWsUrl parses debugger URL" {
 test "extractWsUrl returns null for missing key" {
     const body = "HTTP/1.1 200 OK\r\n\r\n{\"Browser\":\"Chrome\"}";
     try std.testing.expect(extractWsUrl(body) == null);
+}
+
+test "parseHttpUrl extracts host port and path" {
+    const parsed = parseHttpUrl("http://localhost:9333/json/version").?;
+    try std.testing.expectEqualStrings("127.0.0.1", parsed.host);
+    try std.testing.expectEqual(@as(u16, 9333), parsed.port);
+    try std.testing.expectEqualStrings("/json/version", parsed.path);
+}
+
+test "parseSocketUrl extracts websocket port" {
+    const parsed = parseSocketUrl("ws://127.0.0.1:9444/devtools/browser/abc").?;
+    try std.testing.expectEqualStrings("127.0.0.1", parsed.host);
+    try std.testing.expectEqual(@as(u16, 9444), parsed.port);
+    try std.testing.expectEqualStrings("/devtools/browser/abc", parsed.path);
 }
 
 test "Launcher init managed mode" {

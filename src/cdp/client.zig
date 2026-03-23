@@ -30,11 +30,11 @@ pub const EventBuffer = struct {
         }
     }
 
-    /// Check if any buffered event matches a method name.
+    /// Check if any buffered event matches a CDP method name exactly.
     pub fn hasEvent(self: *EventBuffer, method: []const u8) bool {
         for (self.items[0..self.len]) |item| {
             if (item) |ev| {
-                if (std.mem.indexOf(u8, ev, method) != null) return true;
+                if (eventMatchesMethod(ev, method)) return true;
             }
         }
         return false;
@@ -105,8 +105,8 @@ pub const CdpClient = struct {
 
         var ws = &(self.ws orelse return error.ConnectionRefused);
 
-        const msg = try self.buildMessage(allocator, method, params_json);
-        const sent_id = self.next_id.load(.monotonic) - 1; // ID we just used
+        const sent_id = self.nextId();
+        const msg = try self.buildMessageWithId(allocator, sent_id, method, params_json);
         defer allocator.free(msg);
 
         ws.sendText(msg) catch return error.ConnectionRefused;
@@ -149,14 +149,18 @@ pub const CdpClient = struct {
         return parsed_id == expected_id;
     }
 
-    /// Build a JSON-RPC message for a CDP command.
-    pub fn buildMessage(self: *CdpClient, allocator: std.mem.Allocator, method: []const u8, params_json: ?[]const u8) ![]const u8 {
-        const id = self.nextId();
+    /// Build a JSON-RPC message for a CDP command with an explicit ID.
+    pub fn buildMessageWithId(_: *CdpClient, allocator: std.mem.Allocator, id: u32, method: []const u8, params_json: ?[]const u8) ![]const u8 {
         if (params_json) |p| {
             return std.fmt.allocPrint(allocator, "{{\"id\":{d},\"method\":\"{s}\",\"params\":{s}}}", .{ id, method, p });
         } else {
             return std.fmt.allocPrint(allocator, "{{\"id\":{d},\"method\":\"{s}\"}}", .{ id, method });
         }
+    }
+
+    /// Build a JSON-RPC message for a CDP command (auto-assigns next ID).
+    pub fn buildMessage(self: *CdpClient, allocator: std.mem.Allocator, method: []const u8, params_json: ?[]const u8) ![]const u8 {
+        return self.buildMessageWithId(allocator, self.nextId(), method, params_json);
     }
 
     pub fn disconnect(self: *CdpClient) void {
@@ -177,7 +181,7 @@ pub const CdpClient = struct {
         var attempts: u32 = 0;
         while (attempts < max_attempts) : (attempts += 1) {
             const response = ws.receiveMessageAlloc(allocator, 2 * 1024 * 1024) catch return false;
-            if (std.mem.indexOf(u8, response, method) != null) {
+            if (eventMatchesMethod(response, method)) {
                 allocator.free(response);
                 return true;
             }
@@ -191,6 +195,14 @@ pub const CdpClient = struct {
         self.disconnect();
     }
 };
+
+fn eventMatchesMethod(event_json: []const u8, method: []const u8) bool {
+    var match_buf: [256]u8 = undefined;
+    const match_pattern = std.fmt.bufPrint(&match_buf, "\"method\":\"{s}\"", .{method}) catch {
+        return std.mem.indexOf(u8, event_json, method) != null;
+    };
+    return std.mem.indexOf(u8, event_json, match_pattern) != null;
+}
 
 test "CdpClient message building" {
     var client = CdpClient.init(std.testing.allocator, "ws://localhost:9222");

@@ -23,7 +23,17 @@ pub const RefCache = struct {
         };
     }
 
+    pub fn clear(self: *RefCache) void {
+        var it = self.refs.keyIterator();
+        while (it.next()) |key| {
+            self.refs.allocator.free(key.*);
+        }
+        self.refs.clearRetainingCapacity();
+        self.node_count = 0;
+    }
+
     pub fn deinit(self: *RefCache) void {
+        self.clear();
         self.refs.deinit();
     }
 };
@@ -64,6 +74,11 @@ pub const Bridge = struct {
         }
         self.cdp_clients.deinit();
 
+        var prev_it = self.prev_snapshots.iterator();
+        while (prev_it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+            freeSnapshot(self.allocator, entry.value_ptr.*);
+        }
         self.prev_snapshots.deinit();
 
         var snap_it = self.snapshots.valueIterator();
@@ -134,7 +149,10 @@ pub const Bridge = struct {
         const tab = self.tabs.get(tab_id) orelse {
             if (self.snapshots.getPtr(tab_id)) |cache| cache.deinit();
             _ = self.snapshots.remove(tab_id);
-            _ = self.prev_snapshots.remove(tab_id);
+            if (self.prev_snapshots.fetchRemove(tab_id)) |kv| {
+                self.allocator.free(kv.key);
+                freeSnapshot(self.allocator, kv.value);
+            }
             if (self.cdp_clients.fetchRemove(tab_id)) |kv| {
                 kv.value.deinit();
                 self.allocator.destroy(kv.value);
@@ -155,7 +173,10 @@ pub const Bridge = struct {
 
         if (self.snapshots.getPtr(tab_id)) |cache| cache.deinit();
         _ = self.snapshots.remove(tab_id);
-        _ = self.prev_snapshots.remove(tab_id);
+        if (self.prev_snapshots.fetchRemove(tab_id)) |kv| {
+            self.allocator.free(kv.key);
+            freeSnapshot(self.allocator, kv.value);
+        }
         if (self.cdp_clients.fetchRemove(tab_id)) |kv| {
             kv.value.deinit();
             self.allocator.destroy(kv.value);
@@ -255,7 +276,7 @@ pub const Bridge = struct {
         const colon = std.mem.indexOfScalarPos(u8, json, field_pos + field.len, ':') orelse return null;
         var i = colon + 1;
         while (i < json.len and (json[i] == ' ' or json[i] == '"')) : (i += 1) {}
-        if (i == 0) return null;
+        if (i >= json.len) return null;
         const val_start = i;
         const val_end = std.mem.indexOfScalarPos(u8, json, val_start, '"') orelse return null;
         return json[val_start..val_end];
@@ -279,7 +300,46 @@ pub const Bridge = struct {
         };
         return rec;
     }
+
+    pub fn cloneSnapshot(self: *Bridge, snapshot: []const A11yNode) ![]A11yNode {
+        const copy = try self.allocator.alloc(A11yNode, snapshot.len);
+        errdefer self.allocator.free(copy);
+
+        var initialized: usize = 0;
+        errdefer {
+            for (copy[0..initialized]) |node| {
+                self.allocator.free(node.ref);
+                self.allocator.free(node.role);
+                self.allocator.free(node.name);
+                self.allocator.free(node.value);
+            }
+        }
+
+        for (snapshot, 0..) |node, i| {
+            copy[i] = .{
+                .ref = try self.allocator.dupe(u8, node.ref),
+                .role = try self.allocator.dupe(u8, node.role),
+                .name = try self.allocator.dupe(u8, node.name),
+                .value = try self.allocator.dupe(u8, node.value),
+                .backend_node_id = node.backend_node_id,
+                .depth = node.depth,
+            };
+            initialized += 1;
+        }
+
+        return copy;
+    }
 };
+
+fn freeSnapshot(allocator: std.mem.Allocator, snapshot: []const A11yNode) void {
+    for (snapshot) |node| {
+        allocator.free(node.ref);
+        allocator.free(node.role);
+        allocator.free(node.name);
+        allocator.free(node.value);
+    }
+    allocator.free(snapshot);
+}
 
 test "bridge init/deinit" {
     var bridge = Bridge.init(std.testing.allocator);

@@ -56,6 +56,14 @@ pub const HarRecorder = struct {
         }
         self.entries.clearRetainingCapacity();
 
+        var pending_it = self.pending_requests.iterator();
+        while (pending_it.next()) |kv| {
+            self.allocator.free(kv.key_ptr.*);
+            self.allocator.free(kv.value_ptr.url);
+            self.allocator.free(kv.value_ptr.method);
+        }
+        self.pending_requests.clearRetainingCapacity();
+
         // Enable Network domain via CDP
         _ = client.send(self.allocator, "Network.enable", null) catch |err| {
             std.log.warn("HAR: Network.enable failed: {s}", .{@errorName(err)});
@@ -78,12 +86,20 @@ pub const HarRecorder = struct {
 
     /// Add a manually observed request/response to the HAR log.
     pub fn addEntry(self: *HarRecorder, entry: HarEntry) !void {
+        const owned_url = try self.allocator.dupe(u8, entry.url);
+        errdefer self.allocator.free(owned_url);
+        const owned_method = try self.allocator.dupe(u8, entry.method);
+        errdefer self.allocator.free(owned_method);
+        const owned_status_text = try self.allocator.dupe(u8, entry.status_text);
+        errdefer self.allocator.free(owned_status_text);
+        const owned_mime_type = try self.allocator.dupe(u8, entry.mime_type);
+        errdefer self.allocator.free(owned_mime_type);
         const owned = HarEntry{
-            .url = try self.allocator.dupe(u8, entry.url),
-            .method = try self.allocator.dupe(u8, entry.method),
+            .url = owned_url,
+            .method = owned_method,
             .status = entry.status,
-            .status_text = try self.allocator.dupe(u8, entry.status_text),
-            .mime_type = try self.allocator.dupe(u8, entry.mime_type),
+            .status_text = owned_status_text,
+            .mime_type = owned_mime_type,
             .timestamp = entry.timestamp,
             .duration_ms = entry.duration_ms,
             .request_size = entry.request_size,
@@ -175,7 +191,13 @@ pub const HarRecorder = struct {
             };
         } else if (std.mem.indexOf(u8, event_json, "\"Network.responseReceived\"") != null) {
             const request_id = extractField(event_json, "requestId") orelse return;
-            const pending = self.pending_requests.get(request_id) orelse return;
+            const pending_kv = self.pending_requests.fetchRemove(request_id) orelse return;
+            const pending = pending_kv.value;
+            defer {
+                self.allocator.free(pending_kv.key);
+                self.allocator.free(pending.url);
+                self.allocator.free(pending.method);
+            }
 
             // Extract status and mimeType from the response object
             const status_str = extractField(event_json, "status");
@@ -327,6 +349,33 @@ test "HarRecorder handleCdpEvent processes request and response" {
     // Send responseReceived for the same requestId
     rec.handleCdpEvent("{\"method\":\"Network.responseReceived\",\"params\":{\"requestId\":\"req1\",\"response\":{\"status\":200}}}");
     try std.testing.expectEqual(@as(usize, 1), rec.entryCount());
+    try std.testing.expectEqual(@as(usize, 0), rec.pending_requests.count());
+}
+
+test "HarRecorder start clears stale pending requests before enabling network" {
+    var rec = HarRecorder.init(std.testing.allocator);
+    defer rec.deinit();
+
+    const owned_id = try std.testing.allocator.dupe(u8, "stale");
+    const owned_url = try std.testing.allocator.dupe(u8, "https://example.com/stale");
+    const owned_method = try std.testing.allocator.dupe(u8, "GET");
+    try rec.pending_requests.put(owned_id, .{
+        .url = owned_url,
+        .method = owned_method,
+        .timestamp = 123,
+    });
+
+    rec.recording = true;
+    rec.handleCdpEvent("{\"method\":\"Network.requestWillBeSent\",\"params\":{\"requestId\":\"req1\",\"url\":\"https://example.com/page\",\"method\":\"GET\"}}");
+    try std.testing.expectEqual(@as(usize, 2), rec.pending_requests.count());
+
+    var client = CdpClient.init(std.testing.allocator, "ws://127.0.0.1:1/devtools/browser/test");
+    defer client.deinit();
+    try std.testing.expectError(error.ConnectionRefused, rec.start(&client));
+
+    try std.testing.expect(rec.isRecording());
+    try std.testing.expectEqual(@as(usize, 0), rec.entryCount());
+    try std.testing.expectEqual(@as(usize, 0), rec.pending_requests.count());
 }
 
 test "HarRecorder extractField helper" {

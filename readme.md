@@ -149,6 +149,27 @@ zig build test         # run 230+ tests
 ./zig-out/bin/kuri-browse https://example.com
 ```
 
+### First run, shortest path
+
+```bash
+# start the server; if CDP_URL is unset, kuri launches managed Chrome for you
+./zig-out/bin/kuri
+
+# discover tabs from that managed browser
+curl -s http://127.0.0.1:8080/discover
+
+# inspect the discovered tab list
+curl -s http://127.0.0.1:8080/tabs
+```
+
+If you already have Chrome running with remote debugging, set `CDP_URL` to either the WebSocket or HTTP endpoint:
+
+```bash
+CDP_URL=ws://127.0.0.1:9222/devtools/browser/... ./zig-out/bin/kuri
+# or
+CDP_URL=http://127.0.0.1:9222 ./zig-out/bin/kuri
+```
+
 ### Browse vercel.com in 4 commands
 
 ```bash
@@ -556,7 +577,7 @@ kuri/
 |---------|---------|-------------|
 | `HOST` | `127.0.0.1` | Server bind address |
 | `PORT` | `8080` | Server port |
-| `CDP_URL` | *(none)* | Connect to existing Chrome (`ws://127.0.0.1:9222`) |
+| `CDP_URL` | *(none)* | Connect to existing Chrome (`ws://...` or `http://127.0.0.1:9222`) |
 | `KURI_SECRET` | *(none)* | Auth secret for API requests |
 | `STATE_DIR` | `.kuri` | Session state directory |
 | `REQUEST_TIMEOUT_MS` | `30000` | HTTP request timeout |

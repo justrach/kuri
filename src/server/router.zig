@@ -12,7 +12,7 @@ const protocol = @import("../cdp/protocol.zig");
 const HarRecorder = @import("../cdp/har.zig").HarRecorder;
 const CdpClient = @import("../cdp/client.zig").CdpClient;
 
-pub fn run(gpa: std.mem.Allocator, bridge: *Bridge, cfg: Config) !void {
+pub fn run(gpa: std.mem.Allocator, bridge: *Bridge, cfg: Config, cdp_port: u16) !void {
     const address = try net.Address.parseIp4(cfg.host, cfg.port);
     var tcp_server = try address.listen(.{
         .reuse_address = true,
@@ -27,7 +27,7 @@ pub fn run(gpa: std.mem.Allocator, bridge: *Bridge, cfg: Config) !void {
             continue;
         };
 
-        const thread = std.Thread.spawn(.{}, handleConnection, .{ gpa, bridge, cfg, conn }) catch |err| {
+        const thread = std.Thread.spawn(.{}, handleConnection, .{ gpa, bridge, cfg, cdp_port, conn }) catch |err| {
             std.log.err("thread spawn error: {s}", .{@errorName(err)});
             conn.stream.close();
             continue;
@@ -36,7 +36,7 @@ pub fn run(gpa: std.mem.Allocator, bridge: *Bridge, cfg: Config) !void {
     }
 }
 
-fn handleConnection(gpa: std.mem.Allocator, bridge: *Bridge, cfg: Config, conn: net.Server.Connection) void {
+fn handleConnection(gpa: std.mem.Allocator, bridge: *Bridge, cfg: Config, cdp_port: u16, conn: net.Server.Connection) void {
     defer conn.stream.close();
 
     var arena_impl = std.heap.ArenaAllocator.init(gpa);
@@ -62,7 +62,7 @@ fn handleConnection(gpa: std.mem.Allocator, bridge: *Bridge, cfg: Config, conn: 
             return;
         }
 
-        route(&request, arena, bridge, cfg);
+        route(&request, arena, bridge, cfg, cdp_port);
 
         if (!request.head.keep_alive) return;
 
@@ -71,7 +71,7 @@ fn handleConnection(gpa: std.mem.Allocator, bridge: *Bridge, cfg: Config, conn: 
     }
 }
 
-fn route(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge, cfg: Config) void {
+fn route(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge, cfg: Config, cdp_port: u16) void {
     const path = request.head.target;
     const clean_path = if (std.mem.indexOfScalar(u8, path, '?')) |idx| path[0..idx] else path;
 
@@ -80,7 +80,7 @@ fn route(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *B
     } else if (std.mem.eql(u8, clean_path, "/tabs")) {
         handleTabs(request, arena, bridge);
     } else if (std.mem.eql(u8, clean_path, "/discover")) {
-        handleDiscover(request, arena, bridge, cfg);
+        handleDiscover(request, arena, bridge, cfg, cdp_port);
     } else if (std.mem.eql(u8, clean_path, "/navigate")) {
         handleNavigate(request, arena, bridge, cfg);
     } else if (std.mem.eql(u8, clean_path, "/snapshot")) {
@@ -284,7 +284,13 @@ fn handleTabs(request: *std.http.Server.Request, arena: std.mem.Allocator, bridg
     writer.writeAll("[") catch return;
     for (tabs, 0..) |tab, i| {
         if (i > 0) writer.writeAll(",") catch return;
-        writer.print("{{\"id\":\"{s}\",\"url\":\"{s}\",\"title\":\"{s}\"}}", .{ tab.id, tab.url, tab.title }) catch return;
+        writer.writeAll("{") catch return;
+        writeJsonField(writer, arena, "id", tab.id) catch return;
+        writer.writeAll(",") catch return;
+        writeJsonField(writer, arena, "url", tab.url) catch return;
+        writer.writeAll(",") catch return;
+        writeJsonField(writer, arena, "title", tab.title) catch return;
+        writer.writeAll("}") catch return;
     }
     writer.writeAll("]") catch return;
 
@@ -420,7 +426,7 @@ fn handleSnapshot(request: *std.http.Server.Request, arena: std.mem.Allocator, b
         };
 
         // Clear old refs and repopulate
-        ref_cache.refs.clearRetainingCapacity();
+        ref_cache.clear();
         for (snapshot) |node| {
             if (node.backend_node_id) |bid| {
                 const owned_ref = bridge.allocator.dupe(u8, node.ref) catch continue;
@@ -451,9 +457,15 @@ fn sendSnapshotResponse(request: *std.http.Server.Request, arena: std.mem.Alloca
     writer.writeAll("[") catch return;
     for (snapshot, 0..) |node, i| {
         if (i > 0) writer.writeAll(",") catch return;
-        writer.print("{{\"ref\":\"{s}\",\"role\":\"{s}\",\"name\":\"{s}\"", .{ node.ref, node.role, node.name }) catch return;
+        writer.writeAll("{") catch return;
+        writeJsonField(writer, arena, "ref", node.ref) catch return;
+        writer.writeAll(",") catch return;
+        writeJsonField(writer, arena, "role", node.role) catch return;
+        writer.writeAll(",") catch return;
+        writeJsonField(writer, arena, "name", node.name) catch return;
         if (node.value.len > 0) {
-            writer.print(",\"value\":\"{s}\"", .{node.value}) catch return;
+            writer.writeAll(",") catch return;
+            writeJsonField(writer, arena, "value", node.value) catch return;
         }
         writer.writeAll("}") catch return;
     }
@@ -698,36 +710,13 @@ fn handleBrowdie(request: *std.http.Server.Request) void {
     resp.sendJson(request, browdie);
 }
 
-fn handleDiscover(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge, cfg: Config) void {
-    const cdp_base = cfg.cdp_url orelse {
-        resp.sendError(request, 400, "No CDP_URL configured");
-        return;
-    };
+pub fn discoverTabs(arena: std.mem.Allocator, bridge: *Bridge, cfg: Config, cdp_port: u16) !usize {
+    const cdp_addr = parseCdpAddress(cfg.cdp_url, cdp_port);
+    const host = cdp_addr.host;
+    const port = cdp_addr.port;
 
-    // Parse host:port from CDP URL (strip ws:// prefix and path)
-    const after_scheme = if (std.mem.startsWith(u8, cdp_base, "ws://"))
-        cdp_base[5..]
-    else
-        cdp_base;
-    const host_end = std.mem.indexOfScalar(u8, after_scheme, '/') orelse after_scheme.len;
-    const host_port = after_scheme[0..host_end];
-
-    var host: []const u8 = "127.0.0.1";
-    var port: u16 = 9222;
-    if (std.mem.indexOfScalar(u8, host_port, ':')) |colon| {
-        host = host_port[0..colon];
-        if (std.mem.eql(u8, host, "localhost")) host = "127.0.0.1";
-        port = std.fmt.parseInt(u16, host_port[colon + 1 ..], 10) catch 9222;
-    }
-
-    const address = net.Address.parseIp4(host, port) catch {
-        resp.sendError(request, 502, "Cannot resolve Chrome address");
-        return;
-    };
-    const stream = net.tcpConnectToAddress(address) catch {
-        resp.sendError(request, 502, "Cannot connect to Chrome");
-        return;
-    };
+    const address = net.Address.parseIp4(host, port) catch return error.CannotResolveChromeAddress;
+    const stream = net.tcpConnectToAddress(address) catch return error.CannotConnectToChrome;
     defer stream.close();
 
     // Set read timeout (2 seconds) to avoid blocking forever
@@ -735,14 +724,8 @@ fn handleDiscover(request: *std.http.Server.Request, arena: std.mem.Allocator, b
     std.posix.setsockopt(stream.handle, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch {};
 
     // HTTP/1.1 required — Chrome ignores HTTP/1.0
-    const http_req = std.fmt.allocPrint(arena, "GET /json/list HTTP/1.1\r\nHost: {s}:{d}\r\nConnection: close\r\n\r\n", .{ host, port }) catch {
-        resp.sendError(request, 500, "Internal Server Error");
-        return;
-    };
-    stream.writeAll(http_req) catch {
-        resp.sendError(request, 502, "Failed to send request to Chrome");
-        return;
-    };
+    const http_req = try std.fmt.allocPrint(arena, "GET /json/list HTTP/1.1\r\nHost: {s}:{d}\r\nConnection: close\r\n\r\n", .{ host, port });
+    try stream.writeAll(http_req);
 
     // Read response with Content-Length awareness
     var response_buf: [65536]u8 = undefined;
@@ -761,16 +744,10 @@ fn handleDiscover(request: *std.http.Server.Request, arena: std.mem.Allocator, b
         }
     }
 
-    if (total == 0) {
-        resp.sendError(request, 502, "Empty response from Chrome");
-        return;
-    }
+    if (total == 0) return error.EmptyResponseFromChrome;
     const raw_response = response_buf[0..total];
 
-    const body_start = (std.mem.indexOf(u8, raw_response, "\r\n\r\n") orelse {
-        resp.sendError(request, 502, "Invalid response from Chrome");
-        return;
-    }) + 4;
+    const body_start = (std.mem.indexOf(u8, raw_response, "\r\n\r\n") orelse return error.InvalidChromeResponse) + 4;
     const body = raw_response[body_start..total];
 
     // Parse targets and register tabs
@@ -789,16 +766,15 @@ fn handleDiscover(request: *std.http.Server.Request, arena: std.mem.Allocator, b
         const ws_val = extractSimpleJsonString(body, id_start, "\"webSocketDebuggerUrl\"") orelse "";
 
         if (std.mem.eql(u8, type_val, "page") and ws_val.len > 0) {
-            // Dupe strings into arena so they outlive the stack buffer
             const entry = TabEntry{
-                .id = arena.dupe(u8, id_val) catch id_val,
-                .url = arena.dupe(u8, url_val) catch url_val,
-                .title = arena.dupe(u8, title_val) catch title_val,
-                .ws_url = arena.dupe(u8, ws_val) catch ws_val,
+                .id = id_val,
+                .url = url_val,
+                .title = title_val,
+                .ws_url = ws_val,
                 .created_at = @intCast(std.time.timestamp()),
                 .last_accessed = @intCast(std.time.timestamp()),
             };
-            bridge.putTab(entry) catch {};
+            try bridge.putTab(entry);
             registered += 1;
         }
 
@@ -806,12 +782,37 @@ fn handleDiscover(request: *std.http.Server.Request, arena: std.mem.Allocator, b
         pos = next_id;
     }
 
+    return registered;
+}
+
+fn handleDiscover(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge, cfg: Config, cdp_port: u16) void {
+    const registered = discoverTabs(arena, bridge, cfg, cdp_port) catch |err| {
+        switch (err) {
+            error.CannotResolveChromeAddress => resp.sendError(request, 502, "Cannot resolve Chrome address"),
+            error.CannotConnectToChrome => resp.sendError(request, 502, "Cannot connect to Chrome"),
+            error.EmptyResponseFromChrome => resp.sendError(request, 502, "Empty response from Chrome"),
+            error.InvalidChromeResponse => resp.sendError(request, 502, "Invalid response from Chrome"),
+            else => resp.sendError(request, 500, "Internal Server Error"),
+        }
+        return;
+    };
+
     const result = std.fmt.allocPrint(arena,
         "{{\"discovered\":{d},\"total_tabs\":{d}}}", .{ registered, bridge.tabCount() }) catch {
         resp.sendError(request, 500, "Internal Server Error");
         return;
     };
     resp.sendJson(request, result);
+}
+
+fn freeOwnedSnapshot(allocator: std.mem.Allocator, snapshot: []const @import("../snapshot/a11y.zig").A11yNode) void {
+    for (snapshot) |node| {
+        allocator.free(node.ref);
+        allocator.free(node.role);
+        allocator.free(node.name);
+        allocator.free(node.value);
+    }
+    allocator.free(snapshot);
 }
 
 fn findContentLength(headers: []const u8) ?usize {
@@ -826,6 +827,44 @@ fn findContentLength(headers: []const u8) ?usize {
         }
     }
     return null;
+}
+
+const CdpAddress = struct {
+    host: []const u8,
+    port: u16,
+};
+
+fn parseCdpAddress(cdp_url: ?[]const u8, fallback_port: u16) CdpAddress {
+    const raw = cdp_url orelse return .{ .host = "127.0.0.1", .port = fallback_port };
+    var remainder = raw;
+    var default_port = fallback_port;
+
+    if (std.mem.startsWith(u8, raw, "ws://")) {
+        remainder = raw[5..];
+        default_port = 80;
+    } else if (std.mem.startsWith(u8, raw, "wss://")) {
+        remainder = raw[6..];
+        default_port = 443;
+    } else if (std.mem.startsWith(u8, raw, "http://")) {
+        remainder = raw[7..];
+        default_port = 80;
+    } else if (std.mem.startsWith(u8, raw, "https://")) {
+        remainder = raw[8..];
+        default_port = 443;
+    }
+
+    const host_end = std.mem.indexOfScalar(u8, remainder, '/') orelse remainder.len;
+    const host_port = remainder[0..host_end];
+    if (std.mem.indexOfScalar(u8, host_port, ':')) |colon| {
+        var host = host_port[0..colon];
+        if (std.mem.eql(u8, host, "localhost")) host = "127.0.0.1";
+        const port = std.fmt.parseInt(u16, host_port[colon + 1 ..], 10) catch default_port;
+        return .{ .host = host, .port = port };
+    }
+
+    var host = host_port;
+    if (std.mem.eql(u8, host, "localhost")) host = "127.0.0.1";
+    return .{ .host = host, .port = default_port };
 }
 
 fn extractSimpleJsonString(json: []const u8, start: usize, field: []const u8) ?[]const u8 {
@@ -1444,9 +1483,9 @@ fn handleDiffSnapshot(request: *std.http.Server.Request, arena: std.mem.Allocato
     };
 
     // Get previous snapshot from bridge (empty if first call)
-    bridge.mu.lock();
+    bridge.mu.lockShared();
     const prev_nodes = if (bridge.prev_snapshots.get(tab_id)) |prev| prev else &[_]a11y.A11yNode{};
-    bridge.mu.unlock();
+    bridge.mu.unlockShared();
 
     // Compute diff
     const diff_mod = @import("../snapshot/diff.zig");
@@ -1456,10 +1495,30 @@ fn handleDiffSnapshot(request: *std.http.Server.Request, arena: std.mem.Allocato
     };
 
     // Store current snapshot as previous for next diff
+    const owned_current = bridge.cloneSnapshot(current) catch {
+        resp.sendError(request, 500, "Failed to persist snapshot");
+        return;
+    };
     {
         bridge.mu.lock();
         defer bridge.mu.unlock();
-        bridge.prev_snapshots.put(tab_id, current) catch {};
+
+        if (bridge.prev_snapshots.fetchRemove(tab_id)) |kv| {
+            freeOwnedSnapshot(bridge.allocator, kv.value);
+            bridge.allocator.free(kv.key);
+        }
+
+        const owned_key = bridge.allocator.dupe(u8, tab_id) catch {
+            freeOwnedSnapshot(bridge.allocator, owned_current);
+            resp.sendError(request, 500, "Failed to persist snapshot");
+            return;
+        };
+        bridge.prev_snapshots.put(owned_key, owned_current) catch {
+            bridge.allocator.free(owned_key);
+            freeOwnedSnapshot(bridge.allocator, owned_current);
+            resp.sendError(request, 500, "Failed to persist snapshot");
+            return;
+        };
     }
 
     // Serialize diff as JSON
@@ -1473,10 +1532,24 @@ fn handleDiffSnapshot(request: *std.http.Server.Request, arena: std.mem.Allocato
             .removed => "removed",
             .changed => "changed",
         };
-        writer.print("{{\"kind\":\"{s}\",\"ref\":\"{s}\",\"role\":\"{s}\",\"name\":\"{s}\"}}", .{ kind_str, entry.node.ref, entry.node.role, entry.node.name }) catch return;
+        writer.writeAll("{") catch return;
+        writeJsonField(writer, arena, "kind", kind_str) catch return;
+        writer.writeAll(",") catch return;
+        writeJsonField(writer, arena, "ref", entry.node.ref) catch return;
+        writer.writeAll(",") catch return;
+        writeJsonField(writer, arena, "role", entry.node.role) catch return;
+        writer.writeAll(",") catch return;
+        writeJsonField(writer, arena, "name", entry.node.name) catch return;
+        writer.writeAll("}") catch return;
     }
     writer.writeAll("]") catch return;
     resp.sendJson(request, json_buf.items);
+}
+
+fn writeJsonField(writer: anytype, allocator: std.mem.Allocator, key: []const u8, value: []const u8) !void {
+    const escaped = try json_util.jsonEscape(value, allocator);
+    defer allocator.free(escaped);
+    try writer.print("\"{s}\":\"{s}\"", .{ key, escaped });
 }
 
 fn handleEmulate(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
@@ -3609,6 +3682,33 @@ test "jsonEscapeAlloc escapes special chars" {
     const nl = jsonEscapeAlloc(arena, "line1\nline2\r\n").?;
     defer arena.free(nl);
     try std.testing.expectEqualStrings("line1\\nline2\\r\\n", nl);
+}
+
+test "parseCdpAddress falls back to managed chrome port" {
+    const addr = parseCdpAddress(null, 9224);
+    try std.testing.expectEqualStrings("127.0.0.1", addr.host);
+    try std.testing.expectEqual(@as(u16, 9224), addr.port);
+}
+
+test "parseCdpAddress accepts http discovery endpoint" {
+    const addr = parseCdpAddress("http://localhost:9333/json/version", 9224);
+    try std.testing.expectEqualStrings("127.0.0.1", addr.host);
+    try std.testing.expectEqual(@as(u16, 9333), addr.port);
+}
+
+test "parseCdpAddress accepts websocket endpoint path" {
+    const addr = parseCdpAddress("ws://127.0.0.1:9444/devtools/browser/abc", 9224);
+    try std.testing.expectEqualStrings("127.0.0.1", addr.host);
+    try std.testing.expectEqual(@as(u16, 9444), addr.port);
+}
+
+test "writeJsonField escapes embedded quotes" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    const writer = buf.writer(std.testing.allocator);
+
+    try writeJsonField(writer, std.testing.allocator, "title", "say \"hello\"\nnext");
+    try std.testing.expectEqualStrings("\"title\":\"say \\\"hello\\\"\\nnext\"", buf.items);
 }
 
 test "script/inject accepts POST body" {
