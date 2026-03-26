@@ -69,5 +69,6 @@ test {
     _ = @import("chrome/launcher.zig");
     _ = @import("test/integration.zig");
     _ = @import("storage/local.zig");
+    _ = @import("storage/auth_profiles.zig");
     _ = @import("util/tls.zig");
 }

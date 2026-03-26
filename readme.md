@@ -249,7 +249,13 @@ All endpoints return JSON. Optional auth via `KURI_SECRET` env var.
 | `GET /storage/session` | Get sessionStorage |
 | `GET /session/save` | Save browser session |
 | `GET /session/load` | Restore browser session |
+| `GET /auth/profile/save` | Save cookies + storage as a named auth profile |
+| `GET /auth/profile/load` | Restore a named auth profile into a tab |
+| `GET /auth/profile/list` | List saved auth profiles |
+| `GET /auth/profile/delete` | Delete a saved auth profile |
 | `GET /headers` | Set custom request headers |
+
+On macOS, auth profile secrets are stored in the user Keychain. On other platforms, Kuri falls back to `.kuri/auth-profiles/`.
 
 ### Advanced
 
