@@ -144,6 +144,10 @@ fn route(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *B
         handleAuthProfileList(request, arena, cfg);
     } else if (std.mem.eql(u8, clean_path, "/auth/profile/delete")) {
         handleAuthProfileDelete(request, arena, cfg);
+    } else if (std.mem.eql(u8, clean_path, "/debug/enable")) {
+        handleDebugEnable(request, arena, bridge);
+    } else if (std.mem.eql(u8, clean_path, "/debug/disable")) {
+        handleDebugDisable(request, arena, bridge);
     } else if (std.mem.eql(u8, clean_path, "/screenshot/annotated")) {
         handleAnnotatedScreenshot(request, arena, bridge);
     } else if (std.mem.eql(u8, clean_path, "/screenshot/diff")) {
@@ -257,6 +261,52 @@ fn getQueryParam(target: []const u8, key: []const u8) ?[]const u8 {
     return null;
 }
 
+fn decodeUrlComponentAlloc(allocator: std.mem.Allocator, input: []const u8) ?[]u8 {
+    var buf = allocator.alloc(u8, input.len) catch return null;
+    var i: usize = 0;
+    var j: usize = 0;
+    while (i < input.len) : (i += 1) {
+        switch (input[i]) {
+            '+' => {
+                buf[j] = ' ';
+                j += 1;
+            },
+            '%' => {
+                if (i + 2 >= input.len) {
+                    allocator.free(buf);
+                    return null;
+                }
+                const hi = std.fmt.charToDigit(input[i + 1], 16) catch {
+                    allocator.free(buf);
+                    return null;
+                };
+                const lo = std.fmt.charToDigit(input[i + 2], 16) catch {
+                    allocator.free(buf);
+                    return null;
+                };
+                buf[j] = @as(u8, @intCast(hi * 16 + lo));
+                j += 1;
+                i += 2;
+            },
+            else => {
+                buf[j] = input[i];
+                j += 1;
+            },
+        }
+    }
+    const decoded = allocator.dupe(u8, buf[0..j]) catch {
+        allocator.free(buf);
+        return null;
+    };
+    allocator.free(buf);
+    return decoded;
+}
+
+fn getDecodedQueryParamAlloc(allocator: std.mem.Allocator, target: []const u8, key: []const u8) ?[]u8 {
+    const value = getQueryParam(target, key) orelse return null;
+    return decodeUrlComponentAlloc(allocator, value);
+}
+
 fn readRequestBody(request: *std.http.Server.Request, arena: std.mem.Allocator) ?[]const u8 {
     if (!request.head.method.requestHasBody()) return null;
     if (request.head.expect != null) return null;
@@ -308,7 +358,7 @@ fn handleTabs(request: *std.http.Server.Request, arena: std.mem.Allocator, bridg
 
 fn handleNavigate(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge, cfg: Config) void {
     const target = request.head.target;
-    const url = getQueryParam(target, "url") orelse {
+    const url = getDecodedQueryParamAlloc(arena, target, "url") orelse {
         resp.sendError(request, 400, "Missing url parameter");
         return;
     };
@@ -683,8 +733,12 @@ fn handleEvaluate(request: *std.http.Server.Request, arena: std.mem.Allocator, b
         resp.sendError(request, 400, "Missing tab_id parameter");
         return;
     };
-    const expr = getQueryParam(target, "expression") orelse {
+    const expr_decoded = getDecodedQueryParamAlloc(arena, target, "expression") orelse {
         resp.sendError(request, 400, "Missing expression parameter");
+        return;
+    };
+    const expr = jsonEscapeAlloc(arena, expr_decoded) orelse {
+        resp.sendError(request, 500, "Failed to encode expression");
         return;
     };
 
@@ -1976,6 +2030,150 @@ fn handleAuthProfileDelete(
     resp.sendJson(request, body);
 }
 
+fn handleDebugEnable(
+    request: *std.http.Server.Request,
+    arena: std.mem.Allocator,
+    bridge: *Bridge,
+) void {
+    const target = request.head.target;
+    const tab_id = getQueryParam(target, "tab_id") orelse {
+        resp.sendError(request, 400, "Missing tab_id parameter");
+        return;
+    };
+    const freeze = getQueryParam(target, "freeze");
+    const freeze_enabled = freeze != null and std.mem.eql(u8, freeze.?, "true");
+    const client = bridge.getCdpClient(tab_id) orelse {
+        resp.sendError(request, 404, "Tab not found");
+        return;
+    };
+
+    if (bridge.getDebugScriptId(tab_id, arena)) |existing_id| {
+        defer arena.free(existing_id);
+        const remove_params = std.fmt.allocPrint(
+            arena,
+            "{{\"identifier\":\"{s}\"}}",
+            .{existing_id},
+        ) catch {
+            resp.sendError(request, 500, "Failed to build debug cleanup payload");
+            return;
+        };
+        _ = client.send(arena, protocol.Methods.page_remove_script, remove_params) catch {};
+    }
+
+    const source = buildDebugModeScript(arena, freeze_enabled) catch {
+        resp.sendError(request, 500, "Failed to build debug mode script");
+        return;
+    };
+    const escaped = jsonEscapeAlloc(arena, source) orelse {
+        resp.sendError(request, 500, "Failed to encode debug mode script");
+        return;
+    };
+
+    const add_params = std.fmt.allocPrint(arena, "{{\"source\":\"{s}\"}}", .{escaped}) catch {
+        resp.sendError(request, 500, "Failed to build debug mode install payload");
+        return;
+    };
+    const add_response = client.send(arena, protocol.Methods.page_add_script, add_params) catch {
+        resp.sendError(request, 502, "Failed to install debug mode script");
+        return;
+    };
+    const script_id = extractSimpleJsonString(add_response, 0, "\"identifier\"") orelse {
+        resp.sendError(request, 502, "Debug mode script installation returned no identifier");
+        return;
+    };
+    bridge.setDebugScriptId(tab_id, script_id) catch {
+        resp.sendError(request, 500, "Failed to track debug mode script");
+        return;
+    };
+
+    const eval_params = std.fmt.allocPrint(
+        arena,
+        "{{\"expression\":\"{s}\",\"returnByValue\":true}}",
+        .{escaped},
+    ) catch {
+        resp.sendError(request, 500, "Failed to build debug mode evaluation payload");
+        return;
+    };
+    const eval_response = client.send(arena, protocol.Methods.runtime_evaluate, eval_params) catch {
+        resp.sendError(request, 502, "Failed to enable debug mode in current page");
+        return;
+    };
+    _ = eval_response;
+
+    const body = std.fmt.allocPrint(
+        arena,
+        "{{\"status\":\"enabled\",\"tab_id\":\"{s}\",\"freeze\":{s},\"script_id\":\"{s}\"}}",
+        .{ tab_id, if (freeze_enabled) "true" else "false", script_id },
+    ) catch {
+        resp.sendError(request, 500, "Internal Server Error");
+        return;
+    };
+    resp.sendJson(request, body);
+}
+
+fn handleDebugDisable(
+    request: *std.http.Server.Request,
+    arena: std.mem.Allocator,
+    bridge: *Bridge,
+) void {
+    const target = request.head.target;
+    const tab_id = getQueryParam(target, "tab_id") orelse {
+        resp.sendError(request, 400, "Missing tab_id parameter");
+        return;
+    };
+    const client = bridge.getCdpClient(tab_id) orelse {
+        resp.sendError(request, 404, "Tab not found");
+        return;
+    };
+
+    if (bridge.getDebugScriptId(tab_id, arena)) |script_id| {
+        defer arena.free(script_id);
+        const remove_params = std.fmt.allocPrint(
+            arena,
+            "{{\"identifier\":\"{s}\"}}",
+            .{script_id},
+        ) catch {
+            resp.sendError(request, 500, "Failed to build debug cleanup payload");
+            return;
+        };
+        _ = client.send(arena, protocol.Methods.page_remove_script, remove_params) catch {};
+    }
+    bridge.clearDebugScriptId(tab_id);
+
+    const teardown_script =
+        \\(() => {
+        \\  if (window.__kuriDebug__ && typeof window.__kuriDebug__.destroy === "function") {
+        \\    window.__kuriDebug__.destroy();
+        \\    return "kuri-debug-disabled";
+        \\  }
+        \\  return "kuri-debug-not-active";
+        \\})()
+    ;
+    const escaped = jsonEscapeAlloc(arena, teardown_script) orelse {
+        resp.sendError(request, 500, "Failed to encode debug teardown script");
+        return;
+    };
+    const params = std.fmt.allocPrint(
+        arena,
+        "{{\"expression\":\"{s}\",\"returnByValue\":true}}",
+        .{escaped},
+    ) catch {
+        resp.sendError(request, 500, "Failed to build debug teardown payload");
+        return;
+    };
+    _ = client.send(arena, protocol.Methods.runtime_evaluate, params) catch {};
+
+    const body = std.fmt.allocPrint(
+        arena,
+        "{{\"status\":\"disabled\",\"tab_id\":\"{s}\"}}",
+        .{tab_id},
+    ) catch {
+        resp.sendError(request, 500, "Internal Server Error");
+        return;
+    };
+    resp.sendJson(request, body);
+}
+
 // ── Annotated / Diff Screenshot & Screencast Endpoints ──────────────────
 
 fn handleAnnotatedScreenshot(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
@@ -2471,6 +2669,203 @@ fn jsonEscapeAlloc(allocator: std.mem.Allocator, input: []const u8) ?[]const u8 
     return buf;
 }
 
+fn buildDebugModeScript(allocator: std.mem.Allocator, freeze_enabled: bool) ![]u8 {
+    const template =
+        \\(() => {
+        \\  const KEY = "__kuriDebug__";
+        \\  const ROOT_ATTR = "data-kuri-debug-root";
+        \\  const FREEZE_STYLE_ID = "kuri-debug-freeze-style";
+        \\  const freezeInitially = @@FREEZE@@;
+        \\  if (window[KEY] && typeof window[KEY].destroy === "function") {
+        \\    window[KEY].destroy();
+        \\  }
+        \\  const state = { target: null, locked: false, freeze: freezeInitially };
+        \\  const root = document.createElement("div");
+        \\  root.setAttribute(ROOT_ATTR, "true");
+        \\  Object.assign(root.style, {
+        \\    position: "fixed",
+        \\    inset: "0",
+        \\    zIndex: "2147483647",
+        \\    pointerEvents: "none",
+        \\    fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+        \\  });
+        \\  const box = document.createElement("div");
+        \\  Object.assign(box.style, {
+        \\    position: "fixed",
+        \\    border: "2px solid #6fa8dc",
+        \\    background: "rgba(111, 168, 220, 0.16)",
+        \\    boxShadow: "0 0 0 1px rgba(16, 24, 40, 0.24)",
+        \\    borderRadius: "6px",
+        \\    pointerEvents: "none",
+        \\    display: "none",
+        \\  });
+        \\  const hud = document.createElement("div");
+        \\  Object.assign(hud.style, {
+        \\    position: "fixed",
+        \\    right: "16px",
+        \\    bottom: "16px",
+        \\    width: "320px",
+        \\    background: "rgba(15, 23, 42, 0.94)",
+        \\    color: "#e5eef9",
+        \\    border: "1px solid rgba(148, 163, 184, 0.35)",
+        \\    borderRadius: "12px",
+        \\    boxShadow: "0 14px 40px rgba(15, 23, 42, 0.35)",
+        \\    padding: "12px",
+        \\    pointerEvents: "auto",
+        \\    backdropFilter: "blur(8px)",
+        \\    fontSize: "12px",
+        \\  });
+        \\  const title = document.createElement("div");
+        \\  title.style.fontWeight = "700";
+        \\  title.style.color = "#f8fafc";
+        \\  title.style.marginBottom = "6px";
+        \\  title.style.wordBreak = "break-word";
+        \\  const meta = document.createElement("div");
+        \\  meta.style.fontSize = "11px";
+        \\  meta.style.lineHeight = "1.45";
+        \\  meta.style.color = "#bfdbfe";
+        \\  const selector = document.createElement("div");
+        \\  selector.style.fontSize = "11px";
+        \\  selector.style.lineHeight = "1.45";
+        \\  selector.style.color = "#93c5fd";
+        \\  selector.style.marginTop = "6px";
+        \\  selector.style.wordBreak = "break-word";
+        \\  const actions = document.createElement("div");
+        \\  Object.assign(actions.style, { display: "flex", gap: "8px", marginTop: "10px" });
+        \\  const lockButton = document.createElement("button");
+        \\  const freezeButton = document.createElement("button");
+        \\  for (const button of [lockButton, freezeButton]) {
+        \\    button.type = "button";
+        \\    Object.assign(button.style, {
+        \\      appearance: "none",
+        \\      border: "1px solid rgba(147, 197, 253, 0.35)",
+        \\      background: "rgba(37, 99, 235, 0.18)",
+        \\      color: "#e0f2fe",
+        \\      borderRadius: "8px",
+        \\      padding: "6px 8px",
+        \\      fontSize: "11px",
+        \\      fontWeight: "600",
+        \\      cursor: "pointer",
+        \\    });
+        \\  }
+        \\  actions.append(lockButton, freezeButton);
+        \\  hud.append(title, meta, selector, actions);
+        \\  root.append(box, hud);
+        \\  document.documentElement.appendChild(root);
+        \\  const ensureFreezeStyle = () => {
+        \\    let style = document.getElementById(FREEZE_STYLE_ID);
+        \\    if (!style) {
+        \\      style = document.createElement("style");
+        \\      style.id = FREEZE_STYLE_ID;
+        \\      style.textContent = "*,:before,:after{animation-play-state:paused!important;transition-duration:0s!important;transition-delay:0s!important;scroll-behavior:auto!important;}";
+        \\      document.documentElement.appendChild(style);
+        \\    }
+        \\  };
+        \\  const removeFreezeStyle = () => {
+        \\    document.getElementById(FREEZE_STYLE_ID)?.remove();
+        \\  };
+        \\  const isIgnored = (el) => {
+        \\    if (!el || el === document.documentElement || el === document.body) return true;
+        \\    if (root.contains(el)) return true;
+        \\    const style = window.getComputedStyle(el);
+        \\    const rect = el.getBoundingClientRect();
+        \\    const z = Number.parseInt(style.zIndex || "0", 10);
+        \\    const coversViewport = rect.width >= window.innerWidth * 0.95 && rect.height >= window.innerHeight * 0.95;
+        \\    if (style.pointerEvents === "none" && style.position === "fixed" && Number.isFinite(z) && z >= 100000) return true;
+        \\    if (coversViewport && (style.position === "fixed" || style.position === "absolute") && (style.backgroundColor === "transparent" || style.backgroundColor === "rgba(0, 0, 0, 0)" || Number.parseFloat(style.opacity || "1") < 0.1 || (Number.isFinite(z) && z > 100000))) return true;
+        \\    return false;
+        \\  };
+        \\  const pickElement = (x, y) => {
+        \\    for (const el of document.elementsFromPoint(x, y)) {
+        \\      if (!isIgnored(el)) return el;
+        \\    }
+        \\    return null;
+        \\  };
+        \\  const toSelector = (el) => {
+        \\    if (!el) return "none";
+        \\    const tag = (el.tagName || "node").toLowerCase();
+        \\    if (el.id) return `${tag}#${el.id}`;
+        \\    const classes = [...(el.classList || [])].slice(0, 3);
+        \\    return classes.length > 0 ? `${tag}.${classes.join(".")}` : tag;
+        \\  };
+        \\  const labelFor = (el) => {
+        \\    if (!el) return "No element selected";
+        \\    const tag = (el.tagName || "node").toLowerCase();
+        \\    const text = (el.innerText || el.textContent || "").trim().replace(/\s+/g, " ").slice(0, 48);
+        \\    return text ? `<${tag}> ${text}` : `<${tag}>`;
+        \\  };
+        \\  const render = () => {
+        \\    if (state.freeze) ensureFreezeStyle();
+        \\    else removeFreezeStyle();
+        \\    lockButton.textContent = state.locked ? "Unlock" : "Lock";
+        \\    freezeButton.textContent = state.freeze ? "Unfreeze" : "Freeze";
+        \\    const el = state.target;
+        \\    if (!el || !document.contains(el)) {
+        \\      title.textContent = "No element selected";
+        \\      meta.textContent = `debug ${state.freeze ? "frozen" : "live"}${state.locked ? " • locked" : ""}`;
+        \\      selector.textContent = "Move over the page to inspect.";
+        \\      box.style.display = "none";
+        \\      return;
+        \\    }
+        \\    const rect = el.getBoundingClientRect();
+        \\    title.textContent = labelFor(el);
+        \\    meta.textContent = `${Math.round(rect.width)}×${Math.round(rect.height)} • ${state.freeze ? "frozen" : "live"}${state.locked ? " • locked" : ""}`;
+        \\    selector.textContent = toSelector(el);
+        \\    box.style.display = "block";
+        \\    box.style.left = `${Math.max(0, rect.left)}px`;
+        \\    box.style.top = `${Math.max(0, rect.top)}px`;
+        \\    box.style.width = `${Math.max(0, rect.width)}px`;
+        \\    box.style.height = `${Math.max(0, rect.height)}px`;
+        \\  };
+        \\  const onMove = (event) => {
+        \\    if (state.locked) return;
+        \\    state.target = pickElement(event.clientX, event.clientY);
+        \\    render();
+        \\  };
+        \\  const onClick = (event) => {
+        \\    if (root.contains(event.target)) return;
+        \\    state.target = pickElement(event.clientX, event.clientY);
+        \\    state.locked = true;
+        \\    event.preventDefault();
+        \\    event.stopPropagation();
+        \\    render();
+        \\  };
+        \\  const onKeyDown = (event) => {
+        \\    if (event.key === "Escape") {
+        \\      event.preventDefault();
+        \\      destroy();
+        \\      return;
+        \\    }
+        \\    if (event.key.toLowerCase() === "f") {
+        \\      state.freeze = !state.freeze;
+        \\      render();
+        \\    }
+        \\    if (event.key.toLowerCase() === "l") {
+        \\      state.locked = !state.locked;
+        \\      render();
+        \\    }
+        \\  };
+        \\  lockButton.addEventListener("click", () => { state.locked = !state.locked; render(); });
+        \\  freezeButton.addEventListener("click", () => { state.freeze = !state.freeze; render(); });
+        \\  const destroy = () => {
+        \\    document.removeEventListener("pointermove", onMove, true);
+        \\    document.removeEventListener("click", onClick, true);
+        \\    document.removeEventListener("keydown", onKeyDown, true);
+        \\    removeFreezeStyle();
+        \\    root.remove();
+        \\    delete window[KEY];
+        \\  };
+        \\  document.addEventListener("pointermove", onMove, true);
+        \\  document.addEventListener("click", onClick, true);
+        \\  document.addEventListener("keydown", onKeyDown, true);
+        \\  window[KEY] = { destroy, state, version: 1 };
+        \\  render();
+        \\  return "kuri-debug-enabled";
+        \\})()
+    ;
+    return std.mem.replaceOwned(u8, allocator, template, "@@FREEZE@@", if (freeze_enabled) "true" else "false");
+}
+
 fn evalValueString(arena: std.mem.Allocator, client: *CdpClient, expression: []const u8) ?[]const u8 {
     const escaped = jsonEscapeAlloc(arena, expression) orelse return null;
     const params = std.fmt.allocPrint(arena, "{{\"expression\":\"{s}\",\"returnByValue\":true}}", .{escaped}) catch return null;
@@ -2866,7 +3261,7 @@ fn handleWait(request: *std.http.Server.Request, arena: std.mem.Allocator, bridg
 
 fn handleTabNew(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
     const target = request.head.target;
-    const url = getQueryParam(target, "url") orelse "about:blank";
+    const url = getDecodedQueryParamAlloc(arena, target, "url") orelse "about:blank";
 
     const params = std.fmt.allocPrint(arena, "{{\"url\":\"{s}\"}}", .{url}) catch {
         resp.sendError(request, 500, "Internal Server Error");
@@ -3280,7 +3675,7 @@ fn handleInspect(request: *std.http.Server.Request, arena: std.mem.Allocator, br
 
 fn handleWindowNew(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
     const target = request.head.target;
-    const url = getQueryParam(target, "url") orelse "about:blank";
+    const url = getDecodedQueryParamAlloc(arena, target, "url") orelse "about:blank";
 
     // Get any existing client to create target
     const tabs = bridge.listTabs(arena) catch {
@@ -3297,22 +3692,16 @@ fn handleWindowNew(request: *std.http.Server.Request, arena: std.mem.Allocator, 
     };
 
     // Create in a new browser context for window-like isolation
-    const ctx_response = client.send(arena, protocol.Methods.target_create_browser_context, null) catch {
-        // Fallback: create without isolated context
-        const params = std.fmt.allocPrint(arena, "{{\"url\":\"{s}\",\"newWindow\":true}}", .{url}) catch {
-            resp.sendError(request, 500, "Internal Server Error");
-            return;
-        };
-        const response = client.send(arena, protocol.Methods.target_create_target, params) catch {
-            resp.sendError(request, 502, "Target.createTarget failed");
-            return;
-        };
-        resp.sendJson(request, response);
-        return;
-    };
+    const ctx_response = client.send(arena, protocol.Methods.target_create_browser_context, null) catch null;
+    const ctx_id = if (ctx_response) |response|
+        extractSimpleJsonString(response, 0, "\"browserContextId\"")
+    else
+        null;
 
-    const ctx_id = extractSimpleJsonString(ctx_response, 0, "\"browserContextId\"") orelse "";
-    const params = std.fmt.allocPrint(arena, "{{\"url\":\"{s}\",\"newWindow\":true,\"browserContextId\":\"{s}\"}}", .{ url, ctx_id }) catch {
+    const params = (if (ctx_id) |id|
+        std.fmt.allocPrint(arena, "{{\"url\":\"{s}\",\"newWindow\":true,\"browserContextId\":\"{s}\"}}", .{ url, id })
+    else
+        std.fmt.allocPrint(arena, "{{\"url\":\"{s}\",\"newWindow\":true}}", .{url})) catch {
         resp.sendError(request, 500, "Internal Server Error");
         return;
     };
@@ -3513,7 +3902,7 @@ fn handlePerfLcp(request: *std.http.Server.Request, arena: std.mem.Allocator, br
         resp.sendError(request, 400, "Missing tab_id parameter");
         return;
     };
-    const url = getQueryParam(target, "url");
+    const url = getDecodedQueryParamAlloc(arena, target, "url");
 
     const client = bridge.getCdpClient(tab_id) orelse {
         resp.sendError(request, 404, "Tab not found");
@@ -3773,6 +4162,13 @@ test "tab/new route with url" {
     try std.testing.expectEqualStrings("https://example.com", getQueryParam(target, "url").?);
 }
 
+test "decoded query param handles percent encoding" {
+    const target = "/navigate?url=https%3A%2F%2Fexample.com%2Ffoo%3Fa%3D1%26b%3Dtwo+words";
+    const decoded = getDecodedQueryParamAlloc(std.testing.allocator, target, "url").?;
+    defer std.testing.allocator.free(decoded);
+    try std.testing.expectEqualStrings("https://example.com/foo?a=1&b=two words", decoded);
+}
+
 test "tab/close route with tab_id" {
     const target = "/tab/close?tab_id=abc123";
     try std.testing.expectEqualStrings("abc123", getQueryParam(target, "tab_id").?);
@@ -3802,6 +4198,7 @@ test "total endpoint count" {
         "/diff/snapshot", "/emulate", "/geolocation", "/upload",
         "/session/save", "/session/load",
         "/auth/profile/save", "/auth/profile/load", "/auth/profile/list", "/auth/profile/delete",
+        "/debug/enable", "/debug/disable",
         "/screenshot/annotated", "/screenshot/diff",
         "/screencast/start", "/screencast/stop", "/video/start", "/video/stop",
         "/console", "/intercept/start", "/intercept/stop",
@@ -3826,7 +4223,7 @@ test "total endpoint count" {
         "/dom/attributes", "/frames", "/network",
         "/perf/lcp",
     };
-    try std.testing.expectEqual(@as(usize, 80), routes.len);
+    try std.testing.expectEqual(@as(usize, 82), routes.len);
 }
 
 test "buildGetExpression title" {
@@ -3993,6 +4390,15 @@ test "auth profile routes parse correctly" {
 
     const delete_target = "/auth/profile/delete?name=google";
     try std.testing.expectEqualStrings("google", getQueryParam(delete_target, "name").?);
+}
+
+test "debug routes parse correctly" {
+    const enable_target = "/debug/enable?tab_id=t1&freeze=true";
+    try std.testing.expectEqualStrings("t1", getQueryParam(enable_target, "tab_id").?);
+    try std.testing.expectEqualStrings("true", getQueryParam(enable_target, "freeze").?);
+
+    const disable_target = "/debug/disable?tab_id=t1";
+    try std.testing.expectEqualStrings("t1", getQueryParam(disable_target, "tab_id").?);
 }
 
 test "jsonEscapeAlloc escapes special chars" {
