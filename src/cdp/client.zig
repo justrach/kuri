@@ -61,6 +61,7 @@ pub const CdpClient = struct {
     next_id: std.atomic.Value(u32),
     ws: ?WebSocketClient,
     connected: bool,
+    mu: std.Thread.Mutex,
 
     // Owned buffers for WebSocket I/O
     ws_read_buf: [512 * 1024]u8,
@@ -75,6 +76,7 @@ pub const CdpClient = struct {
             .next_id = std.atomic.Value(u32).init(1),
             .ws = null,
             .connected = false,
+            .mu = .{},
             .ws_read_buf = undefined,
             .ws_write_buf = undefined,
             .event_buf = EventBuffer.init(allocator),
@@ -101,6 +103,9 @@ pub const CdpClient = struct {
     /// Send a CDP command and receive the matching response. Allocates result.
     /// Skips CDP events (messages without matching id) and correlates by command ID.
     pub fn send(self: *CdpClient, allocator: std.mem.Allocator, method: []const u8, params_json: ?[]const u8) ![]const u8 {
+        self.mu.lock();
+        defer self.mu.unlock();
+
         if (!self.connected) try self.connectWs();
 
         var ws = &(self.ws orelse return error.ConnectionRefused);
@@ -174,6 +179,9 @@ pub const CdpClient = struct {
     /// Wait for a specific CDP event by polling buffered events and reading new ones.
     /// Returns true if the event was seen within max_attempts reads.
     pub fn waitForEvent(self: *CdpClient, allocator: std.mem.Allocator, method: []const u8, max_attempts: u32) bool {
+        self.mu.lock();
+        defer self.mu.unlock();
+
         // Check buffered events first
         if (self.event_buf.hasEvent(method)) return true;
 

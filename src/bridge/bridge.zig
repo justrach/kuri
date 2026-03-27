@@ -45,6 +45,7 @@ pub const Bridge = struct {
     prev_snapshots: std.StringHashMap([]const A11yNode),
     cdp_clients: std.StringHashMap(*CdpClient),
     har_recorders: std.StringHashMap(*HarRecorder),
+    debug_script_ids: std.StringHashMap([]const u8),
     mu: std.Thread.RwLock,
 
     pub fn init(allocator: std.mem.Allocator) Bridge {
@@ -55,11 +56,19 @@ pub const Bridge = struct {
             .prev_snapshots = std.StringHashMap([]const A11yNode).init(allocator),
             .cdp_clients = std.StringHashMap(*CdpClient).init(allocator),
             .har_recorders = std.StringHashMap(*HarRecorder).init(allocator),
+            .debug_script_ids = std.StringHashMap([]const u8).init(allocator),
             .mu = .{},
         };
     }
 
     pub fn deinit(self: *Bridge) void {
+        var debug_it = self.debug_script_ids.iterator();
+        while (debug_it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+            self.allocator.free(entry.value_ptr.*);
+        }
+        self.debug_script_ids.deinit();
+
         var har_it = self.har_recorders.valueIterator();
         while (har_it.next()) |rec| {
             rec.*.deinit();
@@ -185,6 +194,10 @@ pub const Bridge = struct {
             kv.value.deinit();
             self.allocator.destroy(kv.value);
         }
+        if (self.debug_script_ids.fetchRemove(tab_id)) |kv| {
+            self.allocator.free(kv.key);
+            self.allocator.free(kv.value);
+        }
     }
 
     pub fn listTabs(self: *Bridge, allocator: std.mem.Allocator) ![]TabEntry {
@@ -299,6 +312,37 @@ pub const Bridge = struct {
             return null;
         };
         return rec;
+    }
+
+    pub fn setDebugScriptId(self: *Bridge, tab_id: []const u8, script_id: []const u8) !void {
+        self.mu.lock();
+        defer self.mu.unlock();
+
+        if (self.debug_script_ids.fetchRemove(tab_id)) |old| {
+            self.allocator.free(old.key);
+            self.allocator.free(old.value);
+        }
+
+        try self.debug_script_ids.put(
+            try self.allocator.dupe(u8, tab_id),
+            try self.allocator.dupe(u8, script_id),
+        );
+    }
+
+    pub fn getDebugScriptId(self: *Bridge, tab_id: []const u8, allocator: std.mem.Allocator) ?[]u8 {
+        self.mu.lockShared();
+        defer self.mu.unlockShared();
+        const value = self.debug_script_ids.get(tab_id) orelse return null;
+        return allocator.dupe(u8, value) catch null;
+    }
+
+    pub fn clearDebugScriptId(self: *Bridge, tab_id: []const u8) void {
+        self.mu.lock();
+        defer self.mu.unlock();
+        if (self.debug_script_ids.fetchRemove(tab_id)) |kv| {
+            self.allocator.free(kv.key);
+            self.allocator.free(kv.value);
+        }
     }
 
     pub fn cloneSnapshot(self: *Bridge, snapshot: []const A11yNode) ![]A11yNode {
