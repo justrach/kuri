@@ -1,17 +1,7 @@
 # Benchmarks
 
-This folder holds reproducible browser-output comparisons between:
-
-- `kuri-agent`
-- `agent-browser`
-- `lightpanda`
-
-The goal is not "smallest output wins" in isolation. The useful comparison is:
-
-- same page
-- same date
-- same tokenizer
-- auditable raw outputs
+Reproducible browser-output comparisons for `kuri-agent`, `agent-browser`, and `lightpanda`.
+The useful comparison is same page, same tokenizer, and saved raw outputs.
 
 ## Runner
 
@@ -23,40 +13,58 @@ Use [`run_token_matrix.sh`](/Users/rachpradhan/kuri/benchmarks/run_token_matrix.
 ./benchmarks/run_token_matrix.sh "https://www.google.com/travel/flights?q=Flights%20to%20TPE%20from%20SIN"
 ```
 
-What it does:
-
-- ensures Chrome is available on CDP port `9222` via `kuri-agent`
-- captures `kuri-agent` outputs
-- captures `agent-browser` outputs if installed
-- captures `lightpanda` outputs if `LIGHTPANDA_BIN` or `/tmp/lightpanda` exists
-- tokenizes all outputs with `cl100k_base`
-- writes:
-  - `summary.md`
-  - `summary.json`
-  - raw tool outputs under `raw/`
+It ensures Chrome is available on CDP `9222`, captures tool outputs, tokenizes them with `cl100k_base`, and writes `summary.md`, `summary.json`, and `raw/`.
+Ad hoc runs write to `.benchmarks/results/...`; checked-in `benchmarks/results/` is for curated reference runs only.
 
 Each summary now reports two workflow views:
 
 - `Raw captured output`: the literal bytes/tokens each CLI emitted for `go→snap-i→click→snap-i→eval`
 - `Normalized page-state output`: only the state payloads an agent reads back, `snap-i + snap-i + eval`
 
-That second view intentionally strips tool-specific action acknowledgement noise from the comparison.
+The normalized view strips tool-specific action acknowledgement noise.
 
 ## Requirements
 
-- built `kuri-agent` at `./zig-out/bin/kuri-agent`
-- `/usr/bin/python3`
-- `tiktoken` installed for that interpreter
-- optional:
-  - `agent-browser` on `$PATH`
-  - `lightpanda` at `/tmp/lightpanda` or `$LIGHTPANDA_BIN`
+- `./zig-out/bin/kuri-agent`
+- `/usr/bin/python3` with `tiktoken`
+- optional: `agent-browser` on `$PATH`, `lightpanda` at `/tmp/lightpanda` or `$LIGHTPANDA_BIN`
+
+## Docker
+
+For constrained or repeatable environments, use:
+
+```bash
+chmod +x ./benchmarks/docker-run.sh
+./benchmarks/docker-run.sh https://vercel.com
+PROFILE=small ./benchmarks/docker-run.sh https://vercel.com
+PROFILE=large ./benchmarks/docker-run.sh "https://www.google.com/travel/flights?q=Flights%20to%20TPE%20from%20SIN%20on%202026-03-23&curr=SGD"
+```
+
+This builds [`Dockerfile`](/Users/rachpradhan/kuri/benchmarks/Dockerfile), installs Zig, Chromium, `agent-browser`, `tiktoken`, and `lightpanda`, then runs the benchmark against headless Chromium inside the container.
+The entrypoint always rebuilds `kuri-agent` inside Linux so it never reuses a host macOS binary from `zig-out/`.
+
+### Resource presets
+
+- `PROFILE=small` → `1 CPU`, `2 GB RAM`, `1 GB /dev/shm`
+- `PROFILE=medium` → `2 CPU`, `4 GB RAM`, `2 GB /dev/shm`
+- `PROFILE=large` → `4 CPU`, `8 GB RAM`, `4 GB /dev/shm`
+
+You can also override them directly:
+
+```bash
+CPUS=1.5 MEMORY=3g SHM_SIZE=1g ./benchmarks/docker-run.sh https://vercel.com
+```
 
 ## Notes
 
-- `agent-browser` is measured against a shared Chrome CDP session on `9222`.
+- `agent-browser` uses the shared Chrome CDP session on `9222`.
 - `lightpanda` is measured via standalone `fetch --dump ...`, so it is not using Chrome.
-- That means the `lightpanda` leg is best read as "standalone browser output shape and token cost", not "same underlying engine state as the Chrome-based tools".
-- On highly interactive pages, the normalized page-state section is the more defensible apples-to-apples comparison than raw CLI output totals.
+- On interactive pages, the normalized page-state section is the better apples-to-apples comparison.
+
+## Runner Size
+
+Inside Docker, yes: use the presets above or override `CPUS`, `MEMORY`, and `SHM_SIZE`.
+For hosted CI runner size, no: that has to be chosen outside the container.
 
 ## Latest Run
 

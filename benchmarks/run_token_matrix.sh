@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BENCH_DIR="$ROOT_DIR/benchmarks"
-RESULTS_ROOT="$BENCH_DIR/results"
+RESULTS_ROOT="${RESULTS_ROOT:-$ROOT_DIR/.benchmarks/results}"
 mkdir -p "$RESULTS_ROOT"
 
 URL="${1:-https://example.com}"
