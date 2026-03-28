@@ -4190,7 +4190,8 @@ fn handleAuthExtract(request: *std.http.Server.Request, arena: std.mem.Allocator
         resp.sendError(request, 500, "Failed to run sqlite3 — is it installed?");
         return;
     };
-    const stdout = child.stdout.?.reader().readAllAlloc(arena, 1024 * 1024) catch {
+    var read_buf: [4096]u8 = undefined;
+    const stdout = child.stdout.?.reader(&read_buf).readAllAlloc(arena, 1024 * 1024) catch {
         resp.sendError(request, 500, "Failed to read sqlite3 output");
         return;
     };
