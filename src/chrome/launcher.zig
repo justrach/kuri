@@ -101,15 +101,10 @@ pub const Launcher = struct {
             return error.ChromeNotFound;
         };
 
-        var port_buf: [8]u8 = undefined;
-        const port_str = std.fmt.bufPrint(&port_buf, "{d}", .{self.cdp_port}) catch unreachable;
-
-        const port_flag = std.fmt.bufPrint(
-            &self.ws_url_buf,
-            "--remote-debugging-port={s}",
-            .{port_str},
-        ) catch unreachable;
-        const port_flag_len = port_flag.len;
+        // Allocate the port flag on the heap so it outlives this function.
+        // Previously this was written into ws_url_buf which gets overwritten
+        // by storeWsUrl(), causing a dangling pointer in the Child struct on Linux.
+        const port_flag = try std.fmt.allocPrint(self.allocator, "--remote-debugging-port={d}", .{self.cdp_port});
 
         // Build argv
         var argv_list: std.ArrayList([]const u8) = .empty;
@@ -126,17 +121,13 @@ pub const Launcher = struct {
             try argv_list.append(self.allocator, data_dir);
         }
         try argv_list.append(self.allocator, "--no-sandbox");
-        try argv_list.append(self.allocator, self.ws_url_buf[0..port_flag_len]);
+        try argv_list.append(self.allocator, port_flag);
 
         // Build and append extension flags if configured
         const ext_flags: ?[][]u8 = if (self.extensions) |ext_str|
             try buildExtensionFlags(self.allocator, ext_str)
         else
             null;
-        defer if (ext_flags) |flags| {
-            for (flags) |f| self.allocator.free(f);
-            self.allocator.free(flags);
-        };
 
         if (ext_flags) |flags| {
             for (flags) |f| try argv_list.append(self.allocator, f);
@@ -148,6 +139,26 @@ pub const Launcher = struct {
 
         try child.spawn();
         self.child = child;
+
+        // Free argv-owned strings now that spawn has completed and child has exec'd.
+        // The Child struct no longer needs these after spawn().
+        self.allocator.free(port_flag);
+        if (!self.headless) {
+            // data_dir was appended at index 1 (after chrome_bin)
+            if (argv_list.items.len > 1) {
+                // Find and free the data_dir string (starts with --user-data-dir=)
+                for (argv_list.items) |item| {
+                    if (std.mem.startsWith(u8, item, "--user-data-dir=")) {
+                        self.allocator.free(item);
+                        break;
+                    }
+                }
+            }
+        }
+        if (ext_flags) |flags| {
+            for (flags) |f| self.allocator.free(f);
+            self.allocator.free(flags);
+        }
 
         std.log.info("launched Chrome (pid={d}) on CDP port {d}", .{
             child.id,
