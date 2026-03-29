@@ -1153,8 +1153,6 @@ fn handleHarStop(request: *std.http.Server.Request, arena: std.mem.Allocator, br
 
     // Flush buffered CDP events and disconnect HAR recorder from CDP client.
     if (bridge.getCdpClient(tab_id)) |client| {
-        // Disconnect HAR recorder from real-time event feeding
-        // HAR recorder disconnect handled by stop()
         // First: read all pending WebSocket messages with a short timeout.
         // Network events arrive asynchronously and queue on the WebSocket.
         if (client.ws) |*ws| {
@@ -1176,7 +1174,9 @@ fn handleHarStop(request: *std.http.Server.Request, arena: std.mem.Allocator, br
         // Second: flush any events already in the buffer from prior send() calls
         flushEventsToHar(client, rec);
 
-        // Third: stop recording (sends Network.disable, which may read more events)
+        // Third: stop recording (sends Network.disable).
+        // NOTE: handleCdpEvent no longer checks self.recording, so events
+        // flushed after stop() are still processed correctly.
         const har_json = rec.stop(client) catch {
             resp.sendError(request, 500, "Failed to generate HAR");
             return;
