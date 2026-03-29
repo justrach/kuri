@@ -383,25 +383,6 @@ fn handleNavigate(request: *std.http.Server.Request, arena: std.mem.Allocator, b
             resp.sendError(request, 404, "Tab not found");
             return;
         };
-        // Drain any pending events from the WebSocket after navigate
-        // (Network events arrive after the navigate response)
-        if (bridge.getHarRecorder(tid)) |rec| {
-            if (rec.isRecording()) {
-                const short_timeout = std.posix.timeval{ .sec = 1, .usec = 0 };
-                const orig_timeout = std.posix.timeval{ .sec = 10, .usec = 0 };
-                if (client.ws) |*ws| {
-                    std.posix.setsockopt(ws.stream.handle, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&short_timeout)) catch {};
-                    var drained: u32 = 0;
-                    while (drained < 200) : (drained += 1) {
-                        const msg = ws.receiveMessageAlloc(arena, 2 * 1024 * 1024) catch break;
-                        rec.handleCdpEvent(msg);
-                        client.event_buf.push(msg);
-                    }
-                    std.log.info("navigate: drained {d} events after response", .{drained});
-                    std.posix.setsockopt(ws.stream.handle, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&orig_timeout)) catch {};
-                }
-            }
-        }
         const params = std.fmt.allocPrint(arena, "{{\"url\":\"{s}\"}}", .{url}) catch {
             resp.sendError(request, 500, "Internal Server Error");
             return;
@@ -410,6 +391,28 @@ fn handleNavigate(request: *std.http.Server.Request, arena: std.mem.Allocator, b
             resp.sendError(request, 502, "CDP command failed");
             return;
         };
+
+        // Drain network events AFTER navigate — they arrive asynchronously
+        // over the next few seconds as the page loads resources.
+        if (bridge.getHarRecorder(tid)) |rec| {
+            if (rec.isRecording()) {
+                // Wait briefly for network events to start arriving
+                std.Thread.sleep(1500 * std.time.ns_per_ms);
+                if (client.ws) |*ws| {
+                    const short_timeout = std.posix.timeval{ .sec = 2, .usec = 0 };
+                    const orig_timeout = std.posix.timeval{ .sec = 10, .usec = 0 };
+                    std.posix.setsockopt(ws.stream.handle, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&short_timeout)) catch {};
+                    var drained: u32 = 0;
+                    while (drained < 500) : (drained += 1) {
+                        const msg = ws.receiveMessageAlloc(arena, 2 * 1024 * 1024) catch break;
+                        rec.handleCdpEvent(msg);
+                        client.event_buf.push(msg);
+                    }
+                    std.log.info("navigate: drained {d} events after navigation", .{drained});
+                    std.posix.setsockopt(ws.stream.handle, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&orig_timeout)) catch {};
+                }
+            }
+        }
 
         // Cloudflare challenge detection and auto-wait
         if (cf_wait) {
@@ -1153,36 +1156,35 @@ fn handleHarStop(request: *std.http.Server.Request, arena: std.mem.Allocator, br
 
     // Flush buffered CDP events and disconnect HAR recorder from CDP client.
     if (bridge.getCdpClient(tab_id)) |client| {
-        // First: read all pending WebSocket messages with a short timeout.
-        // Network events arrive asynchronously and queue on the WebSocket.
+        // First: flush any events already buffered from prior send() calls
+        flushEventsToHar(client, rec);
+
+        // Second: aggressively drain the WebSocket for any remaining async events.
+        // Use a 2s timeout to catch late-arriving Network events.
         if (client.ws) |*ws| {
-            const short_timeout = std.posix.timeval{ .sec = 0, .usec = 500_000 };
+            const drain_timeout = std.posix.timeval{ .sec = 2, .usec = 0 };
             const orig_timeout = std.posix.timeval{ .sec = 10, .usec = 0 };
-            std.posix.setsockopt(ws.stream.handle, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&short_timeout)) catch {};
+            std.posix.setsockopt(ws.stream.handle, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&drain_timeout)) catch {};
 
             var flush_read: u32 = 0;
-            while (flush_read < 200) : (flush_read += 1) {
+            while (flush_read < 500) : (flush_read += 1) {
                 const msg = ws.receiveMessageAlloc(arena, 2 * 1024 * 1024) catch break;
                 rec.handleCdpEvent(msg);
                 client.event_buf.push(msg);
             }
-            std.log.info("HAR: read {d} pending WS messages", .{flush_read});
+            std.log.info("HAR stop: drained {d} WS messages, recorder has {d} entries", .{ flush_read, rec.entryCount() });
 
             std.posix.setsockopt(ws.stream.handle, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&orig_timeout)) catch {};
         }
 
-        // Second: flush any events already in the buffer from prior send() calls
-        flushEventsToHar(client, rec);
-
         // Third: stop recording (sends Network.disable).
-        // NOTE: handleCdpEvent no longer checks self.recording, so events
-        // flushed after stop() are still processed correctly.
+        // handleCdpEvent still processes events after recording=false.
         const har_json = rec.stop(client) catch {
             resp.sendError(request, 500, "Failed to generate HAR");
             return;
         };
 
-        // Fourth: flush again — stop() may have buffered more events during Network.disable
+        // Fourth: flush events buffered during the Network.disable send()
         flushEventsToHar(client, rec);
 
         defer rec.allocator.free(har_json);

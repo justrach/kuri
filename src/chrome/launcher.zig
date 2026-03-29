@@ -121,6 +121,7 @@ pub const Launcher = struct {
             try argv_list.append(self.allocator, data_dir);
         }
         try argv_list.append(self.allocator, "--no-sandbox");
+        try argv_list.append(self.allocator, "--remote-allow-origins=*");
         try argv_list.append(self.allocator, port_flag);
 
         // Build and append extension flags if configured
