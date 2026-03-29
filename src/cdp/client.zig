@@ -3,53 +3,61 @@ const protocol = @import("protocol.zig");
 const WebSocketClient = @import("websocket.zig").WebSocketClient;
 
 pub const EventBuffer = struct {
-    items: [32]?[]const u8,
-    len: usize,
+    const BufferedEvent = struct {
+        data: []const u8,
+        owner: std.mem.Allocator,
+    };
+
+    items: std.ArrayListUnmanaged(BufferedEvent),
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator) EventBuffer {
         return .{
-            .items = .{null} ** 32,
-            .len = 0,
+            .items = .empty,
             .allocator = allocator,
         };
     }
 
-    pub fn push(self: *EventBuffer, event: []const u8) void {
-        if (self.len < 32) {
-            self.items[self.len] = event;
-            self.len += 1;
-        } else {
-            // Ring buffer: overwrite oldest
-            self.allocator.free(self.items[0].?);
-            var i: usize = 0;
-            while (i < 31) : (i += 1) {
-                self.items[i] = self.items[i + 1];
-            }
-            self.items[31] = event;
+    pub fn len(self: *const EventBuffer) usize {
+        return self.items.items.len;
+    }
+
+    pub fn push(self: *EventBuffer, owner: std.mem.Allocator, event: []const u8) void {
+        if (self.items.items.len >= 256) {
+            const oldest = self.items.items[0];
+            oldest.owner.free(oldest.data);
+            _ = self.items.orderedRemove(0);
         }
+        self.items.append(self.allocator, .{ .data = event, .owner = owner }) catch {
+            owner.free(event);
+        };
     }
 
     /// Check if any buffered event matches a CDP method name exactly.
     pub fn hasEvent(self: *EventBuffer, method: []const u8) bool {
-        for (self.items[0..self.len]) |item| {
-            if (item) |ev| {
-                if (eventMatchesMethod(ev, method)) return true;
-            }
+        for (self.items.items) |item| {
+            if (eventMatchesMethod(item.data, method)) return true;
         }
         return false;
     }
 
     /// Drain all events, freeing memory.
     pub fn drain(self: *EventBuffer) void {
-        for (self.items[0..self.len]) |item| {
-            if (item) |ev| self.allocator.free(ev);
+        for (self.items.items) |item| {
+            item.owner.free(item.data);
         }
-        self.len = 0;
+        self.items.clearRetainingCapacity();
+    }
+
+    pub fn drainTo(self: *EventBuffer, allocator: std.mem.Allocator) ![]BufferedEvent {
+        const out = try allocator.dupe(BufferedEvent, self.items.items);
+        self.items.clearRetainingCapacity();
+        return out;
     }
 
     pub fn deinit(self: *EventBuffer) void {
         self.drain();
+        self.items.deinit(self.allocator);
     }
 };
 
@@ -130,7 +138,7 @@ pub const CdpClient = struct {
             }
 
             // Buffer event instead of discarding
-            self.event_buf.push(response);
+            self.event_buf.push(allocator, response);
         }
 
         return error.ConnectionRefused;
@@ -193,9 +201,26 @@ pub const CdpClient = struct {
                 allocator.free(response);
                 return true;
             }
-            self.event_buf.push(response);
+            self.event_buf.push(allocator, response);
         }
         return false;
+    }
+
+    pub fn drainWsEvents(self: *CdpClient, allocator: std.mem.Allocator, timeout_sec: i32) void {
+        self.mu.lock();
+        defer self.mu.unlock();
+
+        var ws = &(self.ws orelse return);
+        const drain_timeout = std.posix.timeval{ .sec = timeout_sec, .usec = 0 };
+        const orig_timeout = std.posix.timeval{ .sec = 10, .usec = 0 };
+        std.posix.setsockopt(ws.stream.handle, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&drain_timeout)) catch {};
+        defer std.posix.setsockopt(ws.stream.handle, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&orig_timeout)) catch {};
+
+        var drained: u32 = 0;
+        while (drained < 2000) : (drained += 1) {
+            const msg = ws.receiveMessageAlloc(allocator, 2 * 1024 * 1024) catch break;
+            self.event_buf.push(allocator, msg);
+        }
     }
 
     pub fn deinit(self: *CdpClient) void {
@@ -249,8 +274,8 @@ test "EventBuffer push and hasEvent" {
     defer buf.deinit();
 
     const event = try std.testing.allocator.dupe(u8, "{\"method\":\"Page.loadEventFired\",\"params\":{}}");
-    buf.push(event);
-    try std.testing.expectEqual(@as(usize, 1), buf.len);
+    buf.push(std.testing.allocator, event);
+    try std.testing.expectEqual(@as(usize, 1), buf.len());
     try std.testing.expect(buf.hasEvent("Page.loadEventFired"));
     try std.testing.expect(!buf.hasEvent("Network.responseReceived"));
 }
@@ -261,9 +286,9 @@ test "EventBuffer drain frees all" {
 
     const e1 = try std.testing.allocator.dupe(u8, "event1");
     const e2 = try std.testing.allocator.dupe(u8, "event2");
-    buf.push(e1);
-    buf.push(e2);
-    try std.testing.expectEqual(@as(usize, 2), buf.len);
+    buf.push(std.testing.allocator, e1);
+    buf.push(std.testing.allocator, e2);
+    try std.testing.expectEqual(@as(usize, 2), buf.len());
     buf.drain();
-    try std.testing.expectEqual(@as(usize, 0), buf.len);
+    try std.testing.expectEqual(@as(usize, 0), buf.len());
 }

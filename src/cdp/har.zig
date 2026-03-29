@@ -110,10 +110,10 @@ pub const HarRecorder = struct {
 
     /// Stop recording and return the HAR as a JSON string.
     pub fn stop(self: *HarRecorder, client: *CdpClient) ![]const u8 {
-        self.recording = false;
-
         // Disable Network domain
         _ = client.send(self.allocator, "Network.disable", null) catch {};
+
+        self.recording = false;
 
         return self.toJson();
     }
