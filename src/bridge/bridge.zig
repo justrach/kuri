@@ -69,17 +69,19 @@ pub const Bridge = struct {
         }
         self.debug_script_ids.deinit();
 
-        var har_it = self.har_recorders.valueIterator();
-        while (har_it.next()) |rec| {
-            rec.*.deinit();
-            self.allocator.destroy(rec.*);
+        var har_it = self.har_recorders.iterator();
+        while (har_it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+            entry.value_ptr.*.deinit();
+            self.allocator.destroy(entry.value_ptr.*);
         }
         self.har_recorders.deinit();
 
-        var cdp_it = self.cdp_clients.valueIterator();
-        while (cdp_it.next()) |client| {
-            client.*.deinit();
-            self.allocator.destroy(client.*);
+        var cdp_it = self.cdp_clients.iterator();
+        while (cdp_it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+            entry.value_ptr.*.deinit();
+            self.allocator.destroy(entry.value_ptr.*);
         }
         self.cdp_clients.deinit();
 
@@ -163,10 +165,12 @@ pub const Bridge = struct {
                 freeSnapshot(self.allocator, kv.value);
             }
             if (self.cdp_clients.fetchRemove(tab_id)) |kv| {
+                self.allocator.free(kv.key);
                 kv.value.deinit();
                 self.allocator.destroy(kv.value);
             }
             if (self.har_recorders.fetchRemove(tab_id)) |kv| {
+                self.allocator.free(kv.key);
                 kv.value.deinit();
                 self.allocator.destroy(kv.value);
             }
@@ -187,10 +191,12 @@ pub const Bridge = struct {
             freeSnapshot(self.allocator, kv.value);
         }
         if (self.cdp_clients.fetchRemove(tab_id)) |kv| {
+            self.allocator.free(kv.key);
             kv.value.deinit();
             self.allocator.destroy(kv.value);
         }
         if (self.har_recorders.fetchRemove(tab_id)) |kv| {
+            self.allocator.free(kv.key);
             kv.value.deinit();
             self.allocator.destroy(kv.value);
         }
@@ -227,7 +233,12 @@ pub const Bridge = struct {
 
         const client = self.allocator.create(CdpClient) catch return null;
         client.* = CdpClient.init(self.allocator, tab.ws_url);
-        self.cdp_clients.put(tab_id, client) catch {
+        const owned_key = self.allocator.dupe(u8, tab_id) catch {
+            self.allocator.destroy(client);
+            return null;
+        };
+        self.cdp_clients.put(owned_key, client) catch {
+            self.allocator.free(owned_key);
             self.allocator.destroy(client);
             return null;
         };
@@ -307,7 +318,12 @@ pub const Bridge = struct {
 
         const rec = self.allocator.create(HarRecorder) catch return null;
         rec.* = HarRecorder.init(self.allocator);
-        self.har_recorders.put(tab_id, rec) catch {
+        const owned_key = self.allocator.dupe(u8, tab_id) catch {
+            self.allocator.destroy(rec);
+            return null;
+        };
+        self.har_recorders.put(owned_key, rec) catch {
+            self.allocator.free(owned_key);
             self.allocator.destroy(rec);
             return null;
         };
