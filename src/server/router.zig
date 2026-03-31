@@ -473,6 +473,13 @@ fn handleSnapshot(request: *std.http.Server.Request, arena: std.mem.Allocator, b
         return;
     };
 
+    // Opportunistically flush buffered network events to HAR recorder
+    if (bridge.getHarRecorder(tab_id)) |rec| {
+        if (rec.isRecording()) {
+            flushEventsToHar(arena, client, rec);
+        }
+    }
+
     // If format=raw, return the raw CDP response
     if (format) |f| {
         if (std.mem.eql(u8, f, "raw")) {
@@ -628,11 +635,41 @@ fn handleAction(request: *std.http.Server.Request, arena: std.mem.Allocator, bri
             resp.sendError(request, 400, "Missing value parameter for press");
             return;
         };
-        const params = std.fmt.allocPrint(arena, "{{\"expression\":\"document.dispatchEvent(new KeyboardEvent('keydown', {{key: '{s}'}})) || 'pressed'\",\"returnByValue\":true}}", .{v}) catch {
+        // Focus the target element first so key events reach the right element
+        if (node_id) |bid| {
+            const resolve_params = std.fmt.allocPrint(arena, "{{\"backendNodeId\":{d}}}", .{bid}) catch {
+                resp.sendError(request, 500, "Internal Server Error");
+                return;
+            };
+            const resolve_response = client.send(arena, protocol.Methods.dom_resolve_node, resolve_params) catch {
+                resp.sendError(request, 502, "DOM.resolveNode failed");
+                return;
+            };
+            if (extractSimpleJsonString(resolve_response, 0, "\"objectId\"")) |obj_id| {
+                const focus_params = std.fmt.allocPrint(arena, "{{\"objectId\":\"{s}\",\"functionDeclaration\":\"function() {{ this.focus(); }}\",\"returnByValue\":true}}", .{obj_id}) catch {
+                    resp.sendError(request, 500, "Internal Server Error");
+                    return;
+                };
+                _ = client.send(arena, protocol.Methods.runtime_call_function_on, focus_params) catch {};
+            }
+        }
+        // Use CDP Input.dispatchKeyEvent for native key processing
+        // (Enter submits forms, Escape closes dialogs, Tab moves focus, etc.)
+        // Only include "text" for single printable characters; special keys use empty text.
+        const key_text = if (v.len == 1 and v[0] >= 0x20 and v[0] < 0x7f) v else "";
+        const down_params = std.fmt.allocPrint(arena, "{{\"type\":\"keyDown\",\"key\":\"{s}\",\"text\":\"{s}\",\"unmodifiedText\":\"{s}\"}}", .{ v, key_text, key_text }) catch {
             resp.sendError(request, 500, "Internal Server Error");
             return;
         };
-        const response = client.send(arena, protocol.Methods.runtime_evaluate, params) catch {
+        _ = client.send(arena, protocol.Methods.input_dispatch_key_event, down_params) catch {
+            resp.sendError(request, 502, "CDP command failed");
+            return;
+        };
+        const up_params = std.fmt.allocPrint(arena, "{{\"type\":\"keyUp\",\"key\":\"{s}\"}}", .{v}) catch {
+            resp.sendError(request, 500, "Internal Server Error");
+            return;
+        };
+        const response = client.send(arena, protocol.Methods.input_dispatch_key_event, up_params) catch {
             resp.sendError(request, 502, "CDP command failed");
             return;
         };
@@ -709,10 +746,18 @@ fn handleAction(request: *std.http.Server.Request, arena: std.mem.Allocator, bri
                     resp.sendError(request, 502, "Runtime.callFunctionOn failed");
                     return;
                 };
+                // Flush network events from the fill action
+                if (bridge.getHarRecorder(tab_id)) |rec| {
+                    if (rec.isRecording()) {
+                        flushEventsToHar(arena, client, rec);
+                    }
+                }
                 resp.sendJson(request, change_response);
                 return;
             }
-            const fn_str = std.fmt.allocPrint(arena, "function() {{ this.focus(); this.value = '{s}'; this.dispatchEvent(new Event('input', {{bubbles:true}})); return 'filled'; }}", .{v}) catch {
+            // Use nativeInputValueSetter to bypass React/Vue controlled input overrides,
+            // then dispatch input + change events so frameworks detect the mutation.
+            const fn_str = std.fmt.allocPrint(arena, "function() {{ this.focus(); var nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value') || Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value'); if (nativeSetter && nativeSetter.set) {{ nativeSetter.set.call(this, '{s}'); }} else {{ this.value = '{s}'; }} this.dispatchEvent(new Event('input', {{bubbles:true}})); this.dispatchEvent(new Event('change', {{bubbles:true}})); return 'filled'; }}", .{ v, v }) catch {
                 resp.sendError(request, 500, "Internal Server Error");
                 return;
             };
@@ -723,7 +768,7 @@ fn handleAction(request: *std.http.Server.Request, arena: std.mem.Allocator, bri
                 resp.sendError(request, 400, "Missing value parameter for select");
                 return;
             };
-            const fn_str = std.fmt.allocPrint(arena, "function() {{ this.value = '{s}'; this.dispatchEvent(new Event('change', {{bubbles:true}})); return 'selected'; }}", .{v}) catch {
+            const fn_str = std.fmt.allocPrint(arena, "function() {{ this.value = '{s}'; this.dispatchEvent(new Event('input', {{bubbles:true}})); this.dispatchEvent(new Event('change', {{bubbles:true}})); return 'selected'; }}", .{v}) catch {
                 resp.sendError(request, 500, "Internal Server Error");
                 return;
             };
@@ -741,6 +786,14 @@ fn handleAction(request: *std.http.Server.Request, arena: std.mem.Allocator, bri
         resp.sendError(request, 502, "Runtime.callFunctionOn failed");
         return;
     };
+
+    // Flush network events triggered by the action (clicks often trigger XHR/fetch)
+    if (bridge.getHarRecorder(tab_id)) |rec| {
+        if (rec.isRecording()) {
+            flushEventsToHar(arena, client, rec);
+        }
+    }
+
     resp.sendJson(request, call_response);
 }
 
@@ -836,6 +889,14 @@ fn handleEvaluate(request: *std.http.Server.Request, arena: std.mem.Allocator, b
         resp.sendError(request, 502, "CDP command failed");
         return;
     };
+
+    // Flush any network events generated by the evaluated expression
+    if (bridge.getHarRecorder(tab_id)) |rec| {
+        if (rec.isRecording()) {
+            flushEventsToHar(arena, client, rec);
+        }
+    }
+
     resp.sendJson(request, response);
 }
 
@@ -4164,7 +4225,9 @@ fn handleAuthExtract(request: *std.http.Server.Request, arena: std.mem.Allocator
 
     var child = std.process.Child.init(&.{ "/bin/sh", "-c", query }, arena);
     child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Pipe;
+    // Ignore stderr — if sqlite3 writes errors to stderr and nothing reads it,
+    // the pipe buffer fills up and the child blocks, causing a deadlock/120s hang.
+    child.stderr_behavior = .Ignore;
     child.spawn() catch {
         resp.sendError(request, 500, "Failed to run sqlite3 — is it installed?");
         return;
@@ -4503,6 +4566,30 @@ test "action check/uncheck routes" {
     try std.testing.expectEqualStrings("check", getQueryParam(check_target, "action").?);
     const uncheck_target = "/action?tab_id=t1&action=uncheck&ref=e2";
     try std.testing.expectEqualStrings("uncheck", getQueryParam(uncheck_target, "action").?);
+}
+
+test "action fill route params" {
+    const target = "/action?tab_id=t1&action=fill&ref=e2&value=tomsmith";
+    try std.testing.expectEqualStrings("fill", getQueryParam(target, "action").?);
+    const decoded = getDecodedQueryParamAlloc(std.testing.allocator, target, "value").?;
+    defer std.testing.allocator.free(decoded);
+    try std.testing.expectEqualStrings("tomsmith", decoded);
+}
+
+test "action press route params" {
+    const target = "/action?tab_id=t1&action=press&ref=e2&value=Enter";
+    try std.testing.expectEqualStrings("press", getQueryParam(target, "action").?);
+    try std.testing.expectEqualStrings("Enter", getQueryParam(target, "value").?);
+}
+
+test "press key_text special keys use empty text" {
+    // Verify special key names like "Enter" are not single printable chars
+    const enter_key = "Enter";
+    const is_single_printable = enter_key.len == 1 and enter_key[0] >= 0x20 and enter_key[0] < 0x7f;
+    try std.testing.expect(!is_single_printable);
+    const a_key = "a";
+    const a_is_printable = a_key.len == 1 and a_key[0] >= 0x20 and a_key[0] < 0x7f;
+    try std.testing.expect(a_is_printable);
 }
 
 test "total endpoint count" {

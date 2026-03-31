@@ -22,14 +22,24 @@ pub const EventBuffer = struct {
         return self.items.items.len;
     }
 
-    pub fn push(self: *EventBuffer, owner: std.mem.Allocator, event: []const u8) void {
-        if (self.items.items.len >= 256) {
+    pub fn push(self: *EventBuffer, caller_alloc: std.mem.Allocator, event: []const u8) void {
+        // Dupe into the long-lived event_buf allocator. Request-scoped arenas
+        // passed by callers are freed when the HTTP request completes, which
+        // happens long before a later har/stop request drains and frees these
+        // events. Storing the arena pointer in `owner` produced dangling refs.
+        const owned = self.allocator.dupe(u8, event) catch {
+            caller_alloc.free(event);
+            return;
+        };
+        // Release the caller's copy — we now hold the canonical allocation.
+        caller_alloc.free(event);
+        if (self.items.items.len >= 4096) {
             const oldest = self.items.items[0];
             oldest.owner.free(oldest.data);
             _ = self.items.orderedRemove(0);
         }
-        self.items.append(self.allocator, .{ .data = event, .owner = owner }) catch {
-            owner.free(event);
+        self.items.append(self.allocator, .{ .data = owned, .owner = self.allocator }) catch {
+            self.allocator.free(owned);
         };
     }
 
@@ -291,4 +301,35 @@ test "EventBuffer drain frees all" {
     try std.testing.expectEqual(@as(usize, 2), buf.len());
     buf.drain();
     try std.testing.expectEqual(@as(usize, 0), buf.len());
+}
+
+test "EventBuffer push dupes into internal allocator - cross-arena safety" {
+    // Regression test for #124: events buffered during a navigate request
+    // (arena A) must remain valid when consumed by a later har/stop request
+    // (arena B). push() must dupe into self.allocator, not keep the caller's ptr.
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+
+    var buf = EventBuffer.init(gpa.allocator());
+    defer buf.deinit();
+
+    // Simulate arena A (navigate request) — allocate and push an event
+    var arena_a = std.heap.ArenaAllocator.init(gpa.allocator());
+    {
+        const event = try arena_a.allocator().dupe(u8, "{\"method\":\"Network.requestWillBeSent\",\"params\":{}}");
+        buf.push(arena_a.allocator(), event);
+        // event pointer is now freed inside push; arena_a can be safely torn down
+    }
+    arena_a.deinit(); // arena A is gone — dangling ptr if push stored arena_a ptr
+
+    // Simulate arena B (har/stop request) — consume events; must not crash/corrupt
+    var arena_b = std.heap.ArenaAllocator.init(gpa.allocator());
+    defer arena_b.deinit();
+    const drained = try buf.drainTo(arena_b.allocator());
+    defer arena_b.allocator().free(drained);
+
+    try std.testing.expectEqual(@as(usize, 1), drained.len);
+    try std.testing.expect(std.mem.indexOf(u8, drained[0].data, "Network.requestWillBeSent") != null);
+    // Free event data — must use the internal allocator (gpa), not arena_a
+    for (drained) |item| item.owner.free(item.data);
 }
