@@ -1160,7 +1160,11 @@ fn handleHarStop(request: *std.http.Server.Request, arena: std.mem.Allocator, br
         };
 
         // Fourth: flush events buffered during the Network.disable send()
+        // Fourth: flush events buffered during the Network.disable send()
         flushEventsToHar(arena, client, rec);
+
+        // Fifth: fetch response bodies for all captured entries.
+        fetchResponseBodies(arena, client, rec);
 
         defer rec.allocator.free(har_json);
         // Re-serialize since we may have added entries after stop
@@ -1168,7 +1172,6 @@ fn handleHarStop(request: *std.http.Server.Request, arena: std.mem.Allocator, br
             resp.sendError(request, 500, "Failed to generate HAR");
             return;
         };
-        defer rec.allocator.free(final_json);
         const result = std.fmt.allocPrint(arena, "{{\"status\":\"stopped\",\"entries\":{d},\"har\":{s}}}", .{ rec.entryCount(), final_json }) catch {
             resp.sendError(request, 500, "Internal Server Error");
             return;
@@ -1204,6 +1207,25 @@ fn flushEventsToHar(arena: std.mem.Allocator, client: *CdpClient, rec: *HarRecor
         rec.handleCdpEvent(item.data);
     }
     std.log.info("HAR flush: {d} network events fed to recorder", .{network_events});
+}
+
+/// For each HAR entry that has a request_id, fetch the response body via
+/// Network.getResponseBody and store it on the entry.
+fn fetchResponseBodies(arena: std.mem.Allocator, client: *CdpClient, rec: *HarRecorder) void {
+    for (rec.entries.items) |*entry| {
+        if (entry.request_id.len == 0) continue;
+        const params = std.fmt.allocPrint(arena, "{{\"requestId\":\"{s}\"}}", .{entry.request_id}) catch continue;
+        defer arena.free(params);
+        const resp_body = client.send(arena, "Network.getResponseBody", params) catch continue;
+        defer arena.free(resp_body);
+        const body = extractSimpleJsonString(resp_body, 0, "\"body\"") orelse continue;
+        if (body.len == 0) continue;
+        // Replace the empty response_body with the fetched content.
+        const owned = rec.allocator.dupe(u8, body) catch continue;
+        rec.allocator.free(entry.response_body);
+        entry.response_body = owned;
+        entry.response_size = body.len;
+    }
 }
 
 fn handleHarStatus(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {

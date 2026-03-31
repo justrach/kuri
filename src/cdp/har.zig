@@ -33,6 +33,8 @@ pub const HarRecorder = struct {
         duration_ms: i64,
         request_size: usize,
         response_size: usize,
+        request_id: []const u8,
+        response_body: []const u8,
     };
 
     pub fn init(allocator: std.mem.Allocator) HarRecorder {
@@ -85,6 +87,7 @@ pub const HarRecorder = struct {
     }
 
     /// Add a manually observed request/response to the HAR log.
+    /// Add a manually observed request/response to the HAR log.
     pub fn addEntry(self: *HarRecorder, entry: HarEntry) !void {
         const owned_url = try self.allocator.dupe(u8, entry.url);
         errdefer self.allocator.free(owned_url);
@@ -94,6 +97,10 @@ pub const HarRecorder = struct {
         errdefer self.allocator.free(owned_status_text);
         const owned_mime_type = try self.allocator.dupe(u8, entry.mime_type);
         errdefer self.allocator.free(owned_mime_type);
+        const owned_request_id = try self.allocator.dupe(u8, entry.request_id);
+        errdefer self.allocator.free(owned_request_id);
+        const owned_response_body = try self.allocator.dupe(u8, entry.response_body);
+        errdefer self.allocator.free(owned_response_body);
         const owned = HarEntry{
             .url = owned_url,
             .method = owned_method,
@@ -104,6 +111,8 @@ pub const HarRecorder = struct {
             .duration_ms = entry.duration_ms,
             .request_size = entry.request_size,
             .response_size = entry.response_size,
+            .request_id = owned_request_id,
+            .response_body = owned_response_body,
         };
         try self.entries.append(self.allocator, owned);
     }
@@ -119,6 +128,7 @@ pub const HarRecorder = struct {
     }
 
     /// Serialize current entries to HAR 1.2 JSON format.
+    /// Serialize current entries to HAR 1.2 JSON format.
     pub fn toJson(self: *HarRecorder) ![]const u8 {
         var buf: std.ArrayList(u8) = .empty;
         const w = buf.writer(self.allocator);
@@ -130,7 +140,7 @@ pub const HarRecorder = struct {
             try w.print(
                 "{{\"startedDateTime\":\"{d}\",\"time\":{d}," ++
                     "\"request\":{{\"method\":\"{s}\",\"url\":\"{s}\",\"bodySize\":{d}}}," ++
-                    "\"response\":{{\"status\":{d},\"statusText\":\"{s}\",\"content\":{{\"mimeType\":\"{s}\",\"size\":{d}}}}}}}",
+                    "\"response\":{{\"status\":{d},\"statusText\":\"{s}\",\"content\":{{\"mimeType\":\"{s}\",\"size\":{d},\"text\":\"{s}\"}}}}}}",
                 .{
                     entry.timestamp,
                     entry.duration_ms,
@@ -141,6 +151,7 @@ pub const HarRecorder = struct {
                     entry.status_text,
                     entry.mime_type,
                     entry.response_size,
+                    entry.response_body,
                 },
             );
         }
@@ -225,6 +236,8 @@ pub const HarRecorder = struct {
                 .duration_ms = std.time.timestamp() - pending.timestamp,
                 .request_size = 0,
                 .response_size = 0,
+                .request_id = pending_kv.key,
+                .response_body = "",
             }) catch return;
         }
     }
@@ -252,6 +265,8 @@ pub const HarRecorder = struct {
             self.allocator.free(entry.method);
             self.allocator.free(entry.status_text);
             self.allocator.free(entry.mime_type);
+            self.allocator.free(entry.request_id);
+            self.allocator.free(entry.response_body);
         }
         self.entries.deinit(self.allocator);
 
@@ -289,6 +304,8 @@ test "HarRecorder addEntry and toJson" {
         .duration_ms = 42,
         .request_size = 0,
         .response_size = 15000,
+        .request_id = "req1",
+        .response_body = "",
     });
 
     try rec.addEntry(.{
@@ -301,6 +318,8 @@ test "HarRecorder addEntry and toJson" {
         .duration_ms = 100,
         .request_size = 256,
         .response_size = 512,
+        .request_id = "req2",
+        .response_body = "{\"ok\":true}",
     });
 
     try std.testing.expectEqual(@as(usize, 2), rec.entryCount());
