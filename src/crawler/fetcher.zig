@@ -96,12 +96,14 @@ pub fn extractHtmlValue(json: []const u8, arena: std.mem.Allocator) ![]const u8 
 
     // Scan for the closing (unescaped) quote
     var i = str_start;
-    while (i < json.len) : (i += 1) {
+    while (i < json.len) {
         if (json[i] == '"') break;
         if (json[i] == '\\') {
             if (i + 1 >= json.len) return FetchError.FetchFailed;
-            i += 1; // skip next char (escape sequence)
+            i += 2; // skip backslash + escaped char
+            continue;
         }
+        i += 1;
     }
     if (i >= json.len) return FetchError.FetchFailed;
 
@@ -112,10 +114,9 @@ pub fn extractHtmlValue(json: []const u8, arena: std.mem.Allocator) ![]const u8 
 fn unescapeJson(arena: std.mem.Allocator, escaped: []const u8) ![]const u8 {
     var list: std.ArrayList(u8) = .empty;
     var i: usize = 0;
-    while (i < escaped.len) : (i += 1) {
+    while (i < escaped.len) {
         if (escaped[i] == '\\' and i + 1 < escaped.len) {
-            i += 1;
-            switch (escaped[i]) {
+            switch (escaped[i + 1]) {
                 '"' => try list.append(arena, '"'),
                 '\\' => try list.append(arena, '\\'),
                 '/' => try list.append(arena, '/'),
@@ -126,12 +127,15 @@ fn unescapeJson(arena: std.mem.Allocator, escaped: []const u8) ![]const u8 {
                 'f' => try list.append(arena, 12),
                 else => {
                     try list.append(arena, '\\');
-                    try list.append(arena, escaped[i]);
+                    try list.append(arena, escaped[i + 1]);
                 },
             }
+            i += 2;
+            continue;
         } else {
             try list.append(arena, escaped[i]);
         }
+        i += 1;
     }
     return list.toOwnedSlice(arena);
 }
@@ -291,4 +295,18 @@ test "FetchResult can be constructed with all fields" {
     try std.testing.expectEqualStrings("<html></html>", result.html);
     try std.testing.expectEqual(@as(u16, 200), result.status_code);
     try std.testing.expectEqualStrings("text/html", result.content_type);
+}
+
+test "HTML extraction with adjacent escapes" {
+    const response = "{\"id\":1,\"result\":{\"result\":{\"type\":\"string\",\"value\":\"line1\\nline2\\ttab\"}}}";
+    const html = try extractHtmlValue(response, std.testing.allocator);
+    defer std.testing.allocator.free(html);
+    try std.testing.expectEqualStrings("line1\nline2\ttab", html);
+}
+
+test "HTML extraction with escape at end" {
+    const response = "{\"id\":1,\"result\":{\"result\":{\"type\":\"string\",\"value\":\"end\\n\"}}}";
+    const html = try extractHtmlValue(response, std.testing.allocator);
+    defer std.testing.allocator.free(html);
+    try std.testing.expectEqualStrings("end\n", html);
 }

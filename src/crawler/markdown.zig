@@ -92,6 +92,30 @@ pub fn htmlToMarkdown(html: []const u8, allocator: std.mem.Allocator) ![]const u
                 } else if (std.mem.startsWith(u8, html[i..], "&apos;")) {
                     try writer.writeByte('\'');
                     i += 6;
+                } else if (std.mem.startsWith(u8, html[i..], "&rsquo;") or std.mem.startsWith(u8, html[i..], "&lsquo;")) {
+                    try writer.writeByte('\'');
+                    i += 7;
+                } else if (std.mem.startsWith(u8, html[i..], "&rdquo;") or std.mem.startsWith(u8, html[i..], "&ldquo;")) {
+                    try writer.writeByte('"');
+                    i += 7;
+                } else if (std.mem.startsWith(u8, html[i..], "&mdash;")) {
+                    try writer.writeAll("—");
+                    i += 7;
+                } else if (std.mem.startsWith(u8, html[i..], "&ndash;")) {
+                    try writer.writeAll("–");
+                    i += 7;
+                } else if (std.mem.startsWith(u8, html[i..], "&hellip;")) {
+                    try writer.writeAll("…");
+                    i += 8;
+                } else if (std.mem.startsWith(u8, html[i..], "&copy;")) {
+                    try writer.writeAll("©");
+                    i += 6;
+                } else if (std.mem.startsWith(u8, html[i..], "&reg;")) {
+                    try writer.writeAll("®");
+                    i += 5;
+                } else if (std.mem.startsWith(u8, html[i..], "&trade;")) {
+                    try writer.writeAll("™");
+                    i += 7;
                 } else if (decodeNumericEntity(html[i..])) |decoded| {
                     // Numeric entities: &#123; (decimal) or &#x7b; (hex)
                     if (decoded.codepoint < 128) {
@@ -241,4 +265,30 @@ test "script tags stripped" {
     defer std.testing.allocator.free(md);
 
     try std.testing.expectEqualStrings("beforeafter", md);
+}
+
+test "named entities: quotes and dashes" {
+    const html = "&ldquo;Hello&rdquo; &mdash; world&hellip;";
+    const md = try htmlToMarkdown(html, std.testing.allocator);
+    defer std.testing.allocator.free(md);
+    try std.testing.expect(std.mem.indexOf(u8, md, "\"Hello\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, md, "—") != null);
+    try std.testing.expect(std.mem.indexOf(u8, md, "…") != null);
+}
+
+test "named entities: copyright and trademark" {
+    const html = "&copy; 2024 Acme&trade; Corp&reg;";
+    const md = try htmlToMarkdown(html, std.testing.allocator);
+    defer std.testing.allocator.free(md);
+    try std.testing.expect(std.mem.indexOf(u8, md, "©") != null);
+    try std.testing.expect(std.mem.indexOf(u8, md, "™") != null);
+    try std.testing.expect(std.mem.indexOf(u8, md, "®") != null);
+}
+
+test "named entities: ndash and single quotes" {
+    const html = "2020&ndash;2024 &lsquo;quoted&rsquo;";
+    const md = try htmlToMarkdown(html, std.testing.allocator);
+    defer std.testing.allocator.free(md);
+    try std.testing.expect(std.mem.indexOf(u8, md, "–") != null);
+    try std.testing.expect(std.mem.indexOf(u8, md, "'quoted'") != null);
 }

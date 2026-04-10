@@ -36,8 +36,8 @@ pub const WebSocketClient = struct {
 
         // Set read timeout so we don't block forever
         const timeout = std.posix.timeval{ .sec = 10, .usec = 0 };
-        std.posix.setsockopt(stream.handle, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch |err| {
-            std.log.warn("websocket: failed to set read timeout: {s}", .{@errorName(err)});
+        std.posix.setsockopt(stream.handle, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch {
+            return Error.ConnectionFailed;
         };
 
         var ws = WebSocketClient{
@@ -90,7 +90,7 @@ pub const WebSocketClient = struct {
         path: []const u8,
     };
 
-    fn parseWsUrl(url: []const u8) !WsUrl {
+    pub fn parseWsUrl(url: []const u8) !WsUrl {
         // Strip "ws://"
         const after_scheme = if (std.mem.startsWith(u8, url, "ws://"))
             url[5..]
@@ -139,6 +139,14 @@ pub const WebSocketClient = struct {
 
         const response = self.read_buf[0..n];
         if (!std.mem.startsWith(u8, response, "HTTP/1.1 101")) {
+            return Error.HandshakeFailed;
+        }
+
+        // Verify Upgrade header is present (case-insensitive check)
+        if (std.mem.indexOf(u8, response, "websocket") == null and
+            std.mem.indexOf(u8, response, "WebSocket") == null and
+            std.mem.indexOf(u8, response, "Websocket") == null)
+        {
             return Error.HandshakeFailed;
         }
     }
@@ -346,4 +354,15 @@ test "parseWsUrl default port" {
 test "parseWsUrl invalid scheme" {
     const result = WebSocketClient.parseWsUrl("http://localhost:9222");
     try std.testing.expectError(error.InvalidCharacter, result);
+}
+
+test "parseWsUrl valid URL" {
+    const parsed = try WebSocketClient.parseWsUrl("ws://127.0.0.1:9222/devtools/browser/abc");
+    try std.testing.expectEqualStrings("127.0.0.1", parsed.host);
+    try std.testing.expectEqual(@as(u16, 9222), parsed.port);
+    try std.testing.expectEqualStrings("/devtools/browser/abc", parsed.path);
+}
+
+test "parseWsUrl rejects non-ws scheme" {
+    try std.testing.expectError(error.InvalidCharacter, WebSocketClient.parseWsUrl("http://localhost:9222/path"));
 }
