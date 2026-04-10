@@ -246,6 +246,7 @@ pub const Launcher = struct {
     }
 
     /// Find the first Chrome binary that exists on this system.
+    /// Find the first Chrome binary that exists on this system.
     fn findChromeBinary() ?[]const u8 {
         for (chrome_paths) |path| {
             // For absolute paths, check file existence
@@ -253,8 +254,17 @@ pub const Launcher = struct {
                 std.fs.cwd().access(path, .{}) catch continue;
                 return path;
             }
-            // For bare names, assume PATH lookup will work
-            return path;
+            // For bare names, verify the binary exists on PATH
+            const result = std.process.Child.init(
+                &.{ "which", path },
+                std.heap.page_allocator,
+            );
+            var child = result;
+            child.stderr_behavior = .Ignore;
+            child.stdout_behavior = .Ignore;
+            if (child.spawnAndWait()) |term| {
+                if (term.Exited == 0) return path;
+            } else |_| {}
         }
         return null;
     }
