@@ -2,6 +2,7 @@ const std = @import("std");
 const compat = @import("compat.zig");
 const markdown = @import("crawler/markdown.zig");
 const validator = @import("crawler/validator.zig");
+const http_fetch = @import("util/http_fetch.zig");
 
 const version = "0.1.0";
 const user_agent = "kuri-browse/" ++ version;
@@ -12,6 +13,7 @@ pub fn main() !void {
     const gpa = gpa_impl.allocator();
 
     const args = try compat.collectArgs(gpa);
+    defer gpa.free(args);
 
     if (args.len > 1 and (std.mem.eql(u8, args[1], "--version") or std.mem.eql(u8, args[1], "-V"))) {
         compat.writeToStdout("kuri-browse " ++ version ++ "\n");
@@ -81,7 +83,8 @@ const Browser = struct {
     }
 
     fn navigate(self: *Browser, url: []const u8) !void {
-        const resolved = self.resolveUrl(url);
+        const resolved = try self.resolveUrlOwned(url);
+        defer self.allocator.free(resolved);
 
         // SSRF validation — block private IPs, metadata endpoints, non-HTTP schemes
         validator.validateUrl(resolved) catch |err| {
@@ -104,7 +107,7 @@ const Browser = struct {
         const arena = self.arena.allocator();
 
         const fetch_start = compat.nanoTimestamp();
-        const html = fetchHttp(arena, resolved, user_agent) catch |err| {
+        const html = http_fetch.fetchHttp(arena, resolved, user_agent) catch |err| {
             if (self.color) {
                 std.debug.print("\x1b[31m✗\x1b[0m fetch failed: {s}\n", .{@errorName(err)});
             } else {
@@ -141,47 +144,43 @@ const Browser = struct {
         }
     }
 
-    fn resolveUrl(self: *Browser, input: []const u8) []const u8 {
+    fn resolveUrlOwned(self: *Browser, input: []const u8) ![]u8 {
         // Already absolute
         if (std.mem.startsWith(u8, input, "http://") or std.mem.startsWith(u8, input, "https://")) {
-            return input;
+            return self.allocator.dupe(u8, input);
         }
 
         const base = self.current_url orelse {
-            // No current page — assume https://
-            const arena = self.arena.allocator();
-            return std.fmt.allocPrint(arena, "https://{s}", .{input}) catch input;
+            return std.fmt.allocPrint(self.allocator, "https://{s}", .{input});
         };
-
-        const arena = self.arena.allocator();
 
         // Protocol-relative: //example.com/path
         if (std.mem.startsWith(u8, input, "//")) {
-            const scheme_end = std.mem.indexOf(u8, base, "://") orelse return input;
-            return std.fmt.allocPrint(arena, "{s}:{s}", .{ base[0..scheme_end], input }) catch input;
+            const scheme_end = std.mem.indexOf(u8, base, "://") orelse return self.allocator.dupe(u8, input);
+            return std.fmt.allocPrint(self.allocator, "{s}:{s}", .{ base[0..scheme_end], input });
         }
 
         // Extract scheme + host from base
-        const scheme_end = (std.mem.indexOf(u8, base, "://") orelse return input) + 3;
+        const scheme_end = (std.mem.indexOf(u8, base, "://") orelse return self.allocator.dupe(u8, input)) + 3;
         const host_end = std.mem.indexOfScalarPos(u8, base, scheme_end, '/') orelse base.len;
         const origin = base[0..host_end];
 
         // Absolute path: /path
         if (input.len > 0 and input[0] == '/') {
-            return std.fmt.allocPrint(arena, "{s}{s}", .{ origin, input }) catch input;
+            return std.fmt.allocPrint(self.allocator, "{s}{s}", .{ origin, input });
         }
 
         // Fragment: #section
         if (input.len > 0 and input[0] == '#') {
-            return base;
+            return self.allocator.dupe(u8, base);
         }
 
         // Relative path: resolve against current directory
-        const last_slash = std.mem.lastIndexOfScalar(u8, base, '/') orelse return input;
+        const last_slash = std.mem.lastIndexOfScalar(u8, base, '/') orelse return self.allocator.dupe(u8, input);
         if (last_slash < scheme_end) {
-            return std.fmt.allocPrint(arena, "{s}/{s}", .{ origin, input }) catch input;
+            return std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ origin, input });
         }
-        return std.fmt.allocPrint(arena, "{s}{s}", .{ base[0 .. last_slash + 1], input }) catch input;
+        return std.fmt.allocPrint(self.allocator, "{s}{s}", .{ base[0 .. last_slash + 1], input });
     }
 
     fn renderPage(self: *Browser, highlight: ?[]const u8) void {
@@ -259,9 +258,7 @@ const Browser = struct {
                 compat.writeToStdout(index_str);
             } else if (std.mem.eql(u8, trimmed, ":r") or std.mem.eql(u8, trimmed, ":reload")) {
                 if (self.current_url) |url| {
-                    const arena = self.arena.allocator();
-                    const url_copy = arena.dupe(u8, url) catch url;
-                    self.navigateNoHistory(url_copy);
+                    self.navigateNoHistory(url);
                 } else {
                     std.debug.print("no page to reload\n", .{});
                 }
@@ -299,17 +296,21 @@ const Browser = struct {
     }
 
     fn navigateNoHistory(self: *Browser, url: []const u8) void {
+        const stable_url_buf = self.allocator.dupe(u8, url) catch null;
+        defer if (stable_url_buf) |buf| self.allocator.free(buf);
+        const stable_url = stable_url_buf orelse url;
+
         if (self.color) {
-            std.debug.print("\x1b[2m→\x1b[0m loading \x1b[4m{s}\x1b[0m\n", .{url});
+            std.debug.print("\x1b[2m→\x1b[0m loading \x1b[4m{s}\x1b[0m\n", .{stable_url});
         } else {
-            std.debug.print("loading {s}\n", .{url});
+            std.debug.print("loading {s}\n", .{stable_url});
         }
 
         _ = self.arena.reset(.retain_capacity);
         const arena = self.arena.allocator();
 
         const fetch_start = compat.nanoTimestamp();
-        const html = fetchHttp(arena, url, user_agent) catch |err| {
+        const html = http_fetch.fetchHttp(arena, stable_url, user_agent) catch |err| {
             if (self.color) {
                 std.debug.print("\x1b[31m✗\x1b[0m fetch failed: {s}\n", .{@errorName(err)});
             } else {
@@ -326,7 +327,7 @@ const Browser = struct {
 
         self.current_html = html;
         self.current_md = md;
-        self.current_url = arena.dupe(u8, url) catch url;
+        self.current_url = arena.dupe(u8, stable_url) catch stable_url;
         self.search_term = null;
 
         self.renderPage(null);
@@ -755,43 +756,6 @@ fn printUsage() void {
         \\    NO_COLOR          Disable colored output (https://no-color.org)
         \\
     , .{});
-}
-
-// ─── HTTP fetch ─────────────────────────────────────────────────────────────
-
-fn fetchHttp(allocator: std.mem.Allocator, url: []const u8, ua: []const u8) ![]const u8 {
-    var client: std.http.Client = .{ .allocator = allocator, .io = std.Io.Threaded.global_single_threaded.io() };
-    defer client.deinit();
-
-    const uri = try std.Uri.parse(url);
-
-    var req = try client.request(.GET, uri, .{
-        .extra_headers = &.{
-            .{ .name = "User-Agent", .value = ua },
-            .{ .name = "Accept", .value = "text/html,application/xhtml+xml,*/*" },
-            .{ .name = "Accept-Encoding", .value = "gzip, deflate" },
-        },
-    });
-    defer req.deinit();
-
-    try req.sendBodiless();
-
-    var redirect_buf: [8192]u8 = undefined;
-    var response = try req.receiveHead(&redirect_buf);
-
-    if (response.head.status != .ok) {
-        std.debug.print("HTTP {d}\n", .{@intFromEnum(response.head.status)});
-        return error.HttpError;
-    }
-
-    var body: std.ArrayList(u8) = .empty;
-    var transfer_buf: [8192]u8 = undefined;
-    var decompress: std.http.Decompress = undefined;
-    var decompress_buf: [std.compress.flate.max_window_len]u8 = undefined;
-    const reader = response.readerDecompressing(&transfer_buf, &decompress, &decompress_buf);
-    try reader.appendRemainingUnlimited(allocator, &body);
-
-    return body.items;
 }
 
 /// Extract all href values from <a> tags in HTML.

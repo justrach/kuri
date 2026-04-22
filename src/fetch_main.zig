@@ -3,6 +3,7 @@ const compat = @import("compat.zig");
 const validator = @import("crawler/validator.zig");
 const markdown = @import("crawler/markdown.zig");
 const js_engine = @import("js_engine.zig");
+const http_fetch = @import("util/http_fetch.zig");
 
 const version = "0.2.0";
 
@@ -12,6 +13,7 @@ pub fn main() !void {
     const gpa = gpa_impl.allocator();
 
     const args = try compat.collectArgs(gpa);
+    defer gpa.free(args);
 
     var opts = Options{};
 
@@ -88,7 +90,7 @@ pub fn main() !void {
 
     const fetch_start = compat.nanoTimestamp();
 
-    var html = fetchHttp(arena, target_url, opts.user_agent) catch |err| {
+    var html = http_fetch.fetchHttp(arena, target_url, opts.user_agent) catch |err| {
         if (color) {
             std.debug.print("\x1b[31m✗\x1b[0m fetch failed: {s}\n", .{@errorName(err)});
         } else {
@@ -268,42 +270,6 @@ fn printUsage() void {
         \\    NO_COLOR   Disable colors (https://no-color.org)
         \\
     , .{});
-}
-
-/// Fetch a URL using std.http.Client and return the response body.
-pub fn fetchHttp(allocator: std.mem.Allocator, url: []const u8, user_agent: []const u8) ![]const u8 {
-    var client: std.http.Client = .{ .allocator = allocator, .io = std.Io.Threaded.global_single_threaded.io() };
-    defer client.deinit();
-
-    const uri = try std.Uri.parse(url);
-
-    var req = try client.request(.GET, uri, .{
-        .extra_headers = &.{
-            .{ .name = "User-Agent", .value = user_agent },
-            .{ .name = "Accept", .value = "text/html,application/xhtml+xml,*/*" },
-            .{ .name = "Accept-Encoding", .value = "gzip, deflate" },
-        },
-    });
-    defer req.deinit();
-
-    try req.sendBodiless();
-
-    var redirect_buf: [8192]u8 = undefined;
-    var response = try req.receiveHead(&redirect_buf);
-
-    if (response.head.status != .ok) {
-        std.debug.print("HTTP {d}\n", .{@intFromEnum(response.head.status)});
-        return error.HttpError;
-    }
-
-    var body: std.ArrayList(u8) = .empty;
-    var transfer_buf: [8192]u8 = undefined;
-    var decompress: std.http.Decompress = undefined;
-    var decompress_buf: [std.compress.flate.max_window_len]u8 = undefined;
-    const reader = response.readerDecompressing(&transfer_buf, &decompress, &decompress_buf);
-    try reader.appendRemainingUnlimited(allocator, &body);
-
-    return body.items;
 }
 
 /// Extract all href values from <a> tags in HTML.

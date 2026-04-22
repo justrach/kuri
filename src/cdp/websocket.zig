@@ -147,7 +147,12 @@ pub const WebSocketClient = struct {
         }
         if (digit_count == 0 or octet_idx != 3) return null;
         octets[3] = @intCast(cur);
-        return @as(u32, octets[0]) << 24 | @as(u32, octets[1]) << 16 | @as(u32, octets[2]) << 8 | @as(u32, octets[3]);
+        const host_order =
+            @as(u32, octets[0]) << 24 |
+            @as(u32, octets[1]) << 16 |
+            @as(u32, octets[2]) << 8 |
+            @as(u32, octets[3]);
+        return std.mem.nativeToBig(u32, host_order);
     }
 
     fn doHandshake(self: *WebSocketClient, host: []const u8, port: u16, path: []const u8) !void {
@@ -416,4 +421,9 @@ test "parseWsUrl valid URL" {
 
 test "parseWsUrl rejects non-ws scheme" {
     try std.testing.expectError(error.InvalidCharacter, WebSocketClient.parseWsUrl("http://localhost:9222/path"));
+}
+
+test "parseIp4 stores bytes in network order" {
+    const ip = WebSocketClient.parseIp4("127.0.0.1") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualSlices(u8, &.{ 127, 0, 0, 1 }, std.mem.asBytes(&ip));
 }

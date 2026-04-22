@@ -217,6 +217,24 @@ pub fn fdClose(fd: std.c.fd_t) void {
 extern "c" fn execvp(file: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_int;
 
 pub fn runCommand(allocator: std.mem.Allocator, argv: []const []const u8, max_output: usize) !struct { stdout: []u8, term: i32 } {
+    var arg_storage: std.ArrayList([:0]u8) = .empty;
+    defer {
+        for (arg_storage.items) |arg| allocator.free(arg);
+        arg_storage.deinit(allocator);
+    }
+    for (argv) |arg| {
+        const duped = try allocator.allocSentinel(u8, arg.len, 0);
+        @memcpy(duped[0..arg.len], arg);
+        try arg_storage.append(allocator, duped);
+    }
+
+    const c_argv = try allocator.alloc(?[*:0]const u8, arg_storage.items.len + 1);
+    defer allocator.free(c_argv);
+    for (arg_storage.items, 0..) |arg, i| {
+        c_argv[i] = arg.ptr;
+    }
+    c_argv[arg_storage.items.len] = null;
+
     var pipe_fds: [2]std.c.fd_t = undefined;
     if (std.c.pipe(&pipe_fds) != 0) return error.PipeCreateFailed;
 
@@ -230,13 +248,7 @@ pub fn runCommand(allocator: std.mem.Allocator, argv: []const []const u8, max_ou
         _ = std.c.dup2(pipe_fds[1], 2); // also capture stderr
         _ = std.c.close(pipe_fds[1]);
 
-        var c_argv_buf: [64]?[*:0]const u8 = undefined;
-        for (argv, 0..) |arg, i| {
-            if (i >= c_argv_buf.len - 1) break;
-            c_argv_buf[i] = @ptrCast(arg.ptr);
-        }
-        c_argv_buf[argv.len] = null;
-        _ = execvp(@ptrCast(argv[0].ptr), @ptrCast(&c_argv_buf));
+        _ = execvp(c_argv[0].?, @ptrCast(c_argv.ptr));
         std.c._exit(127);
     }
 

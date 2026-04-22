@@ -516,6 +516,64 @@ fn cmdAction(arena: std.mem.Allocator, client: *CdpClient, session: *Session, ac
         std.process.exit(1);
     };
 
+    const value_action_fn =
+        \\function(value, append) {
+        \\  const target = (() => {
+        \\    if (!this) return null;
+        \\    if (this instanceof HTMLLabelElement && this.control) return this.control;
+        \\    if (this instanceof HTMLInputElement || this instanceof HTMLTextAreaElement || this instanceof HTMLSelectElement) return this;
+        \\    if (this.isContentEditable) return this;
+        \\    if (typeof this.querySelector === "function") {
+        \\      const nested = this.querySelector("input,textarea,select,[contenteditable=\"true\"],[contenteditable=\"\"],[role=\"textbox\"]");
+        \\      if (nested) return nested;
+        \\    }
+        \\    return this;
+        \\  })();
+        \\  if (!target) return "missing-target";
+        \\  target.focus?.();
+        \\  if (target.isContentEditable) {
+        \\    const existing = typeof target.textContent === "string" ? target.textContent : "";
+        \\    target.textContent = append ? (existing + value) : value;
+        \\  } else if ("value" in target) {
+        \\    const existing = typeof target.value === "string" ? target.value : "";
+        \\    target.value = append ? (existing + value) : value;
+        \\  }
+        \\  target.dispatchEvent(new Event("input", {bubbles:true}));
+        \\  target.dispatchEvent(new Event("change", {bubbles:true}));
+        \\  return "filled";
+        \\}
+    ;
+    const select_action_fn =
+        \\function(value) {
+        \\  const target = (() => {
+        \\    if (!this) return null;
+        \\    if (this instanceof HTMLLabelElement && this.control) return this.control;
+        \\    if (this instanceof HTMLSelectElement) return this;
+        \\    if (typeof this.querySelector === "function") {
+        \\      const nested = this.querySelector("select");
+        \\      if (nested) return nested;
+        \\    }
+        \\    return this;
+        \\  })();
+        \\  if (!target) return "missing-target";
+        \\  let next = value;
+        \\  if ("options" in target && target.options) {
+        \\    for (const opt of target.options) {
+        \\      const text = (opt.textContent || "").trim();
+        \\      const label = (opt.label || "").trim();
+        \\      if (opt.value === value || text === value || label === value) {
+        \\        next = opt.value;
+        \\        break;
+        \\      }
+        \\    }
+        \\  }
+        \\  if ("value" in target) target.value = next;
+        \\  target.dispatchEvent(new Event("input", {bubbles:true}));
+        \\  target.dispatchEvent(new Event("change", {bubbles:true}));
+        \\  return "selected";
+        \\}
+    ;
+
     // Step 2: build JS function for the action
     const js_fn: []const u8 = blk: {
         if (std.mem.eql(u8, action, "click")) break :blk "function() { this.scrollIntoViewIfNeeded(); this.click(); return 'clicked'; }";
@@ -530,18 +588,16 @@ fn cmdAction(arena: std.mem.Allocator, client: *CdpClient, session: *Session, ac
                 jsonError("{s} requires a value", .{action});
                 std.process.exit(1);
             };
-            break :blk try std.fmt.allocPrint(arena,
-                "function() {{ this.focus(); this.value = '{s}'; this.dispatchEvent(new Event('input', {{bubbles:true}})); return 'filled'; }}",
-                .{v});
+            _ = v;
+            break :blk value_action_fn;
         }
         if (std.mem.eql(u8, action, "select")) {
             const v = value orelse {
                 jsonError("select requires a value", .{});
                 std.process.exit(1);
             };
-            break :blk try std.fmt.allocPrint(arena,
-                "function() {{ this.value = '{s}'; this.dispatchEvent(new Event('change', {{bubbles:true}})); return 'selected'; }}",
-                .{v});
+            _ = v;
+            break :blk select_action_fn;
         }
         jsonError("unknown action '{s}'", .{action});
         std.process.exit(1);
@@ -551,9 +607,33 @@ fn cmdAction(arena: std.mem.Allocator, client: *CdpClient, session: *Session, ac
     const escaped_fn = try escapeForJson(arena, js_fn);
 
     // Step 3: call function on resolved object
-    const call_params = try std.fmt.allocPrint(arena,
+    const call_params = if (std.mem.eql(u8, action, "type") or std.mem.eql(u8, action, "fill")) blk: {
+        const v = value orelse {
+            jsonError("{s} requires a value", .{action});
+            std.process.exit(1);
+        };
+        const escaped_v = try escapeForJson(arena, v);
+        break :blk try std.fmt.allocPrint(
+            arena,
+            "{{\"objectId\":\"{s}\",\"functionDeclaration\":\"{s}\",\"arguments\":[{{\"value\":\"{s}\"}},{{\"value\":{s}}}],\"returnByValue\":true}}",
+            .{ object_id, escaped_fn, escaped_v, if (std.mem.eql(u8, action, "type")) "true" else "false" },
+        );
+    } else if (std.mem.eql(u8, action, "select")) blk: {
+        const v = value orelse {
+            jsonError("select requires a value", .{});
+            std.process.exit(1);
+        };
+        const escaped_v = try escapeForJson(arena, v);
+        break :blk try std.fmt.allocPrint(
+            arena,
+            "{{\"objectId\":\"{s}\",\"functionDeclaration\":\"{s}\",\"arguments\":[{{\"value\":\"{s}\"}}],\"returnByValue\":true}}",
+            .{ object_id, escaped_fn, escaped_v },
+        );
+    } else try std.fmt.allocPrint(
+        arena,
         "{{\"objectId\":\"{s}\",\"functionDeclaration\":\"{s}\",\"returnByValue\":true}}",
-        .{ object_id, escaped_fn });
+        .{ object_id, escaped_fn },
+    );
     const response = client.send(arena, protocol.Methods.runtime_call_function_on, call_params) catch |err| {
         jsonError("Runtime.callFunctionOn failed: {s}", .{@errorName(err)});
         std.process.exit(1);
@@ -640,12 +720,18 @@ fn cmdEval(arena: std.mem.Allocator, client: *CdpClient, expr: []const u8) !void
 }
 
 fn cmdText(arena: std.mem.Allocator, client: *CdpClient, selector: ?[]const u8) !void {
-    const params: []const u8 = if (selector) |sel|
-        try std.fmt.allocPrint(arena, "{{\"expression\":\"document.querySelector('{s}')?.innerText || null\",\"returnByValue\":true}}", .{sel})
-    else
-        @as([]const u8, "{\"expression\":\"document.body.innerText\",\"returnByValue\":true}");
+    const expr = if (selector) |sel| blk: {
+        const escaped_sel = try escapeForJson(arena, sel);
+        break :blk try std.fmt.allocPrint(arena,
+            "(() => {{ const el = document.querySelector(\"{s}\"); return el ? (el.innerText ?? '') : ''; }})()",
+            .{escaped_sel},
+        );
+    } else
+        @as([]const u8, "document.body ? document.body.innerText : ''");
+    const escaped_expr = try escapeForJson(arena, expr);
+    const params = try std.fmt.allocPrint(arena, "{{\"expression\":\"{s}\",\"returnByValue\":true}}", .{escaped_expr});
 
-    const response = client.send(arena, protocol.Methods.runtime_evaluate, @constCast(params)) catch |err| {
+    const response = client.send(arena, protocol.Methods.runtime_evaluate, params) catch |err| {
         jsonError("text failed: {s}", .{@errorName(err)});
         std.process.exit(1);
     };
@@ -959,7 +1045,7 @@ fn cmdHeaders(arena: std.mem.Allocator, client: *CdpClient) !void {
         jsonError("headers eval failed: {s}", .{@errorName(err)});
         std.process.exit(1);
     };
-    compat.writeToStdout(response);
+    compat.writeToStdout(unescapeJson(arena, extractCdpValue(response)));
     compat.writeToStdout("\n");
 }
 
@@ -993,7 +1079,7 @@ fn cmdAudit(arena: std.mem.Allocator, client: *CdpClient) !void {
         jsonError("audit eval failed: {s}", .{@errorName(err)});
         std.process.exit(1);
     };
-    compat.writeToStdout(response);
+    compat.writeToStdout(unescapeJson(arena, extractCdpValue(response)));
     compat.writeToStdout("\n");
 }
 

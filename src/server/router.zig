@@ -740,6 +740,64 @@ fn handleAction(request: *std.http.Server.Request, arena: std.mem.Allocator, bri
         return;
     };
 
+    const value_action_fn =
+        \\function(value, append) {
+        \\  const target = (() => {
+        \\    if (!this) return null;
+        \\    if (this instanceof HTMLLabelElement && this.control) return this.control;
+        \\    if (this instanceof HTMLInputElement || this instanceof HTMLTextAreaElement || this instanceof HTMLSelectElement) return this;
+        \\    if (this.isContentEditable) return this;
+        \\    if (typeof this.querySelector === "function") {
+        \\      const nested = this.querySelector("input,textarea,select,[contenteditable=\"true\"],[contenteditable=\"\"],[role=\"textbox\"]");
+        \\      if (nested) return nested;
+        \\    }
+        \\    return this;
+        \\  })();
+        \\  if (!target) return "missing-target";
+        \\  target.focus?.();
+        \\  if (target.isContentEditable) {
+        \\    const existing = typeof target.textContent === "string" ? target.textContent : "";
+        \\    target.textContent = append ? (existing + value) : value;
+        \\  } else if ("value" in target) {
+        \\    const existing = typeof target.value === "string" ? target.value : "";
+        \\    target.value = append ? (existing + value) : value;
+        \\  }
+        \\  target.dispatchEvent(new Event("input", {bubbles:true}));
+        \\  target.dispatchEvent(new Event("change", {bubbles:true}));
+        \\  return "filled";
+        \\}
+    ;
+    const select_action_fn =
+        \\function(value) {
+        \\  const target = (() => {
+        \\    if (!this) return null;
+        \\    if (this instanceof HTMLLabelElement && this.control) return this.control;
+        \\    if (this instanceof HTMLSelectElement) return this;
+        \\    if (typeof this.querySelector === "function") {
+        \\      const nested = this.querySelector("select");
+        \\      if (nested) return nested;
+        \\    }
+        \\    return this;
+        \\  })();
+        \\  if (!target) return "missing-target";
+        \\  let next = value;
+        \\  if ("options" in target && target.options) {
+        \\    for (const opt of target.options) {
+        \\      const text = (opt.textContent || "").trim();
+        \\      const label = (opt.label || "").trim();
+        \\      if (opt.value === value || text === value || label === value) {
+        \\        next = opt.value;
+        \\        break;
+        \\      }
+        \\    }
+        \\  }
+        \\  if ("value" in target) target.value = next;
+        \\  target.dispatchEvent(new Event("input", {bubbles:true}));
+        \\  target.dispatchEvent(new Event("change", {bubbles:true}));
+        \\  return "selected";
+        \\}
+    ;
+
     // Step 2: Build the JS function for the action
     const js_fn: []const u8 = switch (kind) {
         .click => "function() { this.scrollIntoViewIfNeeded(); this.click(); return 'clicked'; }",
@@ -754,16 +812,38 @@ fn handleAction(request: *std.http.Server.Request, arena: std.mem.Allocator, bri
                 resp.sendError(request, 400, "Missing value parameter for fill/type");
                 return;
             };
-            const escaped_v = jsonEscapeAlloc(arena, v) orelse {
-                resp.sendError(request, 500, "Internal Server Error");
-                return;
-            };
             // realistic=true: use per-character key events for React/Vue compatibility
             const use_realistic = if (realistic) |r| std.mem.eql(u8, r, "true") else false;
             if (use_realistic) {
                 // Focus the element first
-                const focus_fn = "function() { this.focus(); this.value = ''; this.dispatchEvent(new Event('focus', {bubbles:true})); return 'focused'; }";
-                const focus_params = std.fmt.allocPrint(arena, "{{\"objectId\":\"{s}\",\"functionDeclaration\":\"{s}\",\"returnByValue\":true}}", .{ object_id, focus_fn }) catch {
+                const focus_fn =
+                    \\function() {
+                    \\  const target = (() => {
+                    \\    if (!this) return null;
+                    \\    if (this instanceof HTMLLabelElement && this.control) return this.control;
+                    \\    if (this instanceof HTMLInputElement || this instanceof HTMLTextAreaElement || this.isContentEditable) return this;
+                    \\    if (typeof this.querySelector === "function") {
+                    \\      const nested = this.querySelector("input,textarea,[contenteditable=\"true\"],[contenteditable=\"\"],[role=\"textbox\"]");
+                    \\      if (nested) return nested;
+                    \\    }
+                    \\    return this;
+                    \\  })();
+                    \\  if (!target) return "missing-target";
+                    \\  target.focus?.();
+                    \\  if (target.isContentEditable) {
+                    \\    target.textContent = "";
+                    \\  } else if ("value" in target) {
+                    \\    target.value = "";
+                    \\  }
+                    \\  target.dispatchEvent(new Event("focus", {bubbles:true}));
+                    \\  return "focused";
+                    \\}
+                ;
+                const escaped_focus_fn = jsonEscapeAlloc(arena, focus_fn) orelse {
+                    resp.sendError(request, 500, "Internal Server Error");
+                    return;
+                };
+                const focus_params = std.fmt.allocPrint(arena, "{{\"objectId\":\"{s}\",\"functionDeclaration\":\"{s}\",\"returnByValue\":true}}", .{ object_id, escaped_focus_fn }) catch {
                     resp.sendError(request, 500, "Internal Server Error");
                     return;
                 };
@@ -782,8 +862,30 @@ fn handleAction(request: *std.http.Server.Request, arena: std.mem.Allocator, bri
                     _ = client.send(arena, protocol.Methods.input_dispatch_key_event, up_params) catch continue;
                 }
                 // Dispatch change event on blur
-                const change_fn = "function() { this.dispatchEvent(new Event('change', {bubbles:true})); this.dispatchEvent(new Event('blur', {bubbles:true})); return 'filled'; }";
-                const change_params = std.fmt.allocPrint(arena, "{{\"objectId\":\"{s}\",\"functionDeclaration\":\"{s}\",\"returnByValue\":true}}", .{ object_id, change_fn }) catch {
+                const change_fn =
+                    \\function() {
+                    \\  const target = (() => {
+                    \\    if (!this) return null;
+                    \\    if (this instanceof HTMLLabelElement && this.control) return this.control;
+                    \\    if (this instanceof HTMLInputElement || this instanceof HTMLTextAreaElement || this.isContentEditable) return this;
+                    \\    if (typeof this.querySelector === "function") {
+                    \\      const nested = this.querySelector("input,textarea,[contenteditable=\"true\"],[contenteditable=\"\"],[role=\"textbox\"]");
+                    \\      if (nested) return nested;
+                    \\    }
+                    \\    return this;
+                    \\  })();
+                    \\  if (!target) return "missing-target";
+                    \\  target.dispatchEvent(new Event("input", {bubbles:true}));
+                    \\  target.dispatchEvent(new Event("change", {bubbles:true}));
+                    \\  target.dispatchEvent(new Event("blur", {bubbles:true}));
+                    \\  return "filled";
+                    \\}
+                ;
+                const escaped_change_fn = jsonEscapeAlloc(arena, change_fn) orelse {
+                    resp.sendError(request, 500, "Internal Server Error");
+                    return;
+                };
+                const change_params = std.fmt.allocPrint(arena, "{{\"objectId\":\"{s}\",\"functionDeclaration\":\"{s}\",\"returnByValue\":true}}", .{ object_id, escaped_change_fn }) catch {
                     resp.sendError(request, 500, "Internal Server Error");
                     return;
                 };
@@ -794,11 +896,40 @@ fn handleAction(request: *std.http.Server.Request, arena: std.mem.Allocator, bri
                 resp.sendJson(request, change_response);
                 return;
             }
-            const fn_str = std.fmt.allocPrint(arena, "function() {{ this.focus(); this.value = '{s}'; this.dispatchEvent(new Event('input', {{bubbles:true}})); return 'filled'; }}", .{escaped_v}) catch {
+            break :blk value_action_fn;
+        },
+        .select => blk: {
+            const v = value orelse {
+                resp.sendError(request, 400, "Missing value parameter for select");
+                return;
+            };
+            _ = v;
+            break :blk select_action_fn;
+        },
+        .scroll, .press => unreachable,
+    };
+
+    const escaped_js_fn = jsonEscapeAlloc(arena, js_fn) orelse {
+        resp.sendError(request, 500, "Internal Server Error");
+        return;
+    };
+
+    // Step 3: Call function on the resolved object
+    const call_params = switch (kind) {
+        .fill, .@"type" => blk: {
+            const v = value orelse {
+                resp.sendError(request, 400, "Missing value parameter for fill/type");
+                return;
+            };
+            const escaped_v = jsonEscapeAlloc(arena, v) orelse {
                 resp.sendError(request, 500, "Internal Server Error");
                 return;
             };
-            break :blk fn_str;
+            break :blk std.fmt.allocPrint(
+                arena,
+                "{{\"objectId\":\"{s}\",\"functionDeclaration\":\"{s}\",\"arguments\":[{{\"value\":\"{s}\"}},{{\"value\":{s}}}],\"returnByValue\":true}}",
+                .{ object_id, escaped_js_fn, escaped_v, if (kind == .@"type") "true" else "false" },
+            );
         },
         .select => blk: {
             const v = value orelse {
@@ -809,17 +940,18 @@ fn handleAction(request: *std.http.Server.Request, arena: std.mem.Allocator, bri
                 resp.sendError(request, 500, "Internal Server Error");
                 return;
             };
-            const fn_str = std.fmt.allocPrint(arena, "function() {{ this.value = '{s}'; this.dispatchEvent(new Event('change', {{bubbles:true}})); return 'selected'; }}", .{escaped_v}) catch {
-                resp.sendError(request, 500, "Internal Server Error");
-                return;
-            };
-            break :blk fn_str;
+            break :blk std.fmt.allocPrint(
+                arena,
+                "{{\"objectId\":\"{s}\",\"functionDeclaration\":\"{s}\",\"arguments\":[{{\"value\":\"{s}\"}}],\"returnByValue\":true}}",
+                .{ object_id, escaped_js_fn, escaped_v },
+            );
         },
-        .scroll, .press => unreachable,
-    };
-
-    // Step 3: Call function on the resolved object
-    const call_params = std.fmt.allocPrint(arena, "{{\"objectId\":\"{s}\",\"functionDeclaration\":\"{s}\",\"returnByValue\":true}}", .{ object_id, js_fn }) catch {
+        else => std.fmt.allocPrint(
+            arena,
+            "{{\"objectId\":\"{s}\",\"functionDeclaration\":\"{s}\",\"returnByValue\":true}}",
+            .{ object_id, escaped_js_fn },
+        ),
+    } catch {
         resp.sendError(request, 500, "Internal Server Error");
         return;
     };
@@ -842,15 +974,20 @@ fn handleText(request: *std.http.Server.Request, arena: std.mem.Allocator, bridg
         return;
     };
 
-    const selector = getQueryParam(target, "selector");
-    const params = if (selector) |sel|
-        std.fmt.allocPrint(arena,
-            "{{\"expression\":\"document.querySelector('{s}')?.innerText || null\",\"returnByValue\":true}}", .{sel}) catch {
+    const selector = getDecodedQueryParamAlloc(arena, target, "selector");
+    const params = if (selector) |sel| blk: {
+        const escaped_sel = jsonEscapeAlloc(arena, sel) orelse {
             resp.sendError(request, 500, "Internal Server Error");
             return;
-        }
+        };
+        break :blk std.fmt.allocPrint(arena,
+            "{{\"expression\":\"(() => {{ const el = document.querySelector(\\\"{s}\\\"); return el ? (el.innerText ?? '') : ''; }})()\",\"returnByValue\":true}}", .{escaped_sel}) catch {
+            resp.sendError(request, 500, "Internal Server Error");
+            return;
+        };
+    }
     else
-        @as([]const u8, "{\"expression\":\"document.body.innerText\",\"returnByValue\":true}");
+        @as([]const u8, "{\"expression\":\"document.body ? document.body.innerText : ''\",\"returnByValue\":true}");
     const response = client.send(arena, protocol.Methods.runtime_evaluate, params) catch {
         resp.sendError(request, 502, "CDP command failed");
         return;
@@ -912,8 +1049,12 @@ fn handleEvaluate(request: *std.http.Server.Request, arena: std.mem.Allocator, b
         return;
     };
 
+    const escaped_expr = jsonEscapeAlloc(arena, expr) orelse {
+        resp.sendError(request, 500, "Internal Server Error");
+        return;
+    };
     const params = std.fmt.allocPrint(arena,
-        "{{\"expression\":\"{s}\",\"returnByValue\":true}}", .{expr}) catch {
+        "{{\"expression\":\"{s}\",\"returnByValue\":true}}", .{escaped_expr}) catch {
         resp.sendError(request, 500, "Internal Server Error");
         return;
     };
@@ -3822,7 +3963,7 @@ fn handleFind(request: *std.http.Server.Request, arena: std.mem.Allocator, bridg
         resp.sendError(request, 400, "Missing 'by' parameter (role|text|label|placeholder|testid|alt|title)");
         return;
     };
-    const value = getQueryParam(target, "value") orelse {
+    const value = getDecodedQueryParamAlloc(arena, target, "value") orelse {
         resp.sendError(request, 400, "Missing 'value' parameter");
         return;
     };
@@ -3834,32 +3975,37 @@ fn handleFind(request: *std.http.Server.Request, arena: std.mem.Allocator, bridg
         return;
     };
 
+    const escaped_value = jsonEscapeAlloc(arena, value) orelse {
+        resp.sendError(request, 500, "Internal Server Error");
+        return;
+    };
+
     // Build JS to find elements by semantic locator
     const js = if (std.mem.eql(u8, by, "role"))
         std.fmt.allocPrint(arena,
-            "JSON.stringify([...document.querySelectorAll('[role=\"{s}\"]')].map((el,i)=>{{return {{index:i,tag:el.tagName,text:el.innerText.substring(0,100),ref:'found_'+i}}}}))", .{value})
+            "JSON.stringify([...document.querySelectorAll('[role=\"{s}\"]')].map((el,i)=>{{return {{index:i,tag:el.tagName,text:el.innerText.substring(0,100),ref:'found_'+i}}}}))", .{escaped_value})
     else if (std.mem.eql(u8, by, "text"))
         if (exact != null and std.mem.eql(u8, exact.?, "true"))
             std.fmt.allocPrint(arena,
-                "JSON.stringify([...document.querySelectorAll('*')].filter(el=>el.innerText.trim()==='{s}'&&el.children.length===0).slice(0,20).map((el,i)=>{{return {{index:i,tag:el.tagName,text:el.innerText.substring(0,100)}}}}))", .{value})
+                "JSON.stringify([...document.querySelectorAll('*')].filter(el=>el.innerText.trim()===\"{s}\"&&el.children.length===0).slice(0,20).map((el,i)=>{{return {{index:i,tag:el.tagName,text:el.innerText.substring(0,100)}}}}))", .{escaped_value})
         else
             std.fmt.allocPrint(arena,
-                "JSON.stringify([...document.querySelectorAll('*')].filter(el=>el.innerText.includes('{s}')&&el.children.length===0).slice(0,20).map((el,i)=>{{return {{index:i,tag:el.tagName,text:el.innerText.substring(0,100)}}}}))", .{value})
+                "JSON.stringify([...document.querySelectorAll('*')].filter(el=>el.innerText.includes(\"{s}\")&&el.children.length===0).slice(0,20).map((el,i)=>{{return {{index:i,tag:el.tagName,text:el.innerText.substring(0,100)}}}}))", .{escaped_value})
     else if (std.mem.eql(u8, by, "label"))
         std.fmt.allocPrint(arena,
-            "JSON.stringify([...document.querySelectorAll('label')].filter(l=>l.innerText.includes('{s}')).map((l,i)=>{{var el=l.htmlFor?document.getElementById(l.htmlFor):l.querySelector('input,select,textarea');return {{index:i,label:l.innerText.substring(0,100),tag:el?el.tagName:'none'}}}}))", .{value})
+            "JSON.stringify([...document.querySelectorAll('label')].filter(l=>l.innerText.includes(\"{s}\")).map((l,i)=>{{var el=l.htmlFor?document.getElementById(l.htmlFor):l.querySelector('input,select,textarea');return {{index:i,label:l.innerText.substring(0,100),tag:el?el.tagName:'none'}}}}))", .{escaped_value})
     else if (std.mem.eql(u8, by, "placeholder"))
         std.fmt.allocPrint(arena,
-            "JSON.stringify([...document.querySelectorAll('[placeholder]')].filter(el=>el.placeholder.includes('{s}')).map((el,i)=>{{return {{index:i,tag:el.tagName,placeholder:el.placeholder}}}}))", .{value})
+            "JSON.stringify([...document.querySelectorAll('[placeholder]')].filter(el=>el.placeholder.includes(\"{s}\")).map((el,i)=>{{return {{index:i,tag:el.tagName,placeholder:el.placeholder}}}}))", .{escaped_value})
     else if (std.mem.eql(u8, by, "testid"))
         std.fmt.allocPrint(arena,
-            "JSON.stringify([...document.querySelectorAll('[data-testid=\"{s}\"]')].map((el,i)=>{{return {{index:i,tag:el.tagName,text:el.innerText.substring(0,100)}}}}))", .{value})
+            "JSON.stringify([...document.querySelectorAll('[data-testid=\"{s}\"]')].map((el,i)=>{{return {{index:i,tag:el.tagName,text:el.innerText.substring(0,100)}}}}))", .{escaped_value})
     else if (std.mem.eql(u8, by, "alt"))
         std.fmt.allocPrint(arena,
-            "JSON.stringify([...document.querySelectorAll('[alt]')].filter(el=>el.alt.includes('{s}')).map((el,i)=>{{return {{index:i,tag:el.tagName,alt:el.alt}}}}))", .{value})
+            "JSON.stringify([...document.querySelectorAll('[alt]')].filter(el=>el.alt.includes(\"{s}\")).map((el,i)=>{{return {{index:i,tag:el.tagName,alt:el.alt}}}}))", .{escaped_value})
     else if (std.mem.eql(u8, by, "title"))
         std.fmt.allocPrint(arena,
-            "JSON.stringify([...document.querySelectorAll('[title]')].filter(el=>el.title.includes('{s}')).map((el,i)=>{{return {{index:i,tag:el.tagName,title:el.title}}}}))", .{value})
+            "JSON.stringify([...document.querySelectorAll('[title]')].filter(el=>el.title.includes(\"{s}\")).map((el,i)=>{{return {{index:i,tag:el.tagName,title:el.title}}}}))", .{escaped_value})
     else {
         resp.sendError(request, 400, "Unknown 'by' type. Use: role|text|label|placeholder|testid|alt|title");
         return;
@@ -3870,8 +4016,12 @@ fn handleFind(request: *std.http.Server.Request, arena: std.mem.Allocator, bridg
         return;
     };
 
+    const escaped_expr = jsonEscapeAlloc(arena, expr) orelse {
+        resp.sendError(request, 500, "Internal Server Error");
+        return;
+    };
     const params = std.fmt.allocPrint(arena,
-        "{{\"expression\":\"{s}\",\"returnByValue\":true}}", .{expr}) catch {
+        "{{\"expression\":\"{s}\",\"returnByValue\":true}}", .{escaped_expr}) catch {
         resp.sendError(request, 500, "Internal Server Error");
         return;
     };
@@ -4088,7 +4238,7 @@ fn handleSetUserAgent(request: *std.http.Server.Request, arena: std.mem.Allocato
         resp.sendError(request, 400, "Missing tab_id parameter");
         return;
     };
-    const ua = getQueryParam(target, "ua") orelse {
+    const ua = getDecodedQueryParamAlloc(arena, target, "ua") orelse {
         resp.sendError(request, 400, "Missing ua parameter");
         return;
     };
@@ -4096,7 +4246,11 @@ fn handleSetUserAgent(request: *std.http.Server.Request, arena: std.mem.Allocato
         resp.sendError(request, 404, "Tab not found");
         return;
     };
-    const params = std.fmt.allocPrint(arena, "{{\"userAgent\":\"{s}\"}}", .{ua}) catch {
+    const escaped_ua = jsonEscapeAlloc(arena, ua) orelse {
+        resp.sendError(request, 500, "Internal Server Error");
+        return;
+    };
+    const params = std.fmt.allocPrint(arena, "{{\"userAgent\":\"{s}\"}}", .{escaped_ua}) catch {
         resp.sendError(request, 500, "Internal Server Error");
         return;
     };
@@ -4105,7 +4259,7 @@ fn handleSetUserAgent(request: *std.http.Server.Request, arena: std.mem.Allocato
         return;
     };
     _ = response;
-    const body = std.fmt.allocPrint(arena, "{{\"status\":\"ok\",\"userAgent\":\"{s}\"}}", .{ua}) catch {
+    const body = std.fmt.allocPrint(arena, "{{\"status\":\"ok\",\"userAgent\":\"{s}\"}}", .{escaped_ua}) catch {
         resp.sendError(request, 500, "Internal Server Error");
         return;
     };
@@ -4842,6 +4996,18 @@ test "buildGetExpression box" {
     const expr = buildGetExpression(std.testing.allocator, "box", "div.card", null) orelse unreachable;
     defer std.testing.allocator.free(expr);
     try std.testing.expect(std.mem.indexOf(u8, expr, "getBoundingClientRect") != null);
+}
+
+test "runtime evaluate payload escapes embedded expression quotes" {
+    const arena = std.testing.allocator;
+    const expr = "JSON.stringify([...document.querySelectorAll('label')].filter(l=>l.innerText.includes(\"Text input\")))";
+    const escaped = jsonEscapeAlloc(arena, expr).?;
+    defer if (escaped.ptr != expr.ptr) arena.free(escaped);
+    const payload = try std.fmt.allocPrint(arena, "{{\"expression\":\"{s}\",\"returnByValue\":true}}", .{escaped});
+    defer arena.free(payload);
+
+    try std.testing.expect(std.mem.indexOf(u8, payload, "\\\"Text input\\\"") != null);
+    try std.testing.expect(std.mem.startsWith(u8, payload, "{\"expression\":\""));
 }
 
 test "buildGetExpression html without selector returns null" {
