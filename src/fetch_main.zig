@@ -1,4 +1,5 @@
 const std = @import("std");
+const compat = @import("compat.zig");
 const validator = @import("crawler/validator.zig");
 const markdown = @import("crawler/markdown.zig");
 const js_engine = @import("js_engine.zig");
@@ -6,12 +7,11 @@ const js_engine = @import("js_engine.zig");
 const version = "0.2.0";
 
 pub fn main() !void {
-    var gpa_impl: std.heap.GeneralPurposeAllocator(.{}) = .init;
+    var gpa_impl: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa_impl.deinit();
     const gpa = gpa_impl.allocator();
 
-    const args = try std.process.argsAlloc(gpa);
-    defer std.process.argsFree(gpa, args);
+    const args = try compat.collectArgs(gpa);
 
     var opts = Options{};
 
@@ -38,8 +38,7 @@ pub fn main() !void {
             if (i >= args.len) fatal("--user-agent requires a value");
             opts.user_agent = args[i];
         } else if (std.mem.eql(u8, args[i], "--version") or std.mem.eql(u8, args[i], "-V")) {
-            const stdout = std.fs.File.stdout();
-            stdout.writeAll("kuri-fetch " ++ version ++ "\n") catch {};
+            compat.writeToStdout("kuri-fetch " ++ version ++ "\n");
             return;
         } else if (std.mem.eql(u8, args[i], "--help") or std.mem.eql(u8, args[i], "-h")) {
             printUsage();
@@ -87,7 +86,7 @@ pub fn main() !void {
         }
     }
 
-    const fetch_start = std.time.nanoTimestamp();
+    const fetch_start = compat.nanoTimestamp();
 
     var html = fetchHttp(arena, target_url, opts.user_agent) catch |err| {
         if (color) {
@@ -126,10 +125,9 @@ pub fn main() !void {
         .links => blk: {
             const links = try extractLinks(html, arena);
             var buf: std.ArrayList(u8) = .empty;
-            const w = buf.writer(arena);
             for (links) |link| {
-                w.writeAll(link) catch break :blk "";
-                w.writeByte('\n') catch break :blk "";
+                buf.appendSlice(arena, link) catch break :blk "";
+                buf.append(arena, '\n') catch break :blk "";
             }
             break :blk buf.toOwnedSlice(arena) catch "";
         },
@@ -138,13 +136,12 @@ pub fn main() !void {
             const md_content = try markdown.htmlToMarkdown(html, arena);
             const links = try extractLinks(html, arena);
             var link_buf: std.ArrayList(u8) = .empty;
-            const lw = link_buf.writer(arena);
-            lw.writeByte('[') catch break :blk "";
+            link_buf.append(arena, '[') catch break :blk "";
             for (links, 0..) |link, li| {
-                if (li > 0) lw.writeByte(',') catch {};
-                lw.print("\"{s}\"", .{link}) catch {};
+                if (li > 0) link_buf.append(arena, ',') catch {};
+                link_buf.print(arena, "\"{s}\"", .{link}) catch {};
             }
-            lw.writeByte(']') catch {};
+            link_buf.append(arena, ']') catch {};
             const link_json = link_buf.toOwnedSlice(arena) catch "[]";
             const escaped_url = js_engine.escapeForJs(target_url, arena) orelse target_url;
             const escaped_md = js_engine.escapeForJs(md_content, arena) orelse "";
@@ -158,7 +155,7 @@ pub fn main() !void {
 
     // Write output to file or stdout
     if (opts.output_file) |path| {
-        const file = std.fs.cwd().createFile(path, .{}) catch |err| {
+        const file = compat.cwdCreateFile(path) catch |err| {
             if (color) {
                 std.debug.print("\x1b[31m✗\x1b[0m cannot write to '{s}': {s}\n", .{ path, @errorName(err) });
             } else {
@@ -166,8 +163,8 @@ pub fn main() !void {
             }
             std.process.exit(1);
         };
-        defer file.close();
-        file.writeAll(output_content) catch |err| {
+        defer compat.fdClose(file);
+        compat.fdWriteAll(file, output_content) catch |err| {
             std.debug.print("error: write failed: {s}\n", .{@errorName(err)});
             std.process.exit(1);
         };
@@ -179,8 +176,7 @@ pub fn main() !void {
             }
         }
     } else {
-        const stdout = std.fs.File.stdout();
-        stdout.writeAll(output_content) catch {};
+        compat.writeToStdout(output_content);
         // Summary to stderr (not polluting stdout pipe)
         if (!opts.quiet) {
             if (color) {
@@ -193,19 +189,19 @@ pub fn main() !void {
 }
 
 fn elapsed(start: i128) u64 {
-    const diff = std.time.nanoTimestamp() - start;
+    const diff = compat.nanoTimestamp() - start;
     return if (diff > 0) @as(u64, @intCast(diff)) / std.time.ns_per_ms else 0;
 }
 
 fn shouldUseColor(force_no_color: bool) bool {
     if (force_no_color) return false;
-    if (std.posix.getenv("NO_COLOR")) |v| {
+    if (compat.getenv("NO_COLOR")) |v| {
         if (v.len > 0) return false;
     }
-    if (std.posix.getenv("TERM")) |term| {
+    if (compat.getenv("TERM")) |term| {
         if (std.mem.eql(u8, term, "dumb")) return false;
     }
-    return std.posix.isatty(std.fs.File.stderr().handle);
+    return std.c.isatty(2) != 0;
 }
 
 const Options = struct {
@@ -276,7 +272,7 @@ fn printUsage() void {
 
 /// Fetch a URL using std.http.Client and return the response body.
 pub fn fetchHttp(allocator: std.mem.Allocator, url: []const u8, user_agent: []const u8) ![]const u8 {
-    var client: std.http.Client = .{ .allocator = allocator };
+    var client: std.http.Client = .{ .allocator = allocator, .io = std.Io.Threaded.global_single_threaded.io() };
     defer client.deinit();
 
     const uri = try std.Uri.parse(url);
@@ -371,7 +367,6 @@ fn findAttrValue(tag: []const u8, attr: []const u8) ?[]const u8 {
 /// Extract plain text from HTML — strips all tags and decodes entities.
 pub fn extractText(html: []const u8, allocator: std.mem.Allocator) ![]const u8 {
     var buf: std.ArrayList(u8) = .empty;
-    const writer = buf.writer(allocator);
 
     var i: usize = 0;
     var in_script = false;
@@ -398,7 +393,7 @@ pub fn extractText(html: []const u8, allocator: std.mem.Allocator) ![]const u8 {
             }
 
             if (is_close and isBlockElement(tag_name)) {
-                try writer.writeByte('\n');
+                try buf.append(allocator, '\n');
             }
 
             i = tag_end + 1;
@@ -406,29 +401,29 @@ pub fn extractText(html: []const u8, allocator: std.mem.Allocator) ![]const u8 {
             i += 1;
         } else if (html[i] == '&') {
             if (std.mem.startsWith(u8, html[i..], "&amp;")) {
-                try writer.writeByte('&');
+                try buf.append(allocator, '&');
                 i += 5;
             } else if (std.mem.startsWith(u8, html[i..], "&lt;")) {
-                try writer.writeByte('<');
+                try buf.append(allocator, '<');
                 i += 4;
             } else if (std.mem.startsWith(u8, html[i..], "&gt;")) {
-                try writer.writeByte('>');
+                try buf.append(allocator, '>');
                 i += 4;
             } else if (std.mem.startsWith(u8, html[i..], "&quot;")) {
-                try writer.writeByte('"');
+                try buf.append(allocator, '"');
                 i += 6;
             } else if (std.mem.startsWith(u8, html[i..], "&nbsp;")) {
-                try writer.writeByte(' ');
+                try buf.append(allocator, ' ');
                 i += 6;
             } else if (std.mem.startsWith(u8, html[i..], "&#39;") or std.mem.startsWith(u8, html[i..], "&#x27;")) {
-                try writer.writeByte('\'');
+                try buf.append(allocator, '\'');
                 i += if (std.mem.startsWith(u8, html[i..], "&#39;")) @as(usize, 5) else 6;
             } else {
-                try writer.writeByte(html[i]);
+                try buf.append(allocator, html[i]);
                 i += 1;
             }
         } else {
-            try writer.writeByte(html[i]);
+            try buf.append(allocator, html[i]);
             i += 1;
         }
     }

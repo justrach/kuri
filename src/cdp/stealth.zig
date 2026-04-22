@@ -1,4 +1,5 @@
 const std = @import("std");
+const compat = @import("../compat.zig");
 
 /// Stealth JS script embedded at comptime.
 pub const stealth_script = @embedFile("js/stealth.js");
@@ -14,7 +15,7 @@ pub const user_agents = [_][]const u8{
 
 /// Get a pseudo-random user agent based on timestamp.
 pub fn randomUserAgent() []const u8 {
-    const ts: u64 = @intCast(std.time.timestamp());
+    const ts: u64 = @intCast(compat.timestampSeconds());
     return user_agents[ts % user_agents.len];
 }
 

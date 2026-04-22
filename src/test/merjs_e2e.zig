@@ -8,7 +8,7 @@
 /// Exit 0 = all pass.  Exit 1 = any failure.
 
 const std = @import("std");
-const net = std.net;
+const compat = @import("compat");
 
 const BROWDIE_PORT: u16 = 8080;
 const MERJS_PORT: u16 = 3000;
@@ -18,12 +18,11 @@ const NAV_SETTLE_MS: u64 = 1_500;
 // ── HTTP helpers ─────────────────────────────────────────────────────────────
 
 fn httpGet(allocator: std.mem.Allocator, port: u16, path: []const u8) ![]const u8 {
-    const addr = try net.Address.parseIp4("127.0.0.1", port);
-    const stream = try net.tcpConnectToAddress(addr);
+    const stream = try compat.tcpConnectToIp4(port);
     defer stream.close();
 
     const timeout = std.posix.timeval{ .sec = 10, .usec = 0 };
-    std.posix.setsockopt(stream.handle, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch {};
+    stream.setSockOpt(std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&timeout));
 
     const req = try std.fmt.allocPrint(allocator, "GET {s} HTTP/1.1\r\nHost: 127.0.0.1:{d}\r\nConnection: close\r\n\r\n", .{ path, port });
     defer allocator.free(req);
@@ -82,7 +81,7 @@ fn pageText(a: std.mem.Allocator, tab_id: []const u8, path: []const u8) ![]const
     const url = try std.fmt.allocPrint(a, MERJS_HOST ++ "{s}", .{path});
     const nav = try std.fmt.allocPrint(a, "/navigate?url={s}&tab_id={s}", .{ url, tab_id });
     _ = try httpGet(a, BROWDIE_PORT, nav);
-    std.Thread.sleep(NAV_SETTLE_MS * std.time.ns_per_ms);
+    compat.threadSleep(NAV_SETTLE_MS * std.time.ns_per_ms);
     const text_path = try std.fmt.allocPrint(a, "/text?tab_id={s}", .{tab_id});
     return httpGet(a, BROWDIE_PORT, text_path);
 }
@@ -92,7 +91,7 @@ fn pageSnap(a: std.mem.Allocator, tab_id: []const u8, path: []const u8) ![]const
     const url = try std.fmt.allocPrint(a, MERJS_HOST ++ "{s}", .{path});
     const nav = try std.fmt.allocPrint(a, "/navigate?url={s}&tab_id={s}", .{ url, tab_id });
     _ = try httpGet(a, BROWDIE_PORT, nav);
-    std.Thread.sleep(NAV_SETTLE_MS * std.time.ns_per_ms);
+    compat.threadSleep(NAV_SETTLE_MS * std.time.ns_per_ms);
     const snap_path = try std.fmt.allocPrint(a, "/snapshot?tab_id={s}&filter=interactive&format=text", .{tab_id});
     return httpGet(a, BROWDIE_PORT, snap_path);
 }
@@ -100,7 +99,7 @@ fn pageSnap(a: std.mem.Allocator, tab_id: []const u8, path: []const u8) ![]const
 // ── main ─────────────────────────────────────────────────────────────────────
 
 pub fn main() !void {
-    var gpa_impl: std.heap.GeneralPurposeAllocator(.{}) = .init;
+    var gpa_impl: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa_impl.deinit();
     var arena_impl: std.heap.ArenaAllocator = .init(gpa_impl.allocator());
     defer arena_impl.deinit();

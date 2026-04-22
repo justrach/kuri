@@ -1,5 +1,6 @@
 const std = @import("std");
 const CdpClient = @import("client.zig").CdpClient;
+const compat = @import("../compat.zig");
 
 /// HAR (HTTP Archive) recorder using CDP Network domain events.
 /// Captures request/response pairs with timing, headers, and status.
@@ -135,13 +136,13 @@ pub const HarRecorder = struct {
     /// Serialize current entries to HAR 1.2 JSON format.
     pub fn toJson(self: *HarRecorder) ![]const u8 {
         var buf: std.ArrayList(u8) = .empty;
-        const w = buf.writer(self.allocator);
 
-        try w.writeAll("{\"log\":{\"version\":\"1.2\",\"creator\":{\"name\":\"browdie\",\"version\":\"0.1.0\"},\"entries\":[");
+        try buf.appendSlice(self.allocator, "{\"log\":{\"version\":\"1.2\",\"creator\":{\"name\":\"browdie\",\"version\":\"0.1.0\"},\"entries\":[");
 
         for (self.entries.items, 0..) |entry, i| {
-            if (i > 0) try w.writeAll(",");
-            try w.print(
+            if (i > 0) try buf.appendSlice(self.allocator, ",");
+            try buf.print(
+                self.allocator,
                 "{{\"startedDateTime\":\"{d}\",\"time\":{d}," ++
                     "\"request\":{{\"method\":\"{s}\",\"url\":\"{s}\",\"bodySize\":{d}}}," ++
                     "\"response\":{{\"status\":{d},\"statusText\":\"{s}\",\"content\":{{\"mimeType\":\"{s}\",\"size\":{d}}}}}}}",
@@ -159,7 +160,7 @@ pub const HarRecorder = struct {
             );
         }
 
-        try w.writeAll("]}}");
+        try buf.appendSlice(self.allocator, "]}}");
         return buf.toOwnedSlice(self.allocator);
     }
 
@@ -207,7 +208,7 @@ pub const HarRecorder = struct {
             const pending = PendingRequest{
                 .url = owned_url,
                 .method = owned_method,
-                .timestamp = std.time.timestamp(),
+                .timestamp = compat.timestampSeconds(),
                 .headers_json = owned_headers,
                 .post_data = owned_post,
             };
@@ -248,7 +249,7 @@ pub const HarRecorder = struct {
                 .status_text = status_text,
                 .mime_type = mime,
                 .timestamp = pending.timestamp,
-                .duration_ms = std.time.timestamp() - pending.timestamp,
+                .duration_ms = compat.timestampSeconds() - pending.timestamp,
                 .request_size = 0,
                 .response_size = 0,
                 .request_headers = pending.headers_json,

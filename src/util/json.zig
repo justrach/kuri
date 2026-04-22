@@ -1,13 +1,13 @@
 const std = @import("std");
 
 /// Write a JSON object with string key-value pairs.
-pub fn writeJsonObject(writer: anytype, fields: []const [2][]const u8) !void {
-    try writer.writeAll("{");
+pub fn writeJsonObject(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, fields: []const [2][]const u8) !void {
+    try buf.appendSlice(allocator, "{");
     for (fields, 0..) |field, i| {
-        if (i > 0) try writer.writeAll(",");
-        try writer.print("\"{s}\":\"{s}\"", .{ field[0], field[1] });
+        if (i > 0) try buf.appendSlice(allocator, ",");
+        try buf.print(allocator, "\"{s}\":\"{s}\"", .{ field[0], field[1] });
     }
-    try writer.writeAll("}");
+    try buf.appendSlice(allocator, "}");
 }
 
 /// Escape a string for JSON output.
@@ -22,7 +22,7 @@ pub fn jsonEscape(input: []const u8, allocator: std.mem.Allocator) ![]const u8 {
             '\t' => try buf.appendSlice(allocator, "\\t"),
             else => {
                 if (c < 0x20) {
-                    try buf.writer(allocator).print("\\u{x:0>4}", .{c});
+                    try buf.print(allocator, "\\u{x:0>4}", .{c});
                 } else {
                     try buf.append(allocator, c);
                 }

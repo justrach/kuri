@@ -1,4 +1,7 @@
 const std = @import("std");
+const compat = @import("../compat.zig");
+
+extern "c" fn lstat(noalias path: [*:0]const u8, noalias buf: *std.c.Stat) c_int;
 
 pub const ValidationError = error{
     InvalidScheme,
@@ -55,12 +58,16 @@ pub fn validateOutputPath(path: []const u8) ValidationError!void {
     // For existing files, check symlink via lstat (race-free for existing paths).
     // Note: TOCTOU gap remains for files created between check and use.
     // Callers should open with O_NOFOLLOW where the OS supports it.
-    const stat = std.fs.cwd().statFile(path) catch |err| switch (err) {
-        error.FileNotFound => return,
-        else => return ValidationError.InvalidPath,
-    };
+    var path_buf: [4096]u8 = undefined;
+    if (path.len >= path_buf.len) return ValidationError.InvalidPath;
+    @memcpy(path_buf[0..path.len], path);
+    path_buf[path.len] = 0;
+    const path_z: [*:0]const u8 = path_buf[0..path.len :0];
 
-    if (stat.kind == .sym_link) {
+    var stat_buf: std.c.Stat = undefined;
+    if (lstat(path_z, &stat_buf) != 0) return; // file doesn't exist yet, OK
+
+    if (std.c.S.ISLNK(@intCast(stat_buf.mode))) {
         return ValidationError.SymlinkNotAllowed;
     }
 }

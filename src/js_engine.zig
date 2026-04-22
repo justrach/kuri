@@ -159,15 +159,14 @@ fn injectDomStubs(engine: *JsEngine, html: []const u8, url: ?[]const u8, allocat
 /// Escape a string for embedding inside a double-quoted string literal (JS/JSON).
 pub fn escapeForJs(input: []const u8, allocator: std.mem.Allocator) ?[]const u8 {
     var buf: std.ArrayList(u8) = .empty;
-    const writer = buf.writer(allocator);
     for (input) |c| {
         switch (c) {
-            '\\' => writer.writeAll("\\\\") catch return null,
-            '"' => writer.writeAll("\\\"") catch return null,
-            '\n' => writer.writeAll("\\n") catch return null,
-            '\r' => writer.writeAll("\\r") catch return null,
-            '\t' => writer.writeAll("\\t") catch return null,
-            else => writer.writeByte(c) catch return null,
+            '\\' => buf.appendSlice(allocator, "\\\\") catch return null,
+            '"' => buf.appendSlice(allocator, "\\\"") catch return null,
+            '\n' => buf.appendSlice(allocator, "\\n") catch return null,
+            '\r' => buf.appendSlice(allocator, "\\r") catch return null,
+            '\t' => buf.appendSlice(allocator, "\\t") catch return null,
+            else => buf.append(allocator, c) catch return null,
         }
     }
     return buf.toOwnedSlice(allocator) catch null;

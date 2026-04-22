@@ -10,6 +10,7 @@
 ///   click/type    act on @ref from snap     grab <ref> follows popups
 ///   stealth       anti-bot patches          cookies/headers/audit for security
 const std = @import("std");
+const compat = @import("compat.zig");
 const CdpClient = @import("cdp/client.zig").CdpClient;
 const protocol = @import("cdp/protocol.zig");
 const a11y = @import("snapshot/a11y.zig");
@@ -38,16 +39,16 @@ const Session = struct {
     }
 };
 
-pub fn main() !void {
-    var gpa_impl: std.heap.GeneralPurposeAllocator(.{}) = .init;
-    defer _ = gpa_impl.deinit();
-    const gpa = gpa_impl.allocator();
+pub fn main(init: std.process.Init) !void {
+    const gpa = init.gpa;
 
     var arena_impl = std.heap.ArenaAllocator.init(gpa);
     defer arena_impl.deinit();
     const arena = arena_impl.allocator();
 
-    const args = try std.process.argsAlloc(arena);
+    const raw_args = init.minimal.args.toSlice(arena) catch
+        std.process.fatal("failed to get args", .{});
+    const args: []const []const u8 = @ptrCast(raw_args);
     if (args.len < 2) {
         printUsage();
         std.process.exit(1);
@@ -91,28 +92,27 @@ pub fn main() !void {
         try session.extra_headers.put(try arena.dupe(u8, rest[0]), try arena.dupe(u8, rest[1]));
         try saveSession(arena, &session);
         const out = try std.fmt.allocPrint(arena, "{{\"ok\":true,\"header\":\"{s}\",\"value\":\"{s}\"}}\n", .{ rest[0], rest[1] });
-        std.fs.File.stdout().writeAll(out) catch {};
+        compat.writeToStdout(out);
         return;
     }
     if (std.mem.eql(u8, cmd, "clear-headers")) {
         session.extra_headers.clearRetainingCapacity();
         try saveSession(arena, &session);
-        std.fs.File.stdout().writeAll("{\"ok\":true,\"cleared\":true}\n") catch {};
+        compat.writeToStdout("{\"ok\":true,\"cleared\":true}\n");
         return;
     }
     if (std.mem.eql(u8, cmd, "show-headers")) {
         var hbuf: std.ArrayList(u8) = .empty;
-        const hw = hbuf.writer(arena);
-        hw.writeAll("{\"extra_headers\":{") catch {};
+        hbuf.appendSlice(arena, "{\"extra_headers\":{") catch {};
         var hit = session.extra_headers.iterator();
         var hfirst = true;
         while (hit.next()) |entry| {
-            if (!hfirst) hw.writeAll(",") catch {};
+            if (!hfirst) hbuf.appendSlice(arena, ",") catch {};
             hfirst = false;
-            hw.print("\"{s}\":\"{s}\"", .{ entry.key_ptr.*, entry.value_ptr.* }) catch {};
+            hbuf.print(arena, "\"{s}\":\"{s}\"", .{ entry.key_ptr.*, entry.value_ptr.* }) catch {};
         }
-        hw.writeAll("}}\n") catch {};
-        std.fs.File.stdout().writeAll(hbuf.items) catch {};
+        hbuf.appendSlice(arena, "}}\n") catch {};
+        compat.writeToStdout(hbuf.items);
         return;
     }
 
@@ -137,7 +137,7 @@ pub fn main() !void {
     if (std.mem.eql(u8, cmd, "go")) {
         if (rest.len < 1) fatal("go: requires <url>\n", .{});
         try cmdNavigate(arena, &client, rest[0]);
-        std.Thread.sleep(1_000_000_000); // let page load
+        compat.threadSleep(1_000_000_000); // let page load
         autoSnap(arena, &client, &session);
     } else if (std.mem.eql(u8, cmd, "snap")) {
         try cmdSnap(arena, &client, &session, rest);
@@ -225,8 +225,7 @@ fn cmdTabs(arena: std.mem.Allocator, port: u16) !void {
 
     // Pretty-print each page tab
     var buf: std.ArrayList(u8) = .empty;
-    const w = buf.writer(arena);
-    w.writeAll("[\n") catch {};
+    buf.appendSlice(arena, "[\n") catch {};
 
     var first = true;
     var pos: usize = 0;
@@ -245,25 +244,24 @@ fn cmdTabs(arena: std.mem.Allocator, port: u16) !void {
         const url_val = extractString(json, pos, "\"url\"") orelse "";
         const title_val = extractString(json, pos, "\"title\"") orelse "";
 
-        if (!first) w.writeAll(",\n") catch {};
+        if (!first) buf.appendSlice(arena, ",\n") catch {};
         first = false;
-        w.print("  {{\"id\":\"{s}\",\"url\":\"{s}\",\"title\":\"{s}\",\"ws\":\"{s}\"}}", .{
+        buf.print(arena, "  {{\"id\":\"{s}\",\"url\":\"{s}\",\"title\":\"{s}\",\"ws\":\"{s}\"}}", .{
             id_val, url_val, title_val, ws_val,
         }) catch {};
 
         pos = ws_start + ws_val.len + 1;
     }
-    w.writeAll("\n]\n") catch {};
-    std.fs.File.stdout().writeAll(buf.items) catch {};
+    buf.appendSlice(arena, "\n]\n") catch {};
+    compat.writeToStdout(buf.items);
 }
 
 fn cmdUse(arena: std.mem.Allocator, ws_url: []const u8) !void {
     var session = Session.init(arena);
     session.cdp_url = ws_url;
     try saveSession(arena, &session);
-    const stdout = std.fs.File.stdout();
     const out = try std.fmt.allocPrint(arena, "{{\"ok\":true,\"cdp_url\":\"{s}\"}}\n", .{ws_url});
-    stdout.writeAll(out) catch {};
+    compat.writeToStdout(out);
 }
 
 /// Launch a visible (non-headless) Chrome with CDP, wait for it, auto-attach.
@@ -283,15 +281,28 @@ fn cmdOpen(arena: std.mem.Allocator, port: u16, url: ?[]const u8) !void {
     const port_flag = try std.fmt.allocPrint(arena, "--remote-debugging-port={d}", .{port});
     try argv.append(arena, port_flag);
     // Chrome requires a data dir for CDP; use default profile so cookies/logins persist
-    const home = std.posix.getenv("HOME") orelse "/tmp";
+    const home = compat.getenv("HOME") orelse "/tmp";
     const data_dir = try std.fmt.allocPrint(arena, "--user-data-dir={s}/.kuri/chrome-profile", .{home});
     try argv.append(arena, data_dir);
     if (url) |u| try argv.append(arena, u);
 
-    var child = std.process.Child.init(argv.items, arena);
-    child.spawn() catch {
-        fatal("Failed to launch Chrome. Is it installed?\n", .{});
-    };
+    // Fork and exec Chrome
+    const pid = std.c.fork();
+    if (pid < 0) {
+        fatal("Failed to fork for Chrome launch\n", .{});
+    }
+    if (pid == 0) {
+        // Child process: exec Chrome
+        var c_argv: [64]?[*:0]const u8 = undefined;
+        for (argv.items, 0..) |arg, i| {
+            if (i >= c_argv.len - 1) break;
+            c_argv[i] = @ptrCast(arg.ptr);
+        }
+        c_argv[argv.items.len] = null;
+        const c_execvp = @extern(*const fn ([*:0]const u8, [*:null]const ?[*:0]const u8) callconv(.c) c_int, .{ .name = "execvp" });
+        _ = c_execvp(@ptrCast(argv.items[0].ptr), @ptrCast(&c_argv));
+        std.c._exit(127);
+    }
 
     // 3. Poll for CDP — try the requested port first, then fall back to 9222
     std.debug.print("Launching Chrome...\n", .{});
@@ -302,7 +313,7 @@ fn cmdOpen(arena: std.mem.Allocator, port: u16, url: ?[]const u8) !void {
 
     var attempts: u32 = 0;
     while (attempts < 30) : (attempts += 1) {
-        std.Thread.sleep(500_000_000);
+        compat.threadSleep(500_000_000);
         for (ports_to_try) |p| {
             if (tryAttach(arena, p, url)) return;
         }
@@ -346,15 +357,14 @@ fn tryAttach(arena: std.mem.Allocator, port: u16, url: ?[]const u8) bool {
 
 fn cmdStatus(arena: std.mem.Allocator) !void {
     var session = loadSession(arena) catch {
-        std.fs.File.stdout().writeAll("{\"ok\":false,\"error\":\"no session\"}\n") catch {};
+        compat.writeToStdout("{\"ok\":false,\"error\":\"no session\"}\n");
         return;
     };
     defer session.deinit();
-    const stdout = std.fs.File.stdout();
     const out = try std.fmt.allocPrint(arena, "{{\"ok\":true,\"cdp_url\":\"{s}\",\"refs\":{d}}}\n", .{
         session.cdp_url, session.refs.count(),
     });
-    stdout.writeAll(out) catch {};
+    compat.writeToStdout(out);
 }
 
 fn cmdNavigate(arena: std.mem.Allocator, client: *CdpClient, url: []const u8) !void {
@@ -365,7 +375,7 @@ fn cmdNavigate(arena: std.mem.Allocator, client: *CdpClient, url: []const u8) !v
         std.process.exit(1);
     };
     const out = try std.fmt.allocPrint(arena, "{{\"ok\":true,\"url\":\"{s}\"}}\n", .{escaped_url});
-    std.fs.File.stdout().writeAll(out) catch {};
+    compat.writeToStdout(out);
 }
 
 fn cmdSnap(arena: std.mem.Allocator, client: *CdpClient, session: *Session, flags: []const []const u8) !void {
@@ -410,37 +420,34 @@ fn cmdSnap(arena: std.mem.Allocator, client: *CdpClient, session: *Session, flag
     }
     saveSession(arena, session) catch {};
 
-    const stdout = std.fs.File.stdout();
-
     // --text: legacy indented text
     if (want_text) {
         const text = a11y.formatText(snapshot, arena) catch "{}";
-        stdout.writeAll(text) catch {};
-        stdout.writeAll("\n") catch {};
+        compat.writeToStdout(text);
+        compat.writeToStdout("\n");
         return;
     }
 
     // --json: old JSON array (backward compat)
     if (want_json) {
         var buf: std.ArrayList(u8) = .empty;
-        const w = buf.writer(arena);
-        w.writeAll("[") catch {};
+        buf.appendSlice(arena, "[") catch {};
         for (snapshot, 0..) |node, i| {
-            if (i > 0) w.writeAll(",") catch {};
-            w.print("{{\"ref\":\"{s}\",\"role\":\"{s}\",\"name\":\"{s}\"", .{ node.ref, node.role, node.name }) catch {};
+            if (i > 0) buf.appendSlice(arena, ",") catch {};
+            buf.print(arena, "{{\"ref\":\"{s}\",\"role\":\"{s}\",\"name\":\"{s}\"", .{ node.ref, node.role, node.name }) catch {};
             if (node.value.len > 0) {
-                w.print(",\"value\":\"{s}\"", .{node.value}) catch {};
+                buf.print(arena, ",\"value\":\"{s}\"", .{node.value}) catch {};
             }
-            w.writeAll("}") catch {};
+            buf.appendSlice(arena, "}") catch {};
         }
-        w.writeAll("]\n") catch {};
-        stdout.writeAll(buf.items) catch {};
+        buf.appendSlice(arena, "]\n") catch {};
+        compat.writeToStdout(buf.items);
         return;
     }
 
     // Default: compact text-tree (role "name" @ref)
     const compact = a11y.formatCompact(snapshot, arena) catch "error\n";
-    stdout.writeAll(compact) catch {};
+    compat.writeToStdout(compact);
 }
 
 /// Auto-snap: get URL/title + interactive snapshot. Used after actions and navigation.
@@ -451,8 +458,8 @@ fn autoSnap(arena: std.mem.Allocator, client: *CdpClient, session: *Session) voi
     if (url_resp) |resp| {
         const val = extractCdpValue(resp);
         const unescaped = unescapeJson(arena, val);
-        std.fs.File.stdout().writeAll(unescaped) catch {};
-        std.fs.File.stdout().writeAll("\n") catch {};
+        compat.writeToStdout(unescaped);
+        compat.writeToStdout("\n");
     }
 
     // Interactive snap
@@ -479,7 +486,7 @@ fn autoSnap(arena: std.mem.Allocator, client: *CdpClient, session: *Session) voi
     saveSession(arena, session) catch {};
 
     const compact = a11y.formatCompact(snapshot, arena) catch return;
-    std.fs.File.stdout().writeAll(compact) catch {};
+    compat.writeToStdout(compact);
 }
 
 fn cmdAction(arena: std.mem.Allocator, client: *CdpClient, session: *Session, action: []const u8, ref: []const u8, value: ?[]const u8) !void {
@@ -553,7 +560,7 @@ fn cmdAction(arena: std.mem.Allocator, client: *CdpClient, session: *Session, ac
     };
     const val = extractCdpValue(response);
     const out = try std.fmt.allocPrint(arena, "{{\"ok\":true,\"action\":\"{s}\"}}\n", .{val});
-    std.fs.File.stdout().writeAll(out) catch {};
+    compat.writeToStdout(out);
 }
 
 fn cmdScroll(arena: std.mem.Allocator, client: *CdpClient) !void {
@@ -563,7 +570,7 @@ fn cmdScroll(arena: std.mem.Allocator, client: *CdpClient) !void {
         std.process.exit(1);
     };
     _ = response;
-    std.fs.File.stdout().writeAll("{\"ok\":true}\n") catch {};
+    compat.writeToStdout("{\"ok\":true}\n");
 }
 
 fn cmdViewport(arena: std.mem.Allocator, client: *CdpClient, args: []const []const u8) !void {
@@ -617,7 +624,7 @@ fn cmdViewport(arena: std.mem.Allocator, client: *CdpClient, args: []const []con
     const out = try std.fmt.allocPrint(arena,
         "{{\"ok\":true,\"width\":{d},\"height\":{d},\"dpr\":{d},\"mobile\":{s}}}\n",
         .{ width, height, dpr, if (mobile) "true" else "false" });
-    std.fs.File.stdout().writeAll(out) catch {};
+    compat.writeToStdout(out);
 }
 
 fn cmdEval(arena: std.mem.Allocator, client: *CdpClient, expr: []const u8) !void {
@@ -628,8 +635,8 @@ fn cmdEval(arena: std.mem.Allocator, client: *CdpClient, expr: []const u8) !void
         std.process.exit(1);
     };
     const val = unescapeJson(arena, extractCdpValue(response));
-    std.fs.File.stdout().writeAll(val) catch {};
-    std.fs.File.stdout().writeAll("\n") catch {};
+    compat.writeToStdout(val);
+    compat.writeToStdout("\n");
 }
 
 fn cmdText(arena: std.mem.Allocator, client: *CdpClient, selector: ?[]const u8) !void {
@@ -643,8 +650,8 @@ fn cmdText(arena: std.mem.Allocator, client: *CdpClient, selector: ?[]const u8) 
         std.process.exit(1);
     };
     const val = unescapeJson(arena, extractCdpValue(response));
-    std.fs.File.stdout().writeAll(val) catch {};
-    std.fs.File.stdout().writeAll("\n") catch {};
+    compat.writeToStdout(val);
+    compat.writeToStdout("\n");
 }
 
 fn cmdScreenshot(arena: std.mem.Allocator, client: *CdpClient, out_path: ?[]const u8) !void {
@@ -673,22 +680,22 @@ fn cmdScreenshot(arena: std.mem.Allocator, client: *CdpClient, out_path: ?[]cons
 
     // Determine output path — default to ~/.kuri/screenshots/<timestamp>.png
     const path: []const u8 = out_path orelse blk: {
-        const home = std.posix.getenv("HOME") orelse ".";
+        const home = compat.getenv("HOME") orelse ".";
         const shots_dir = try std.fmt.allocPrint(arena, "{s}/.kuri/screenshots", .{home});
-        std.fs.cwd().makePath(shots_dir) catch {};
-        const ts = std.time.timestamp();
+        compat.cwdMakePath(shots_dir) catch {};
+        const ts = compat.timestampSeconds();
         break :blk try std.fmt.allocPrint(arena, "{s}/{d}.png", .{ shots_dir, ts });
     };
 
-    const file = std.fs.cwd().createFile(path, .{}) catch |err| {
+    const file = compat.cwdCreateFile(path) catch |err| {
         jsonError("cannot create file '{s}': {s}", .{ path, @errorName(err) });
         std.process.exit(1);
     };
-    defer file.close();
-    file.writeAll(decoded) catch {};
+    defer compat.fdClose(file);
+    compat.fdWriteAll(file, decoded) catch {};
 
     const out = try std.fmt.allocPrint(arena, "{{\"ok\":true,\"path\":\"{s}\",\"bytes\":{d}}}\n", .{ path, decoded.len });
-    std.fs.File.stdout().writeAll(out) catch {};
+    compat.writeToStdout(out);
 }
 
 fn cmdSimpleNav(arena: std.mem.Allocator, client: *CdpClient, method: []const u8) !void {
@@ -697,7 +704,7 @@ fn cmdSimpleNav(arena: std.mem.Allocator, client: *CdpClient, method: []const u8
         std.process.exit(1);
     };
     _ = response;
-    std.fs.File.stdout().writeAll("{\"ok\":true}\n") catch {};
+    compat.writeToStdout("{\"ok\":true}\n");
 }
 
 // ── Tab following ─────────────────────────────────────────────────────────────
@@ -746,13 +753,13 @@ fn cmdGrab(arena: std.mem.Allocator, client: *CdpClient, session: *Session, ref:
     };
 
     while (attempts < 16) : (attempts += 1) {
-        std.Thread.sleep(500_000_000);
+        compat.threadSleep(500_000_000);
         const resp = client.send(arena, protocol.Methods.runtime_evaluate,
             "{\"expression\":\"location.href\",\"returnByValue\":true}") catch {
             // Connection lost = page navigated away
             const out = try std.fmt.allocPrint(arena,
                 "{{\"ok\":true,\"action\":\"navigated\",\"note\":\"page navigated, run snap to see new page\"}}\n", .{});
-            std.fs.File.stdout().writeAll(out) catch {};
+            compat.writeToStdout(out);
             return;
         };
         if (std.mem.indexOf(u8, resp, "\"value\":\"")) |s| {
@@ -762,12 +769,12 @@ fn cmdGrab(arena: std.mem.Allocator, client: *CdpClient, session: *Session, ref:
             if (!std.mem.eql(u8, new_url, orig_url)) {
                 const out = try std.fmt.allocPrint(arena,
                     "{{\"ok\":true,\"action\":\"navigated\",\"url\":\"{s}\"}}\n", .{new_url});
-                std.fs.File.stdout().writeAll(out) catch {};
+                compat.writeToStdout(out);
                 return;
             }
         }
     }
-    std.fs.File.stdout().writeAll("{\"ok\":true,\"action\":\"clicked\",\"note\":\"no redirect detected — check tabs\"}\n") catch {};
+    compat.writeToStdout("{\"ok\":true,\"action\":\"clicked\",\"note\":\"no redirect detected — check tabs\"}\n");
 }
 
 /// Poll Chrome /json for a new tab, auto-switch to it.
@@ -780,7 +787,7 @@ fn cmdWaitForTab(arena: std.mem.Allocator, port: u16, session: *Session) !void {
     var attempts: u32 = 0;
     while (attempts < 20) : (attempts += 1) {
         const json = fetchChromeTabs(arena, "127.0.0.1", port) catch {
-            std.Thread.sleep(500_000_000);
+            compat.threadSleep(500_000_000);
             continue;
         };
 
@@ -807,15 +814,15 @@ fn cmdWaitForTab(arena: std.mem.Allocator, port: u16, session: *Session) !void {
                 const out = try std.fmt.allocPrint(arena,
                     "{{\"ok\":true,\"switched\":true,\"url\":\"{s}\",\"title\":\"{s}\",\"ws\":\"{s}\"}}\n",
                     .{ url_val, title_val, ws_val });
-                std.fs.File.stdout().writeAll(out) catch {};
+                compat.writeToStdout(out);
                 return;
             }
             pos = ws_start + ws_val.len + 1;
         }
-        std.Thread.sleep(500_000_000);
+        compat.threadSleep(500_000_000);
     }
 
-    std.fs.File.stdout().writeAll("{\"ok\":false,\"error\":\"no new tab detected after 10s\"}\n") catch {};
+    compat.writeToStdout("{\"ok\":false,\"error\":\"no new tab detected after 10s\"}\n");
 }
 
 fn parsePort(args: []const []const u8) u16 {
@@ -873,7 +880,7 @@ fn cmdStealth(arena: std.mem.Allocator, client: *CdpClient) !void {
     const ua_escaped = try escapeForJson(arena, ua);
     const out = try std.fmt.allocPrint(arena,
         "{{\"ok\":true,\"ua\":\"{s}\",\"stealth\":true,\"persisted\":true}}\n", .{ua_escaped});
-    std.fs.File.stdout().writeAll(out) catch {};
+    compat.writeToStdout(out);
 }
 
 // ── Security ──────────────────────────────────────────────────────────────────
@@ -884,20 +891,18 @@ fn cmdCookies(arena: std.mem.Allocator, client: *CdpClient) !void {
         jsonError("Network.getCookies failed: {s}", .{@errorName(err)});
         std.process.exit(1);
     };
-    const stdout = std.fs.File.stdout();
     const cookies_pos = std.mem.indexOf(u8, response, "\"cookies\"") orelse {
-        stdout.writeAll(response) catch {};
-        stdout.writeAll("\n") catch {};
+        compat.writeToStdout(response);
+        compat.writeToStdout("\n");
         return;
     };
     const arr_start = std.mem.indexOfScalarPos(u8, response, cookies_pos, '[') orelse {
-        stdout.writeAll("{\"cookies\":[]}\n") catch {};
+        compat.writeToStdout("{\"cookies\":[]}\n");
         return;
     };
     var pos = arr_start + 1;
     var count: usize = 0;
     var buf: std.ArrayList(u8) = .empty;
-    const w = buf.writer(arena);
     while (pos < response.len) {
         const obj_start = std.mem.indexOfScalarPos(u8, response, pos, '{') orelse break;
         var depth: usize = 1;
@@ -915,22 +920,22 @@ fn cmdCookies(arena: std.mem.Allocator, client: *CdpClient) !void {
         const secure = std.mem.indexOf(u8, cookie_json, "\"secure\":true") != null;
         if (name.len > 0) {
             count += 1;
-            w.print("  {s}  domain={s} path={s}", .{ name, domain, path_val }) catch {};
-            if (secure) w.writeAll("  [Secure]") catch {};
-            if (http_only) w.writeAll(" [HttpOnly]") catch {};
-            if (same_site.len > 0) w.print(" [SameSite={s}]", .{same_site}) catch {};
-            if (!secure) w.writeAll("  [!Secure]") catch {};
-            if (!http_only) w.writeAll(" [!HttpOnly]") catch {};
-            w.writeAll("\n") catch {};
+            buf.print(arena, "  {s}  domain={s} path={s}", .{ name, domain, path_val }) catch {};
+            if (secure) buf.appendSlice(arena, "  [Secure]") catch {};
+            if (http_only) buf.appendSlice(arena, " [HttpOnly]") catch {};
+            if (same_site.len > 0) buf.print(arena, " [SameSite={s}]", .{same_site}) catch {};
+            if (!secure) buf.appendSlice(arena, "  [!Secure]") catch {};
+            if (!http_only) buf.appendSlice(arena, " [!HttpOnly]") catch {};
+            buf.appendSlice(arena, "\n") catch {};
         }
         pos = i + 1;
     }
     if (count == 0) {
-        stdout.writeAll("{\"cookies\":0}\n") catch {};
+        compat.writeToStdout("{\"cookies\":0}\n");
     } else {
         const hdr = try std.fmt.allocPrint(arena, "cookies ({d}):\n", .{count});
-        stdout.writeAll(hdr) catch {};
-        stdout.writeAll(buf.items) catch {};
+        compat.writeToStdout(hdr);
+        compat.writeToStdout(buf.items);
     }
 }
 
@@ -954,8 +959,8 @@ fn cmdHeaders(arena: std.mem.Allocator, client: *CdpClient) !void {
         jsonError("headers eval failed: {s}", .{@errorName(err)});
         std.process.exit(1);
     };
-    std.fs.File.stdout().writeAll(response) catch {};
-    std.fs.File.stdout().writeAll("\n") catch {};
+    compat.writeToStdout(response);
+    compat.writeToStdout("\n");
 }
 
 /// Security audit: HTTPS, missing security headers, JS-visible cookies.
@@ -988,40 +993,38 @@ fn cmdAudit(arena: std.mem.Allocator, client: *CdpClient) !void {
         jsonError("audit eval failed: {s}", .{@errorName(err)});
         std.process.exit(1);
     };
-    std.fs.File.stdout().writeAll(response) catch {};
-    std.fs.File.stdout().writeAll("\n") catch {};
+    compat.writeToStdout(response);
+    compat.writeToStdout("\n");
 }
 
 /// Apply session's stored extra HTTP headers via CDP Network domain.
 fn applyExtraHeaders(arena: std.mem.Allocator, client: *CdpClient, session: *Session) !void {
     var buf: std.ArrayList(u8) = .empty;
-    const w = buf.writer(arena);
-    w.writeAll("{\"headers\":{") catch {};
+    buf.appendSlice(arena, "{\"headers\":{") catch {};
     var it = session.extra_headers.iterator();
     var first = true;
     while (it.next()) |entry| {
-        if (!first) w.writeAll(",") catch {};
+        if (!first) buf.appendSlice(arena, ",") catch {};
         first = false;
-        w.print("\"{s}\":\"{s}\"", .{ entry.key_ptr.*, entry.value_ptr.* }) catch {};
+        buf.print(arena, "\"{s}\":\"{s}\"", .{ entry.key_ptr.*, entry.value_ptr.* }) catch {};
     }
-    w.writeAll("}}") catch {};
+    buf.appendSlice(arena, "}}") catch {};
     _ = client.send(arena, protocol.Methods.network_set_extra_http_headers, buf.items) catch {};
 }
 
 /// Dump localStorage and/or sessionStorage contents.
 fn cmdStorage(arena: std.mem.Allocator, client: *CdpClient, which: []const u8) !void {
     var js: std.ArrayList(u8) = .empty;
-    const jw = js.writer(arena);
-    jw.writeAll("(()=>{") catch {};
-    jw.writeAll("const r={};") catch {};
+    js.appendSlice(arena, "(()=>{") catch {};
+    js.appendSlice(arena, "const r={};") catch {};
     if (std.mem.eql(u8, which, "local") or std.mem.eql(u8, which, "all")) {
-        jw.writeAll("r.localStorage=Object.fromEntries(Object.entries(localStorage));") catch {};
+        js.appendSlice(arena, "r.localStorage=Object.fromEntries(Object.entries(localStorage));") catch {};
     }
     if (std.mem.eql(u8, which, "session") or std.mem.eql(u8, which, "all")) {
-        jw.writeAll("r.sessionStorage=Object.fromEntries(Object.entries(sessionStorage));") catch {};
+        js.appendSlice(arena, "r.sessionStorage=Object.fromEntries(Object.entries(sessionStorage));") catch {};
     }
-    jw.writeAll("return JSON.stringify(r);") catch {};
-    jw.writeAll("})()") catch {};
+    js.appendSlice(arena, "return JSON.stringify(r);") catch {};
+    js.appendSlice(arena, "})()") catch {};
     const escaped = try escapeForJson(arena, js.items);
     const params = try std.fmt.allocPrint(arena,
         "{{\"expression\":\"{s}\",\"returnByValue\":true}}", .{escaped});
@@ -1029,8 +1032,8 @@ fn cmdStorage(arena: std.mem.Allocator, client: *CdpClient, which: []const u8) !
         jsonError("storage eval failed: {s}", .{@errorName(err)});
         std.process.exit(1);
     };
-    std.fs.File.stdout().writeAll(response) catch {};
-    std.fs.File.stdout().writeAll("\n") catch {};
+    compat.writeToStdout(response);
+    compat.writeToStdout("\n");
 }
 
 /// Scan localStorage, sessionStorage, and cookies for JWT tokens, decode payloads.
@@ -1054,30 +1057,29 @@ fn cmdJwt(arena: std.mem.Allocator, client: *CdpClient) !void {
         jsonError("jwt scan failed: {s}", .{@errorName(err)});
         std.process.exit(1);
     };
-    std.fs.File.stdout().writeAll(response) catch {};
-    std.fs.File.stdout().writeAll("\n") catch {};
+    compat.writeToStdout(response);
+    compat.writeToStdout("\n");
 }
 
 /// Make an authenticated fetch() from browser context (uses current cookies + extra headers).
 fn cmdFetch(arena: std.mem.Allocator, client: *CdpClient, method: []const u8, url: []const u8, data: ?[]const u8) !void {
     var js: std.ArrayList(u8) = .empty;
-    const jw = js.writer(arena);
-    jw.writeAll("(async()=>{") catch {};
-    jw.writeAll("const opts={credentials:'include',method:'") catch {};
-    jw.writeAll(method) catch {};
-    jw.writeAll("'};") catch {};
+    js.appendSlice(arena, "(async()=>{") catch {};
+    js.appendSlice(arena, "const opts={credentials:'include',method:'") catch {};
+    js.appendSlice(arena, method) catch {};
+    js.appendSlice(arena, "'};") catch {};
     if (data) |d| {
-        jw.writeAll("opts.body=JSON.stringify(") catch {};
-        jw.writeAll(d) catch {};
-        jw.writeAll(");opts.headers={'Content-Type':'application/json'};") catch {};
+        js.appendSlice(arena, "opts.body=JSON.stringify(") catch {};
+        js.appendSlice(arena, d) catch {};
+        js.appendSlice(arena, ");opts.headers={'Content-Type':'application/json'};") catch {};
     }
-    jw.writeAll("const r=await fetch('") catch {};
-    jw.writeAll(url) catch {};
-    jw.writeAll("',opts);") catch {};
-    jw.writeAll("const body=await r.text();") catch {};
-    jw.writeAll("const hdrs={};r.headers.forEach((v,k)=>{hdrs[k]=v;});") catch {};
-    jw.writeAll("return JSON.stringify({status:r.status,url:r.url,headers:hdrs,body:body.substring(0,5000)});") catch {};
-    jw.writeAll("})()") catch {};
+    js.appendSlice(arena, "const r=await fetch('") catch {};
+    js.appendSlice(arena, url) catch {};
+    js.appendSlice(arena, "',opts);") catch {};
+    js.appendSlice(arena, "const body=await r.text();") catch {};
+    js.appendSlice(arena, "const hdrs={};r.headers.forEach((v,k)=>{hdrs[k]=v;});") catch {};
+    js.appendSlice(arena, "return JSON.stringify({status:r.status,url:r.url,headers:hdrs,body:body.substring(0,5000)});") catch {};
+    js.appendSlice(arena, "})()") catch {};
     const escaped = try escapeForJson(arena, js.items);
     const params = try std.fmt.allocPrint(arena,
         "{{\"expression\":\"{s}\",\"returnByValue\":true,\"awaitPromise\":true}}", .{escaped});
@@ -1085,8 +1087,8 @@ fn cmdFetch(arena: std.mem.Allocator, client: *CdpClient, method: []const u8, ur
         jsonError("fetch failed: {s}", .{@errorName(err)});
         std.process.exit(1);
     };
-    std.fs.File.stdout().writeAll(response) catch {};
-    std.fs.File.stdout().writeAll("\n") catch {};
+    compat.writeToStdout(response);
+    compat.writeToStdout("\n");
 }
 
 fn parseFetchData(flags: []const []const u8) ?[]const u8 {
@@ -1099,18 +1101,17 @@ fn parseFetchData(flags: []const []const u8) ?[]const u8 {
 /// Enumerate a URL template by substituting {id} with a range — IDOR probe.
 fn cmdProbe(arena: std.mem.Allocator, client: *CdpClient, tmpl: []const u8, start_id: u32, end_id: u32) !void {
     var js: std.ArrayList(u8) = .empty;
-    const jw = js.writer(arena);
-    jw.writeAll("(async()=>{") catch {};
-    jw.writeAll("const results=[];") catch {};
-    jw.print("const tmpl='{s}';", .{tmpl}) catch {};
-    jw.print("for(let id={d};id<={d};id++){{", .{ start_id, end_id }) catch {};
-    jw.writeAll("const url=tmpl.split('{id}').join(String(id));") catch {};
-    jw.writeAll("try{const r=await fetch(url,{credentials:'include'});") catch {};
-    jw.writeAll("results.push({id,url,status:r.status});}") catch {};
-    jw.writeAll("catch(e){results.push({id,url,error:e.message});}") catch {};
-    jw.writeAll("}") catch {};
-    jw.writeAll("return JSON.stringify(results);") catch {};
-    jw.writeAll("})()") catch {};
+    js.appendSlice(arena, "(async()=>{") catch {};
+    js.appendSlice(arena, "const results=[];") catch {};
+    js.print(arena, "const tmpl='{s}';", .{tmpl}) catch {};
+    js.print(arena, "for(let id={d};id<={d};id++){{", .{ start_id, end_id }) catch {};
+    js.appendSlice(arena, "const url=tmpl.split('{id}').join(String(id));") catch {};
+    js.appendSlice(arena, "try{const r=await fetch(url,{credentials:'include'});") catch {};
+    js.appendSlice(arena, "results.push({id,url,status:r.status});}") catch {};
+    js.appendSlice(arena, "catch(e){results.push({id,url,error:e.message});}") catch {};
+    js.appendSlice(arena, "}") catch {};
+    js.appendSlice(arena, "return JSON.stringify(results);") catch {};
+    js.appendSlice(arena, "})()") catch {};
     const escaped = try escapeForJson(arena, js.items);
     const params = try std.fmt.allocPrint(arena,
         "{{\"expression\":\"{s}\",\"returnByValue\":true,\"awaitPromise\":true}}", .{escaped});
@@ -1118,21 +1119,21 @@ fn cmdProbe(arena: std.mem.Allocator, client: *CdpClient, tmpl: []const u8, star
         jsonError("probe failed: {s}", .{@errorName(err)});
         std.process.exit(1);
     };
-    std.fs.File.stdout().writeAll(response) catch {};
-    std.fs.File.stdout().writeAll("\n") catch {};
+    compat.writeToStdout(response);
+    compat.writeToStdout("\n");
 }
 
 
 // ── Session I/O ───────────────────────────────────────────────────────────────
 
 fn sessionPath(arena: std.mem.Allocator) ![]const u8 {
-    const home = std.posix.getenv("HOME") orelse ".";
+    const home = compat.getenv("HOME") orelse ".";
     return std.fmt.allocPrint(arena, "{s}/{s}", .{ home, SESSION_FILE });
 }
 
 fn loadSession(arena: std.mem.Allocator) !Session {
     const path = try sessionPath(arena);
-    const data = std.fs.cwd().readFileAlloc(arena, path, 1024 * 1024) catch return error.NoSession;
+    const data = compat.cwdReadFile(arena, path, 1024 * 1024) catch return error.NoSession;
 
     var session = Session.init(arena);
 
@@ -1206,59 +1207,79 @@ fn saveSession(arena: std.mem.Allocator, session: *Session) !void {
     const path = try sessionPath(arena);
 
     // Ensure ~/.kuri exists
-    const home = std.posix.getenv("HOME") orelse ".";
+    const home = compat.getenv("HOME") orelse ".";
     const dir_path = try std.fmt.allocPrint(arena, "{s}/.kuri", .{home});
-    std.fs.cwd().makeDir(dir_path) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
+    compat.cwdMakePath(dir_path) catch {};
 
     var buf: std.ArrayList(u8) = .empty;
-    const w = buf.writer(arena);
-    w.print("{{\"cdp_url\":\"{s}\",\"refs\":{{", .{session.cdp_url}) catch {};
+    buf.print(arena, "{{\"cdp_url\":\"{s}\",\"refs\":{{", .{session.cdp_url}) catch {};
 
     var it = session.refs.iterator();
     var first = true;
     while (it.next()) |entry| {
-        if (!first) w.writeAll(",") catch {};
+        if (!first) buf.appendSlice(arena, ",") catch {};
         first = false;
-        w.print("\"{s}\":{d}", .{ entry.key_ptr.*, entry.value_ptr.* }) catch {};
+        buf.print(arena, "\"{s}\":{d}", .{ entry.key_ptr.*, entry.value_ptr.* }) catch {};
     }
-    w.writeAll("},\"extra_headers\":{") catch {};
+    buf.appendSlice(arena, "},\"extra_headers\":{") catch {};
     var eit = session.extra_headers.iterator();
     var efirst = true;
     while (eit.next()) |entry| {
-        if (!efirst) w.writeAll(",") catch {};
+        if (!efirst) buf.appendSlice(arena, ",") catch {};
         efirst = false;
-        w.print("\"{s}\":\"{s}\"", .{ entry.key_ptr.*, entry.value_ptr.* }) catch {};
+        buf.print(arena, "\"{s}\":\"{s}\"", .{ entry.key_ptr.*, entry.value_ptr.* }) catch {};
     }
-    w.print("}},\"stealth\":{s}}}\n", .{if (session.stealth) "true" else "false"}) catch {};
+    buf.print(arena, "}},\"stealth\":{s}}}\n", .{if (session.stealth) "true" else "false"}) catch {};
 
-    const file = try std.fs.cwd().createFile(path, .{});
-    defer file.close();
-    try file.writeAll(buf.items);
+    try compat.cwdWriteFile(path, buf.items);
 }
 
 // ── Chrome tab discovery ──────────────────────────────────────────────────────
 
+extern "c" fn connect(sock: std.c.fd_t, addr: *const std.posix.sockaddr, addrlen: std.posix.socklen_t) c_int;
+
 fn fetchChromeTabs(arena: std.mem.Allocator, host: []const u8, port: u16) ![]const u8 {
-    const address = try std.net.Address.parseIp4(host, port);
-    const stream = try std.net.tcpConnectToAddress(address);
-    defer stream.close();
+    _ = host;
+    // Create TCP socket
+    const raw_fd = std.c.socket(std.posix.AF.INET, std.posix.SOCK.STREAM, 0);
+    if (raw_fd < 0) return error.ConnectionRefused;
+    const fd: std.posix.fd_t = raw_fd;
 
+    // Connect to 127.0.0.1:port
+    var addr: std.posix.sockaddr.in = .{
+        .port = std.mem.nativeToBig(u16, port),
+        .addr = std.mem.nativeToBig(u32, 0x7f000001), // 127.0.0.1
+    };
+    if (connect(fd, @ptrCast(&addr), @sizeOf(std.posix.sockaddr.in)) != 0) {
+        _ = std.c.close(fd);
+        return error.ConnectionRefused;
+    }
+
+    // Set receive timeout
     const timeout = std.posix.timeval{ .sec = 3, .usec = 0 };
-    std.posix.setsockopt(stream.handle, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch {};
+    std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch {};
 
-    const req = try std.fmt.allocPrint(arena, "GET /json/list HTTP/1.1\r\nHost: {s}:{d}\r\nConnection: close\r\n\r\n", .{ host, port });
-    try stream.writeAll(req);
+    // Send HTTP request
+    const req = try std.fmt.allocPrint(arena, "GET /json/list HTTP/1.1\r\nHost: 127.0.0.1:{d}\r\nConnection: close\r\n\r\n", .{port});
+    var sent: usize = 0;
+    while (sent < req.len) {
+        const n = std.c.write(fd, req.ptr + sent, req.len - sent);
+        if (n <= 0) {
+            _ = std.c.close(fd);
+            return error.WriteFailed;
+        }
+        sent += @intCast(n);
+    }
 
+    // Read response
     var buf: [65536]u8 = undefined;
     var total: usize = 0;
     while (total < buf.len) {
-        const n = stream.read(buf[total..]) catch break;
+        const n = std.posix.read(fd, buf[total..]) catch break;
         if (n == 0) break;
         total += n;
     }
+    _ = std.c.close(fd);
 
     const raw = buf[0..total];
     const body_start = (std.mem.indexOf(u8, raw, "\r\n\r\n") orelse return error.InvalidResponse) + 4;
@@ -1322,20 +1343,19 @@ fn extractString(json: []const u8, start: usize, field: []const u8) ?[]const u8 
 /// Unescape JSON string escapes: \n → newline, \t → tab, \\ → backslash, \" → quote
 fn unescapeJson(arena: std.mem.Allocator, s: []const u8) []const u8 {
     var buf: std.ArrayList(u8) = .empty;
-    const w = buf.writer(arena);
     var i: usize = 0;
     while (i < s.len) {
         if (s[i] == '\\' and i + 1 < s.len) {
             switch (s[i + 1]) {
-                'n' => { w.writeByte('\n') catch {}; i += 2; },
-                't' => { w.writeByte('\t') catch {}; i += 2; },
-                '\\' => { w.writeByte('\\') catch {}; i += 2; },
-                '"' => { w.writeByte('"') catch {}; i += 2; },
-                '/' => { w.writeByte('/') catch {}; i += 2; },
-                else => { w.writeByte(s[i]) catch {}; i += 1; },
+                'n' => { buf.append(arena, '\n') catch {}; i += 2; },
+                't' => { buf.append(arena, '\t') catch {}; i += 2; },
+                '\\' => { buf.append(arena, '\\') catch {}; i += 2; },
+                '"' => { buf.append(arena, '"') catch {}; i += 2; },
+                '/' => { buf.append(arena, '/') catch {}; i += 2; },
+                else => { buf.append(arena, s[i]) catch {}; i += 1; },
             }
         } else {
-            w.writeByte(s[i]) catch {};
+            buf.append(arena, s[i]) catch {};
             i += 1;
         }
     }
@@ -1427,15 +1447,14 @@ fn extractFieldInt(json: []const u8, field: []const u8) ?u32 {
 /// Escape a string for embedding inside a JSON string value.
 fn escapeForJson(arena: std.mem.Allocator, s: []const u8) ![]const u8 {
     var buf: std.ArrayList(u8) = .empty;
-    const w = buf.writer(arena);
     for (s) |c| {
         switch (c) {
-            '"' => w.writeAll("\\\"") catch {},
-            '\\' => w.writeAll("\\\\") catch {},
-            '\n' => w.writeAll("\\n") catch {},
-            '\r' => w.writeAll("\\r") catch {},
-            '\t' => w.writeAll("\\t") catch {},
-            else => w.writeByte(c) catch {},
+            '"' => buf.appendSlice(arena, "\\\"") catch {},
+            '\\' => buf.appendSlice(arena, "\\\\") catch {},
+            '\n' => buf.appendSlice(arena, "\\n") catch {},
+            '\r' => buf.appendSlice(arena, "\\r") catch {},
+            '\t' => buf.appendSlice(arena, "\\t") catch {},
+            else => buf.append(arena, c) catch {},
         }
     }
     return buf.items;
@@ -1482,10 +1501,10 @@ fn parseOutFlag(flags: []const []const u8) ?[]const u8 {
 fn jsonError(comptime fmt: []const u8, args: anytype) void {
     var buf: [512]u8 = undefined;
     const msg = std.fmt.bufPrint(&buf, fmt, args) catch "unknown error";
-    const clean = std.mem.trimRight(u8, msg, "\n");
+    const clean = std.mem.trimEnd(u8, msg, "\n");
     var out_buf: [600]u8 = undefined;
     const out = std.fmt.bufPrint(&out_buf, "{{\"error\":\"{s}\"}}\n", .{clean}) catch "{\"error\":\"unknown\"}\n";
-    std.fs.File.stdout().writeAll(out) catch {};
+    compat.writeToStdout(out);
 }
 
 fn fatal(comptime fmt: []const u8, args: anytype) noreturn {
@@ -1493,10 +1512,10 @@ fn fatal(comptime fmt: []const u8, args: anytype) noreturn {
     var buf: [512]u8 = undefined;
     const msg = std.fmt.bufPrint(&buf, fmt, args) catch "unknown error";
     // Strip trailing newline
-    const clean = std.mem.trimRight(u8, msg, "\n");
+    const clean = std.mem.trimEnd(u8, msg, "\n");
     var out_buf: [600]u8 = undefined;
     const out = std.fmt.bufPrint(&out_buf, "{{\"error\":\"{s}\"}}\n", .{clean}) catch "{\"error\":\"fatal\"}\n";
-    std.fs.File.stdout().writeAll(out) catch {};
+    compat.writeToStdout(out);
     std.process.exit(1);
 }
 

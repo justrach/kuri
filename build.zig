@@ -25,7 +25,7 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run the application");
     run_step.dependOn(&run_exe.step);
 
-    // Tests
+    // Tests — all tests compiled from main.zig root (needed for ../compat.zig imports)
     const unit_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
@@ -33,19 +33,25 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-    const run_unit_tests = b.addRunArtifact(unit_tests);
     const test_step = b.step("test", "Run unit tests");
-    test_step.dependOn(&run_unit_tests.step);
+    test_step.dependOn(&b.addRunArtifact(unit_tests).step);
 
 
     // merjs E2E test binary
+    const compat_mod = b.createModule(.{
+        .root_source_file = b.path("src/compat.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const merjs_e2e_mod = b.createModule(.{
+        .root_source_file = b.path("src/test/merjs_e2e.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    merjs_e2e_mod.addImport("compat", compat_mod);
     const merjs_e2e = b.addExecutable(.{
         .name = "merjs-e2e",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/test/merjs_e2e.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
+        .root_module = merjs_e2e_mod,
     });
     b.installArtifact(merjs_e2e);
     const run_merjs_e2e = b.addRunArtifact(merjs_e2e);
@@ -69,7 +75,7 @@ pub fn build(b: *std.Build) void {
         .name = "kuri-fetch",
         .root_module = fetch_mod,
     });
-    fetch_exe.linkLibrary(quickjs_dep.artifact("quickjs-ng"));
+    fetch_exe.root_module.linkLibrary(quickjs_dep.artifact("quickjs-ng"));
     b.installArtifact(fetch_exe);
     const run_fetch = b.addRunArtifact(fetch_exe);
     run_fetch.step.dependOn(b.getInstallStep());
@@ -89,7 +95,7 @@ pub fn build(b: *std.Build) void {
     const fetch_tests = b.addTest(.{
         .root_module = fetch_test_mod,
     });
-    fetch_tests.linkLibrary(quickjs_dep.artifact("quickjs-ng"));
+    fetch_tests.root_module.linkLibrary(quickjs_dep.artifact("quickjs-ng"));
     const run_fetch_tests = b.addRunArtifact(fetch_tests);
     const fetch_test_step = b.step("test-fetch", "Run kuri-fetch unit tests");
     fetch_test_step.dependOn(&run_fetch_tests.step);

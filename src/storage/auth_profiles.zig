@@ -1,6 +1,7 @@
 const builtin = @import("builtin");
 const std = @import("std");
 const json_util = @import("../util/json.zig");
+const compat = @import("../compat.zig");
 
 pub const Backend = enum {
     keychain,
@@ -33,7 +34,7 @@ pub fn saveProfile(
 
     const dir_path = try authProfilesDir(allocator, state_dir);
     defer allocator.free(dir_path);
-    try std.fs.cwd().makePath(dir_path);
+    try compat.cwdMakePath(dir_path);
 
     switch (backend) {
         .keychain => {
@@ -46,7 +47,7 @@ pub fn saveProfile(
     try writeMetaFile(allocator, dir_path, safe_name, .{
         .name = name,
         .origin = origin,
-        .saved_at = std.time.timestamp(),
+        .saved_at = compat.timestampSeconds(),
         .backend = backend,
     });
 
@@ -97,10 +98,7 @@ pub fn deleteProfile(
 
     const meta_path = try metaFilePath(allocator, dir_path, safe_name);
     defer allocator.free(meta_path);
-    std.fs.cwd().deleteFile(meta_path) catch |err| switch (err) {
-        error.FileNotFound => {},
-        else => return err,
-    };
+    compat.cwdDeleteFile(meta_path) catch {};
 }
 
 pub fn listProfiles(
@@ -110,20 +108,24 @@ pub fn listProfiles(
     const dir_path = try authProfilesDir(allocator, state_dir);
     defer allocator.free(dir_path);
 
-    var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch |err| switch (err) {
-        error.FileNotFound => return allocator.alloc(AuthProfileMeta, 0),
-        else => return err,
-    };
-    defer dir.close();
+    var path_buf: [4096]u8 = undefined;
+    if (dir_path.len >= path_buf.len) return error.NameTooLong;
+    @memcpy(path_buf[0..dir_path.len], dir_path);
+    path_buf[dir_path.len] = 0;
+    const dir_z: [*:0]const u8 = path_buf[0..dir_path.len :0];
+
+    const dp = std.c.opendir(dir_z) orelse return allocator.alloc(AuthProfileMeta, 0);
+    defer _ = std.c.closedir(dp);
 
     var list: std.ArrayList(AuthProfileMeta) = .empty;
     defer list.deinit(allocator);
 
-    var iter = dir.iterate();
-    while (try iter.next()) |entry| {
-        if (!std.mem.endsWith(u8, entry.name, ".meta.json")) continue;
+    while (std.c.readdir(dp)) |entry| {
+        const name_ptr: [*:0]const u8 = @ptrCast(&entry.name);
+        const name = std.mem.sliceTo(name_ptr, 0);
+        if (!std.mem.endsWith(u8, name, ".meta.json")) continue;
 
-        const safe_name = entry.name[0 .. entry.name.len - ".meta.json".len];
+        const safe_name = name[0 .. name.len - ".meta.json".len];
         const meta = readMetaFile(allocator, dir_path, safe_name) catch continue;
         try list.append(allocator, meta);
     }
@@ -221,7 +223,7 @@ fn readMetaFile(
     const path = try metaFilePath(allocator, dir_path, safe_name);
     defer allocator.free(path);
 
-    const body = try std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024);
+    const body = try compat.cwdReadFile(allocator, path, 1024 * 1024);
     defer allocator.free(body);
 
     const name = extractStringField(body, "\"name\"") orelse return error.InvalidProfileMeta;
@@ -255,7 +257,7 @@ fn readSecretFile(
 ) ![]u8 {
     const path = try secretFilePath(allocator, dir_path, safe_name);
     defer allocator.free(path);
-    return std.fs.cwd().readFileAlloc(allocator, path, 8 * 1024 * 1024);
+    return compat.cwdReadFile(allocator, path, 8 * 1024 * 1024);
 }
 
 fn deleteSecretFile(
@@ -265,16 +267,11 @@ fn deleteSecretFile(
 ) !void {
     const path = try secretFilePath(allocator, dir_path, safe_name);
     defer allocator.free(path);
-    std.fs.cwd().deleteFile(path) catch |err| switch (err) {
-        error.FileNotFound => {},
-        else => return err,
-    };
+    compat.cwdDeleteFile(path) catch {};
 }
 
 fn writeFile(path: []const u8, contents: []const u8) !void {
-    const file = try std.fs.cwd().createFile(path, .{ .truncate = true });
-    defer file.close();
-    try file.writeAll(contents);
+    try compat.cwdWriteFile(path, contents);
 }
 
 fn extractStringField(json: []const u8, field: []const u8) ?[]const u8 {
@@ -337,27 +334,69 @@ fn keychainDelete(allocator: std.mem.Allocator, name: []const u8) !void {
 }
 
 fn runCommand(allocator: std.mem.Allocator, argv: []const []const u8) ![]u8 {
-    const result = try std.process.Child.run(.{
-        .allocator = allocator,
-        .argv = argv,
-        .max_output_bytes = 8 * 1024 * 1024,
-    });
-    defer allocator.free(result.stderr);
-    errdefer allocator.free(result.stdout);
+    // Build null-terminated argv for execve
+    const argv_z = try allocator.alloc(?[*:0]const u8, argv.len + 1);
+    defer allocator.free(argv_z);
+    for (argv, 0..) |arg, i| {
+        argv_z[i] = @ptrCast(arg.ptr);
+    }
+    argv_z[argv.len] = null;
 
-    switch (result.term) {
-        .Exited => |code| {
-            if (code != 0) return error.CommandFailed;
-        },
-        else => return error.CommandFailed,
+    // Create pipe for capturing stdout
+    var pipe_fds: [2]std.c.fd_t = undefined;
+    if (std.c.pipe(&pipe_fds) != 0) return error.CommandFailed;
+
+    const pid = std.c.fork();
+    if (pid < 0) return error.CommandFailed;
+
+    if (pid == 0) {
+        // Child: close read end, redirect stdout to pipe write end
+        _ = std.c.close(pipe_fds[0]);
+        _ = std.c.dup2(pipe_fds[1], 1);
+        _ = std.c.close(pipe_fds[1]);
+        // Redirect stderr to /dev/null
+        const devnull = std.c.open("/dev/null", .{ .ACCMODE = .WRONLY }, @as(c_uint, 0));
+        if (devnull >= 0) {
+            _ = std.c.dup2(devnull, 2);
+            _ = std.c.close(devnull);
+        }
+        _ = std.c.execve(argv_z[0].?, @ptrCast(argv_z.ptr), @ptrCast(std.c.environ));
+        std.c.exit(127);
     }
 
-    const trimmed = std.mem.trim(u8, result.stdout, "\r\n");
-    if (trimmed.len == result.stdout.len) return result.stdout;
+    // Parent: close write end, read stdout from pipe
+    _ = std.c.close(pipe_fds[1]);
+    defer _ = std.c.close(pipe_fds[0]);
 
-    const duped = try allocator.dupe(u8, trimmed);
-    allocator.free(result.stdout);
-    return duped;
+    var output: std.ArrayList(u8) = .empty;
+    defer output.deinit(allocator);
+    var buf: [4096]u8 = undefined;
+    while (true) {
+        const n = std.c.read(pipe_fds[0], &buf, buf.len);
+        if (n <= 0) break;
+        try output.appendSlice(allocator, buf[0..@intCast(n)]);
+    }
+
+    var status: c_int = 0;
+    _ = std.c.waitpid(pid, &status, 0);
+    // Check exit status (WIFEXITED && WEXITSTATUS == 0)
+    if ((status & 0x7f) != 0 or ((status >> 8) & 0xff) != 0) return error.CommandFailed;
+
+    const trimmed = std.mem.trim(u8, output.items, "\r\n");
+    return try allocator.dupe(u8, trimmed);
+}
+
+fn deleteTreeAbsolute(dir: []const u8) void {
+    var buf: [4096]u8 = undefined;
+    const cmd = std.fmt.bufPrint(&buf, "rm -rf {s}", .{dir}) catch return;
+    buf[cmd.len] = 0;
+    const pid = std.c.fork();
+    if (pid == 0) {
+        const argv = [_:null]?[*:0]const u8{ "/bin/sh", "-c", buf[0..cmd.len :0], null };
+        _ = std.c.execve("/bin/sh", &argv, @ptrCast(std.c.environ));
+        std.c.exit(127);
+    }
+    if (pid > 0) _ = std.c.waitpid(pid, null, 0);
 }
 
 test "sanitizeName normalizes unsafe characters" {
@@ -368,13 +407,13 @@ test "sanitizeName normalizes unsafe characters" {
 
 test "file-backed auth profile round trip" {
     const allocator = std.testing.allocator;
-    const dir = try std.fmt.allocPrint(allocator, "/tmp/kuri_auth_profile_test_{d}", .{std.time.timestamp()});
+    const dir = try std.fmt.allocPrint(allocator, "/tmp/kuri_auth_profile_test_{d}", .{compat.timestampSeconds()});
     defer allocator.free(dir);
-    defer std.fs.deleteTreeAbsolute(dir) catch {};
+    defer deleteTreeAbsolute(dir);
 
     const profiles_dir = try authProfilesDir(allocator, dir);
     defer allocator.free(profiles_dir);
-    try std.fs.cwd().makePath(profiles_dir);
+    try compat.cwdMakePath(profiles_dir);
 
     const safe_name = try sanitizeName(allocator, "demo");
     defer allocator.free(safe_name);
