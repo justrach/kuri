@@ -1,4 +1,5 @@
 const std = @import("std");
+const compat = @import("compat.zig");
 const markdown = @import("crawler/markdown.zig");
 const validator = @import("crawler/validator.zig");
 
@@ -6,16 +7,14 @@ const version = "0.1.0";
 const user_agent = "kuri-browse/" ++ version;
 
 pub fn main() !void {
-    var gpa_impl: std.heap.GeneralPurposeAllocator(.{}) = .init;
+    var gpa_impl: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa_impl.deinit();
     const gpa = gpa_impl.allocator();
 
-    const args = try std.process.argsAlloc(gpa);
-    defer std.process.argsFree(gpa, args);
+    const args = try compat.collectArgs(gpa);
 
     if (args.len > 1 and (std.mem.eql(u8, args[1], "--version") or std.mem.eql(u8, args[1], "-V"))) {
-        const stdout = std.fs.File.stdout();
-        stdout.writeAll("kuri-browse " ++ version ++ "\n") catch {};
+        compat.writeToStdout("kuri-browse " ++ version ++ "\n");
         return;
     }
     if (args.len > 1 and (std.mem.eql(u8, args[1], "--help") or std.mem.eql(u8, args[1], "-h"))) {
@@ -104,7 +103,7 @@ const Browser = struct {
         _ = self.arena.reset(.retain_capacity);
         const arena = self.arena.allocator();
 
-        const fetch_start = std.time.nanoTimestamp();
+        const fetch_start = compat.nanoTimestamp();
         const html = fetchHttp(arena, resolved, user_agent) catch |err| {
             if (self.color) {
                 std.debug.print("\x1b[31m✗\x1b[0m fetch failed: {s}\n", .{@errorName(err)});
@@ -189,13 +188,12 @@ const Browser = struct {
         const md = self.current_md orelse return;
         const arena = self.arena.allocator();
         const rendered = renderColoredMarkdown(md, self.links.items, self.color, highlight, arena);
-        const stdout = std.fs.File.stdout();
-        stdout.writeAll("\n") catch {};
-        stdout.writeAll(rendered) catch {};
+        compat.writeToStdout("\n");
+        compat.writeToStdout(rendered);
     }
 
     fn repl(self: *Browser) void {
-        const stdin = std.fs.File.stdin();
+        const stdin_fd: std.posix.fd_t = 0;
         var line_buf: [4096]u8 = undefined;
 
         while (true) {
@@ -216,7 +214,7 @@ const Browser = struct {
                 }
             }
 
-            const line = readLine(stdin, &line_buf) orelse {
+            const line = readLine(stdin_fd, &line_buf) orelse {
                 std.debug.print("\n", .{});
                 return;
             };
@@ -258,8 +256,7 @@ const Browser = struct {
             } else if (std.mem.eql(u8, trimmed, ":l") or std.mem.eql(u8, trimmed, ":links")) {
                 const arena = self.arena.allocator();
                 const index_str = formatLinkIndex(self.links.items, self.color, arena);
-                const stdout = std.fs.File.stdout();
-                stdout.writeAll(index_str) catch {};
+                compat.writeToStdout(index_str);
             } else if (std.mem.eql(u8, trimmed, ":r") or std.mem.eql(u8, trimmed, ":reload")) {
                 if (self.current_url) |url| {
                     const arena = self.arena.allocator();
@@ -271,12 +268,12 @@ const Browser = struct {
             } else if (std.mem.eql(u8, trimmed, ":history") or std.mem.eql(u8, trimmed, ":hist")) {
                 self.history.print(self.color);
             } else if (std.mem.startsWith(u8, trimmed, ":go ") or std.mem.startsWith(u8, trimmed, ":open ")) {
-                const url_part = std.mem.trimLeft(u8, trimmed[if (std.mem.startsWith(u8, trimmed, ":go ")) @as(usize, 4) else 6..], " ");
+                const url_part = std.mem.trimStart(u8, trimmed[if (std.mem.startsWith(u8, trimmed, ":go ")) @as(usize, 4) else 6..], " ");
                 if (url_part.len > 0) {
                     self.navigate(url_part) catch {};
                 }
             } else if (std.mem.startsWith(u8, trimmed, ":search ") or std.mem.startsWith(u8, trimmed, ":s ")) {
-                const term = std.mem.trimLeft(u8, trimmed[if (std.mem.startsWith(u8, trimmed, ":s ")) @as(usize, 3) else 8..], " ");
+                const term = std.mem.trimStart(u8, trimmed[if (std.mem.startsWith(u8, trimmed, ":s ")) @as(usize, 3) else 8..], " ");
                 self.searchInPage(term);
             } else if (trimmed.len > 0 and trimmed[0] == '/') {
                 if (trimmed.len > 1) {
@@ -311,7 +308,7 @@ const Browser = struct {
         _ = self.arena.reset(.retain_capacity);
         const arena = self.arena.allocator();
 
-        const fetch_start = std.time.nanoTimestamp();
+        const fetch_start = compat.nanoTimestamp();
         const html = fetchHttp(arena, url, user_agent) catch |err| {
             if (self.color) {
                 std.debug.print("\x1b[31m✗\x1b[0m fetch failed: {s}\n", .{@errorName(err)});
@@ -458,7 +455,6 @@ const History = struct {
 
 fn renderColoredMarkdown(md: []const u8, links: []const []const u8, color: bool, highlight: ?[]const u8, allocator: std.mem.Allocator) []const u8 {
     var buf: std.ArrayList(u8) = .empty;
-    const w = buf.writer(allocator);
 
     var link_num: usize = 0;
     var i: usize = 0;
@@ -468,13 +464,13 @@ fn renderColoredMarkdown(md: []const u8, links: []const []const u8, color: bool,
         if (highlight) |term| {
             if (i + term.len <= md.len and matchIgnoreCase(md[i .. i + term.len], term)) {
                 if (color) {
-                    w.writeAll("\x1b[30;43m") catch {};
-                    w.writeAll(md[i .. i + term.len]) catch {};
-                    w.writeAll("\x1b[0m") catch {};
+                    buf.appendSlice(allocator, "\x1b[30;43m") catch {};
+                    buf.appendSlice(allocator, md[i .. i + term.len]) catch {};
+                    buf.appendSlice(allocator, "\x1b[0m") catch {};
                 } else {
-                    w.writeAll(">>") catch {};
-                    w.writeAll(md[i .. i + term.len]) catch {};
-                    w.writeAll("<<") catch {};
+                    buf.appendSlice(allocator, ">>") catch {};
+                    buf.appendSlice(allocator, md[i .. i + term.len]) catch {};
+                    buf.appendSlice(allocator, "<<") catch {};
                 }
                 i += term.len;
                 continue;
@@ -487,11 +483,11 @@ fn renderColoredMarkdown(md: []const u8, links: []const []const u8, color: bool,
             while (j < md.len and md[j] == '#') : (j += 1) {}
             const eol = std.mem.indexOfScalarPos(u8, md, j, '\n') orelse md.len;
             if (color) {
-                w.writeAll("\x1b[1;36m") catch {};
-                w.writeAll(md[i..eol]) catch {};
-                w.writeAll("\x1b[0m") catch {};
+                buf.appendSlice(allocator, "\x1b[1;36m") catch {};
+                buf.appendSlice(allocator, md[i..eol]) catch {};
+                buf.appendSlice(allocator, "\x1b[0m") catch {};
             } else {
-                w.writeAll(md[i..eol]) catch {};
+                buf.appendSlice(allocator, md[i..eol]) catch {};
             }
             i = eol;
             continue;
@@ -504,12 +500,12 @@ fn renderColoredMarkdown(md: []const u8, links: []const []const u8, color: bool,
                 const display_num = findLinkNum(links, link_info.url, link_num);
 
                 if (color) {
-                    w.writeAll("\x1b[4;34m") catch {};
-                    w.writeAll(link_info.text) catch {};
-                    w.print("\x1b[0m \x1b[2;33m[{d}]\x1b[0m", .{display_num}) catch {};
+                    buf.appendSlice(allocator, "\x1b[4;34m") catch {};
+                    buf.appendSlice(allocator, link_info.text) catch {};
+                    buf.print(allocator, "\x1b[0m \x1b[2;33m[{d}]\x1b[0m", .{display_num}) catch {};
                 } else {
-                    w.writeAll(link_info.text) catch {};
-                    w.print(" [{d}]", .{display_num}) catch {};
+                    buf.appendSlice(allocator, link_info.text) catch {};
+                    buf.print(allocator, " [{d}]", .{display_num}) catch {};
                 }
                 i = link_info.end;
                 continue;
@@ -520,11 +516,11 @@ fn renderColoredMarkdown(md: []const u8, links: []const []const u8, color: bool,
         if (md[i] == '`') {
             if (std.mem.indexOfScalarPos(u8, md, i + 1, '`')) |close| {
                 if (color) {
-                    w.writeAll("\x1b[33m") catch {};
-                    w.writeAll(md[i .. close + 1]) catch {};
-                    w.writeAll("\x1b[0m") catch {};
+                    buf.appendSlice(allocator, "\x1b[33m") catch {};
+                    buf.appendSlice(allocator, md[i .. close + 1]) catch {};
+                    buf.appendSlice(allocator, "\x1b[0m") catch {};
                 } else {
-                    w.writeAll(md[i .. close + 1]) catch {};
+                    buf.appendSlice(allocator, md[i .. close + 1]) catch {};
                 }
                 i = close + 1;
                 continue;
@@ -535,11 +531,11 @@ fn renderColoredMarkdown(md: []const u8, links: []const []const u8, color: bool,
         if (i + 1 < md.len and md[i] == '*' and md[i + 1] == '*') {
             if (std.mem.indexOf(u8, md[i + 2 ..], "**")) |close_offset| {
                 if (color) {
-                    w.writeAll("\x1b[1m") catch {};
-                    w.writeAll(md[i .. i + 4 + close_offset]) catch {};
-                    w.writeAll("\x1b[0m") catch {};
+                    buf.appendSlice(allocator, "\x1b[1m") catch {};
+                    buf.appendSlice(allocator, md[i .. i + 4 + close_offset]) catch {};
+                    buf.appendSlice(allocator, "\x1b[0m") catch {};
                 } else {
-                    w.writeAll(md[i .. i + 4 + close_offset]) catch {};
+                    buf.appendSlice(allocator, md[i .. i + 4 + close_offset]) catch {};
                 }
                 i = i + 4 + close_offset;
                 continue;
@@ -550,11 +546,11 @@ fn renderColoredMarkdown(md: []const u8, links: []const []const u8, color: bool,
         if (i + 2 < md.len and std.mem.startsWith(u8, md[i..], "```")) {
             if (std.mem.indexOf(u8, md[i + 3 ..], "```")) |close_offset| {
                 if (color) {
-                    w.writeAll("\x1b[2m") catch {};
-                    w.writeAll(md[i .. i + 6 + close_offset]) catch {};
-                    w.writeAll("\x1b[0m") catch {};
+                    buf.appendSlice(allocator, "\x1b[2m") catch {};
+                    buf.appendSlice(allocator, md[i .. i + 6 + close_offset]) catch {};
+                    buf.appendSlice(allocator, "\x1b[0m") catch {};
                 } else {
-                    w.writeAll(md[i .. i + 6 + close_offset]) catch {};
+                    buf.appendSlice(allocator, md[i .. i + 6 + close_offset]) catch {};
                 }
                 i = i + 6 + close_offset;
                 continue;
@@ -563,10 +559,10 @@ fn renderColoredMarkdown(md: []const u8, links: []const []const u8, color: bool,
 
         // Blockquote: > at start of line
         if ((i == 0 or md[i - 1] == '\n') and md[i] == '>') {
-            if (color) w.writeAll("\x1b[2;32m") catch {};
+            if (color) buf.appendSlice(allocator, "\x1b[2;32m") catch {};
             const eol = std.mem.indexOfScalarPos(u8, md, i, '\n') orelse md.len;
-            w.writeAll(md[i..eol]) catch {};
-            if (color) w.writeAll("\x1b[0m") catch {};
+            buf.appendSlice(allocator, md[i..eol]) catch {};
+            if (color) buf.appendSlice(allocator, "\x1b[0m") catch {};
             i = eol;
             continue;
         }
@@ -574,9 +570,9 @@ fn renderColoredMarkdown(md: []const u8, links: []const []const u8, color: bool,
         // List item: - at start of line
         if ((i == 0 or md[i - 1] == '\n') and md[i] == '-' and i + 1 < md.len and md[i + 1] == ' ') {
             if (color) {
-                w.writeAll("\x1b[36m•\x1b[0m ") catch {};
+                buf.appendSlice(allocator, "\x1b[36m•\x1b[0m ") catch {};
             } else {
-                w.writeAll("• ") catch {};
+                buf.appendSlice(allocator, "• ") catch {};
             }
             i += 2;
             continue;
@@ -585,22 +581,22 @@ fn renderColoredMarkdown(md: []const u8, links: []const []const u8, color: bool,
         // Horizontal rule: ---
         if ((i == 0 or md[i - 1] == '\n') and i + 2 < md.len and std.mem.startsWith(u8, md[i..], "---")) {
             if (color) {
-                w.writeAll("\x1b[2m────────────────────────────────\x1b[0m\n") catch {};
+                buf.appendSlice(allocator, "\x1b[2m────────────────────────────────\x1b[0m\n") catch {};
             } else {
-                w.writeAll("--------------------------------\n") catch {};
+                buf.appendSlice(allocator, "--------------------------------\n") catch {};
             }
             i += 3;
             if (i < md.len and md[i] == '\n') i += 1;
             continue;
         }
 
-        w.writeByte(md[i]) catch {};
+        buf.append(allocator, md[i]) catch {};
         i += 1;
     }
 
     // Print link index
     if (links.len > 0) {
-        w.writeAll("\n") catch {};
+        buf.appendSlice(allocator, "\n") catch {};
         appendLinkIndex(&buf, links, color, allocator);
     }
 
@@ -608,18 +604,17 @@ fn renderColoredMarkdown(md: []const u8, links: []const []const u8, color: bool,
 }
 
 fn appendLinkIndex(buf: *std.ArrayList(u8), links: []const []const u8, color: bool, allocator: std.mem.Allocator) void {
-    const w = buf.writer(allocator);
     if (links.len == 0) return;
     if (color) {
-        w.writeAll("\n\x1b[2m───── Links ─────\x1b[0m\n") catch {};
+        buf.appendSlice(allocator, "\n\x1b[2m───── Links ─────\x1b[0m\n") catch {};
     } else {
-        w.writeAll("\n----- Links -----\n") catch {};
+        buf.appendSlice(allocator, "\n----- Links -----\n") catch {};
     }
     for (links, 1..) |link, num| {
         if (color) {
-            w.print("  \x1b[33m[{d}]\x1b[0m \x1b[4m{s}\x1b[0m\n", .{ num, link }) catch {};
+            buf.print(allocator, "  \x1b[33m[{d}]\x1b[0m \x1b[4m{s}\x1b[0m\n", .{ num, link }) catch {};
         } else {
-            w.print("  [{d}] {s}\n", .{ num, link }) catch {};
+            buf.print(allocator, "  [{d}] {s}\n", .{ num, link }) catch {};
         }
     }
 }
@@ -657,10 +652,10 @@ fn findLinkNum(links: []const []const u8, url: []const u8, fallback: usize) usiz
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
-fn readLine(file: std.fs.File, buf: []u8) ?[]const u8 {
+fn readLine(fd: std.posix.fd_t, buf: []u8) ?[]const u8 {
     var i: usize = 0;
     while (i < buf.len) {
-        const bytes_read = file.read(buf[i .. i + 1]) catch return null;
+        const bytes_read = std.posix.read(fd, buf[i .. i + 1]) catch return null;
         if (bytes_read == 0) {
             if (i == 0) return null; // EOF with no data
             return buf[0..i];
@@ -677,17 +672,17 @@ fn truncateUrl(url: []const u8, max: usize) []const u8 {
 }
 
 fn shouldUseColor() bool {
-    if (std.posix.getenv("NO_COLOR")) |v| {
+    if (compat.getenv("NO_COLOR")) |v| {
         if (v.len > 0) return false;
     }
-    if (std.posix.getenv("TERM")) |term| {
+    if (compat.getenv("TERM")) |term| {
         if (std.mem.eql(u8, term, "dumb")) return false;
     }
-    return std.posix.isatty(std.fs.File.stderr().handle);
+    return std.c.isatty(2) != 0;
 }
 
 fn elapsed(start: i128) u64 {
-    const diff = std.time.nanoTimestamp() - start;
+    const diff = compat.nanoTimestamp() - start;
     return if (diff > 0) @as(u64, @intCast(diff)) / std.time.ns_per_ms else 0;
 }
 
@@ -765,7 +760,7 @@ fn printUsage() void {
 // ─── HTTP fetch ─────────────────────────────────────────────────────────────
 
 fn fetchHttp(allocator: std.mem.Allocator, url: []const u8, ua: []const u8) ![]const u8 {
-    var client: std.http.Client = .{ .allocator = allocator };
+    var client: std.http.Client = .{ .allocator = allocator, .io = std.Io.Threaded.global_single_threaded.io() };
     defer client.deinit();
 
     const uri = try std.Uri.parse(url);

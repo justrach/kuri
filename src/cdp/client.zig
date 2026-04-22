@@ -1,6 +1,7 @@
 const std = @import("std");
 const protocol = @import("protocol.zig");
 const WebSocketClient = @import("websocket.zig").WebSocketClient;
+const compat = @import("../compat.zig");
 
 pub const EventBuffer = struct {
     const BufferedEvent = struct {
@@ -24,8 +25,9 @@ pub const EventBuffer = struct {
 
     pub fn push(self: *EventBuffer, owner: std.mem.Allocator, event: []const u8) void {
         if (self.items.items.len >= 256) {
-            // Drop oldest event — copy to our own allocator so we don't hold arena refs
-            _ = self.items.orderedRemove(0);
+            // Drop oldest event — free its data before removing
+            const oldest = self.items.orderedRemove(0);
+            oldest.owner.free(oldest.data);
         }
         // Dupe event data into our persistent allocator so it survives arena resets
         const duped = self.allocator.dupe(u8, event) catch {
@@ -74,7 +76,7 @@ pub const CdpClient = struct {
     next_id: std.atomic.Value(u32),
     ws: ?WebSocketClient,
     connected: bool,
-    mu: std.Thread.Mutex,
+    mu: compat.PthreadMutex,
 
     // Owned buffers for WebSocket I/O
     ws_read_buf: [512 * 1024]u8,
@@ -235,8 +237,8 @@ pub const CdpClient = struct {
         var ws = &(self.ws orelse return);
         const drain_timeout = std.posix.timeval{ .sec = timeout_sec, .usec = 0 };
         const orig_timeout = std.posix.timeval{ .sec = 10, .usec = 0 };
-        std.posix.setsockopt(ws.stream.handle, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&drain_timeout)) catch {};
-        defer std.posix.setsockopt(ws.stream.handle, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&orig_timeout)) catch {};
+        std.posix.setsockopt(ws.fd, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&drain_timeout)) catch {};
+        defer std.posix.setsockopt(ws.fd, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&orig_timeout)) catch {};
 
         var drained: u32 = 0;
         while (drained < 2000) : (drained += 1) {

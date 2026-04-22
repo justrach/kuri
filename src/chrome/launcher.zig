@@ -1,5 +1,6 @@
 const std = @import("std");
 const config = @import("../bridge/config.zig");
+const compat = @import("../compat.zig");
 
 /// 🧁 Chrome lifecycle manager — launch, supervise, restart.
 /// Handles spawning headless Chrome with CDP debugging port,
@@ -7,7 +8,7 @@ const config = @import("../bridge/config.zig");
 pub const Launcher = struct {
     allocator: std.mem.Allocator,
     cdp_port: u16,
-    child: ?std.process.Child,
+    child_pid: ?std.c.pid_t,
     ws_url_buf: [512]u8,
     ws_url_len: usize,
     restarts: u8,
@@ -60,7 +61,7 @@ pub const Launcher = struct {
         return .{
             .allocator = allocator,
             .cdp_port = default_cdp_port,
-            .child = null,
+            .child_pid = null,
             .ws_url_buf = undefined,
             .ws_url_len = 0,
             .restarts = 0,
@@ -118,7 +119,7 @@ pub const Launcher = struct {
             try argv_list.append(self.allocator, "--disable-gpu");
         } else {
             // Visible mode: needs a data dir for CDP to work on macOS
-            const home = std.posix.getenv("HOME") orelse "/tmp";
+            const home = compat.getenv("HOME") orelse "/tmp";
             const data_dir = try std.fmt.allocPrint(self.allocator, "--user-data-dir={s}/.kuri/chrome-profile", .{home});
             try argv_list.append(self.allocator, data_dir);
         }
@@ -150,25 +151,38 @@ pub const Launcher = struct {
             for (flags) |f| try argv_list.append(self.allocator, f);
         }
 
-        var child = std.process.Child.init(argv_list.items, self.allocator);
-        child.stderr_behavior = .Ignore;
-        child.stdout_behavior = .Ignore;
+        // Build null-terminated argv for execv
+        const argv_z = try self.allocator.alloc(?[*:0]const u8, argv_list.items.len + 1);
+        defer self.allocator.free(argv_z);
+        for (argv_list.items, 0..) |arg, i| {
+            argv_z[i] = @ptrCast(arg.ptr);
+        }
+        argv_z[argv_list.items.len] = null;
 
-        try child.spawn();
-        self.child = child;
+        const pid = std.c.fork();
+        if (pid < 0) return error.ForkFailed;
 
-        // Free argv-owned strings now that spawn has completed and child has exec'd.
-        // The Child struct no longer needs these after spawn().
+        if (pid == 0) {
+            // Child: redirect stdout/stderr to /dev/null
+            const devnull = std.c.open("/dev/null", .{ .ACCMODE = .WRONLY }, @as(c_uint, 0));
+            if (devnull >= 0) {
+                _ = std.c.dup2(devnull, 1);
+                _ = std.c.dup2(devnull, 2);
+                _ = std.c.close(devnull);
+            }
+            _ = std.c.execve(argv_z[0].?, @ptrCast(argv_z.ptr), @ptrCast(std.c.environ));
+            std.c.exit(127);
+        }
+
+        self.child_pid = pid;
+
+        // Free argv-owned strings now that fork+exec has completed.
         self.allocator.free(port_flag);
         if (!self.headless) {
-            // data_dir was appended at index 1 (after chrome_bin)
-            if (argv_list.items.len > 1) {
-                // Find and free the data_dir string (starts with --user-data-dir=)
-                for (argv_list.items) |item| {
-                    if (std.mem.startsWith(u8, item, "--user-data-dir=")) {
-                        self.allocator.free(item);
-                        break;
-                    }
+            for (argv_list.items) |item| {
+                if (std.mem.startsWith(u8, item, "--user-data-dir=")) {
+                    self.allocator.free(item);
+                    break;
                 }
             }
         }
@@ -176,7 +190,6 @@ pub const Launcher = struct {
             for (flags) |f| self.allocator.free(f);
             self.allocator.free(flags);
         }
-        // Free proxy flag if allocated
         if (self.proxy) |_| {
             for (argv_list.items) |item| {
                 if (std.mem.startsWith(u8, item, "--proxy-server=")) {
@@ -187,11 +200,11 @@ pub const Launcher = struct {
         }
 
         std.log.info("launched Chrome (pid={d}) on CDP port {d}", .{
-            child.id,
+            pid,
             self.cdp_port,
         });
         // Give Chrome a moment to start
-        std.Thread.sleep(500 * std.time.ns_per_ms);
+        compat.threadSleep(500 * std.time.ns_per_ms);
     }
 
     /// Check if Chrome is alive by probing /json/version on the CDP port.
@@ -212,9 +225,9 @@ pub const Launcher = struct {
         if (status.alive) return;
 
         // Chrome appears dead
-        if (self.child) |*child| {
-            _ = child.wait() catch {};
-            self.child = null;
+        if (self.child_pid) |pid| {
+            _ = std.c.waitpid(pid, null, 0);
+            self.child_pid = null;
         }
 
         if (self.restarts >= max_restarts) {
@@ -233,10 +246,10 @@ pub const Launcher = struct {
 
     /// Shut down the managed Chrome process.
     pub fn deinit(self: *Launcher) void {
-        if (self.child) |*child| {
-            _ = child.kill() catch {};
-            _ = child.wait() catch {};
-            self.child = null;
+        if (self.child_pid) |pid| {
+            _ = std.c.kill(pid, std.c.SIG.KILL);
+            _ = std.c.waitpid(pid, null, 0);
+            self.child_pid = null;
         }
     }
 
@@ -245,7 +258,7 @@ pub const Launcher = struct {
         for (chrome_paths) |path| {
             // For absolute paths, check file existence
             if (path[0] == '/') {
-                std.fs.cwd().access(path, .{}) catch continue;
+                if (!compat.cwdAccess(path)) continue;
                 return path;
             }
             // For bare names, assume PATH lookup will work
@@ -290,7 +303,7 @@ pub const Launcher = struct {
                 try self.storeWsUrl(status.ws_url.?);
                 return;
             }
-            std.Thread.sleep(250 * std.time.ns_per_ms);
+            compat.threadSleep(250 * std.time.ns_per_ms);
         }
         return error.ConnectionRefused;
     }
@@ -358,10 +371,7 @@ pub fn findFreePort(start_port: u16) !u16 {
 
 /// Check if a TCP port is currently in use by attempting to connect.
 pub fn isPortInUse(port: u16) bool {
-    const addr = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, port);
-    var stream = std.net.tcpConnectToAddress(addr) catch return false;
-    stream.close();
-    return true;
+    return compat.isPortInUse(port);
 }
 
 // ── HTTP health probe ───────────────────────────────────────────────────
@@ -374,7 +384,8 @@ fn httpProbeJsonVersion(port: u16) Launcher.ChromeStatus {
 
 fn httpProbe(raw_url: []const u8, host: []const u8, port: u16, path: []const u8) Launcher.ChromeStatus {
     const connect_host = normalizeHost(host);
-    var stream = std.net.tcpConnectToHost(std.heap.page_allocator, connect_host, port) catch
+    _ = connect_host;
+    var stream = compat.tcpConnectToIp4(port) catch
         return .{ .alive = false, .ws_url = null };
 
     defer stream.close();
@@ -573,7 +584,7 @@ test "healthCheck returns not alive for unbound port" {
     var launcher = Launcher{
         .allocator = std.testing.allocator,
         .cdp_port = 19876,
-        .child = null,
+        .child_pid = null,
         .ws_url_buf = undefined,
         .ws_url_len = 0,
         .restarts = 0,

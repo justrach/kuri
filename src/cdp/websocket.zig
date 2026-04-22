@@ -1,13 +1,14 @@
 const std = @import("std");
-const net = std.net;
-const Io = std.Io;
 const crypto = std.crypto;
+const compat = @import("../compat.zig");
+
+const c_connect = @extern(*const fn (std.c.fd_t, *const anyopaque, std.posix.socklen_t) callconv(.c) c_int, .{ .name = "connect" });
 
 /// Pure Zig WebSocket client for CDP communication.
 /// Implements RFC 6455: HTTP upgrade handshake, masked client frames, unmasked server reads.
 pub const WebSocketClient = struct {
     allocator: std.mem.Allocator,
-    stream: net.Stream,
+    fd: std.posix.fd_t,
     connected: bool,
 
     // Buffers owned by caller (stack or heap)
@@ -30,19 +31,30 @@ pub const WebSocketClient = struct {
 
         // Resolve localhost to 127.0.0.1 — resolveIp fails on some systems
         const resolved_host = if (std.mem.eql(u8, parsed.host, "localhost")) "127.0.0.1" else parsed.host;
-        const address = net.Address.parseIp4(resolved_host, parsed.port) catch return Error.ConnectionFailed;
-        const stream = net.tcpConnectToAddress(address) catch return Error.ConnectionFailed;
-        errdefer stream.close();
+        const ip_addr = parseIp4(resolved_host) orelse return Error.ConnectionFailed;
+
+        const raw_fd = std.c.socket(std.posix.AF.INET, std.posix.SOCK.STREAM, 0);
+        if (raw_fd < 0) return Error.ConnectionFailed;
+        const fd: std.posix.fd_t = raw_fd;
+        errdefer _ = std.c.close(fd);
+
+        var addr: std.posix.sockaddr.in = .{
+            .port = std.mem.nativeToBig(u16, parsed.port),
+            .addr = ip_addr,
+        };
+        if (c_connect(fd, @ptrCast(&addr), @sizeOf(std.posix.sockaddr.in)) != 0) {
+            return Error.ConnectionFailed;
+        }
 
         // Set read timeout so we don't block forever
         const timeout = std.posix.timeval{ .sec = 10, .usec = 0 };
-        std.posix.setsockopt(stream.handle, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch {
+        std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch {
             return Error.ConnectionFailed;
         };
 
         var ws = WebSocketClient{
             .allocator = allocator,
-            .stream = stream,
+            .fd = fd,
             .connected = false,
             .read_buf = read_buf,
             .write_buf = write_buf,
@@ -79,7 +91,7 @@ pub const WebSocketClient = struct {
             self.writeFrame(0x8, &.{}) catch {};
             self.connected = false;
         }
-        self.stream.close();
+        _ = std.c.close(self.fd);
     }
 
     // --- Internal ---
@@ -112,10 +124,36 @@ pub const WebSocketClient = struct {
         }
     }
 
+    /// Parse an IPv4 dotted-decimal string into a network-byte-order u32.
+    fn parseIp4(s: []const u8) ?u32 {
+        var octets: [4]u8 = undefined;
+        var octet_idx: usize = 0;
+        var cur: u16 = 0;
+        var digit_count: u8 = 0;
+        for (s) |ch| {
+            if (ch == '.') {
+                if (digit_count == 0 or octet_idx >= 3) return null;
+                octets[octet_idx] = @intCast(cur);
+                octet_idx += 1;
+                cur = 0;
+                digit_count = 0;
+            } else if (ch >= '0' and ch <= '9') {
+                cur = cur * 10 + (ch - '0');
+                if (cur > 255) return null;
+                digit_count += 1;
+            } else {
+                return null;
+            }
+        }
+        if (digit_count == 0 or octet_idx != 3) return null;
+        octets[3] = @intCast(cur);
+        return @as(u32, octets[0]) << 24 | @as(u32, octets[1]) << 16 | @as(u32, octets[2]) << 8 | @as(u32, octets[3]);
+    }
+
     fn doHandshake(self: *WebSocketClient, host: []const u8, port: u16, path: []const u8) !void {
         // Generate random key for Sec-WebSocket-Key
         var key_bytes: [16]u8 = undefined;
-        crypto.random.bytes(&key_bytes);
+        compat.randomBytes(&key_bytes);
         var key_buf: [24]u8 = undefined;
         const key = std.base64.standard.Encoder.encode(&key_buf, &key_bytes);
 
@@ -131,10 +169,10 @@ pub const WebSocketClient = struct {
             "\r\n", .{ path, host, port, key }) catch return Error.HandshakeFailed;
 
         // Send upgrade request via raw write
-        self.stream.writeAll(req) catch return Error.WriteFailed;
+        self.writeAll(req) catch return Error.WriteFailed;
 
         // Read response - look for "101 Switching Protocols"
-        const n = self.stream.read(self.read_buf) catch return Error.ReadFailed;
+        const n = self.rawRead(self.read_buf) catch return Error.ReadFailed;
         if (n == 0) return Error.HandshakeFailed;
 
         const response = self.read_buf[0..n];
@@ -149,6 +187,19 @@ pub const WebSocketClient = struct {
         {
             return Error.HandshakeFailed;
         }
+    }
+
+    fn writeAll(self: *WebSocketClient, data: []const u8) !void {
+        var sent: usize = 0;
+        while (sent < data.len) {
+            const n = std.c.write(self.fd, data.ptr + sent, data.len - sent);
+            if (n <= 0) return Error.WriteFailed;
+            sent += @intCast(n);
+        }
+    }
+
+    fn rawRead(self: *WebSocketClient, buf: []u8) !usize {
+        return std.posix.read(self.fd, buf) catch return Error.ReadFailed;
     }
 
     fn writeFrame(self: *WebSocketClient, opcode: u8, data: []const u8) !void {
@@ -177,12 +228,12 @@ pub const WebSocketClient = struct {
 
         // Generate masking key
         var mask_key: [4]u8 = undefined;
-        crypto.random.bytes(&mask_key);
+        compat.randomBytes(&mask_key);
         @memcpy(frame_buf[header_len .. header_len + 4], &mask_key);
         header_len += 4;
 
         // Send header
-        self.stream.writeAll(frame_buf[0..header_len]) catch return Error.WriteFailed;
+        self.writeAll(frame_buf[0..header_len]) catch return Error.WriteFailed;
 
         // Send masked payload in chunks to avoid allocating
         var chunk: [4096]u8 = undefined;
@@ -195,7 +246,7 @@ pub const WebSocketClient = struct {
             for (0..chunk_size) |i| {
                 chunk[i] ^= mask_key[(offset + i) % 4];
             }
-            self.stream.writeAll(chunk[0..chunk_size]) catch return Error.WriteFailed;
+            self.writeAll(chunk[0..chunk_size]) catch return Error.WriteFailed;
             offset += chunk_size;
         }
     }
@@ -330,7 +381,7 @@ pub const WebSocketClient = struct {
     fn readExact(self: *WebSocketClient, buf: []u8) !void {
         var total: usize = 0;
         while (total < buf.len) {
-            const n = self.stream.read(buf[total..]) catch return Error.ReadFailed;
+            const n = self.rawRead(buf[total..]) catch return Error.ReadFailed;
             if (n == 0) return Error.ConnectionClosed;
             total += n;
         }

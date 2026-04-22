@@ -1,10 +1,11 @@
 const std = @import("std");
+const compat = @import("../compat.zig");
 
 /// Generate a filename from URL and format.
 /// Format: {domain}_{path}_{date}.{ext}
 pub fn generateFilename(url: []const u8, ext: []const u8, allocator: std.mem.Allocator) ![]const u8 {
     const domain = extractDomain(url);
-    const epoch: u64 = @intCast(std.time.timestamp());
+    const epoch: u64 = @intCast(compat.timestampSeconds());
     const epoch_secs = epoch;
 
     // Simple date: use epoch seconds for uniqueness
@@ -57,22 +58,19 @@ pub fn saveToLocal(
     if (!validateOutputDir(output_dir)) return error.InvalidPath;
 
     // Create directory if it doesn't exist
-    std.fs.cwd().makePath(output_dir) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
+    compat.cwdMakePath(output_dir) catch {};
 
     const filename = try generateFilename(url, ext, allocator);
     defer allocator.free(filename);
 
     const filepath = try std.fs.path.join(allocator, &.{ output_dir, filename });
 
-    const file = std.fs.cwd().createFile(filepath, .{ .exclusive = false }) catch |err| {
+    const fd = compat.cwdCreateFile(filepath) catch |err| {
         allocator.free(filepath);
         return err;
     };
-    defer file.close();
-    file.writeAll(content) catch |err| {
+    defer compat.fdClose(fd);
+    compat.fdWriteAll(fd, content) catch |err| {
         allocator.free(filepath);
         return err;
     };
@@ -107,7 +105,7 @@ test "getDomainName returns domain with dots" {
 
 test "saveToLocal writes file and returns path" {
     const allocator = std.testing.allocator;
-    const epoch: u64 = @intCast(std.time.timestamp());
+    const epoch: u64 = @intCast(compat.timestampSeconds());
     const dir = try std.fmt.allocPrint(allocator, "/tmp/browdie_test_{d}", .{epoch});
     defer allocator.free(dir);
 
@@ -115,14 +113,25 @@ test "saveToLocal writes file and returns path" {
     defer allocator.free(filepath);
 
     // Verify file content
-    const file = try std.fs.cwd().openFile(filepath, .{});
-    defer file.close();
-    var buf: [64]u8 = undefined;
-    const n = try file.readAll(&buf);
-    try std.testing.expectEqualStrings("hello world", buf[0..n]);
+    const content = try compat.cwdReadFile(std.testing.allocator, filepath, 64);
+    defer std.testing.allocator.free(content);
+    try std.testing.expectEqualStrings("hello world", content);
 
     // Clean up test dir
-    std.fs.deleteTreeAbsolute(dir) catch {};
+    deleteTreeAbsolute(dir);
+}
+
+fn deleteTreeAbsolute(dir: []const u8) void {
+    var buf: [4096]u8 = undefined;
+    const cmd = std.fmt.bufPrint(&buf, "rm -rf {s}", .{dir}) catch return;
+    buf[cmd.len] = 0;
+    const pid = std.c.fork();
+    if (pid == 0) {
+        const argv = [_:null]?[*:0]const u8{ "/bin/sh", "-c", buf[0..cmd.len :0], null };
+        _ = std.c.execve("/bin/sh", &argv, @ptrCast(std.c.environ));
+        std.c.exit(127);
+    }
+    if (pid > 0) _ = std.c.waitpid(pid, null, 0);
 }
 
 test "saveToLocal rejects traversal" {

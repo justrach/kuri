@@ -1,4 +1,5 @@
 const std = @import("std");
+const compat = @import("compat.zig");
 const a11y = @import("snapshot/a11y.zig");
 const markdown = @import("crawler/markdown.zig");
 const fetcher = @import("crawler/fetcher.zig");
@@ -25,9 +26,9 @@ const Bench = struct {
         for (0..@min(n / 10, 10)) |_| func();
 
         for (0..n) |i| {
-            const start = @as(u64, @intCast(@max(std.time.nanoTimestamp(), 0)));
+            const start = @as(u64, @intCast(@max(compat.nanoTimestamp(), 0)));
             func();
-            const end = @as(u64, @intCast(@max(std.time.nanoTimestamp(), 0)));
+            const end = @as(u64, @intCast(@max(compat.nanoTimestamp(), 0)));
             times[i] = end -| start;
         }
 

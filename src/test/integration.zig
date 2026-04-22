@@ -1,5 +1,5 @@
 const std = @import("std");
-const net = std.net;
+const compat = @import("../compat.zig");
 
 // Import all modules under test
 const config_mod = @import("../bridge/config.zig");
@@ -24,8 +24,7 @@ const FakeChromeServer = struct {
     fn start(body: []const u8) !FakeChromeServer {
         var port: u16 = 19440;
         while (port < 19540) : (port += 1) {
-            const address = try net.Address.parseIp4("127.0.0.1", port);
-            const server = address.listen(.{ .reuse_address = true }) catch |err| switch (err) {
+            const server = compat.tcpListen(port) catch |err| switch (err) {
                 error.AddressInUse => continue,
                 else => return err,
             };
@@ -39,7 +38,7 @@ const FakeChromeServer = struct {
         self.thread.join();
     }
 
-    fn serveOnce(server: net.Server, body: []const u8) !void {
+    fn serveOnce(server: compat.TcpServer, body: []const u8) !void {
         var tcp_server = server;
         defer tcp_server.deinit();
 
@@ -472,41 +471,35 @@ test "jsonEscape no escaping needed" {
 }
 
 test "writeJsonObject single field" {
-    var buf: [256]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
-    const writer = stream.writer();
-
+    var buf: std.ArrayList(u8) = .empty;
     const fields = [_][2][]const u8{
         .{ "key", "value" },
     };
-    try json_util.writeJsonObject(writer, &fields);
+    try json_util.writeJsonObject(&buf, std.testing.allocator, &fields);
+    defer std.testing.allocator.free(buf.toOwnedSlice(std.testing.allocator) catch unreachable);
 
-    try std.testing.expectEqualStrings("{\"key\":\"value\"}", stream.getWritten());
+    try std.testing.expectEqualStrings("{\"key\":\"value\"}", buf.items);
 }
 
 test "writeJsonObject multiple fields" {
-    var buf: [256]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
-    const writer = stream.writer();
-
+    var buf: std.ArrayList(u8) = .empty;
     const fields = [_][2][]const u8{
         .{ "a", "1" },
         .{ "b", "2" },
     };
-    try json_util.writeJsonObject(writer, &fields);
+    try json_util.writeJsonObject(&buf, std.testing.allocator, &fields);
+    defer std.testing.allocator.free(buf.toOwnedSlice(std.testing.allocator) catch unreachable);
 
-    try std.testing.expectEqualStrings("{\"a\":\"1\",\"b\":\"2\"}", stream.getWritten());
+    try std.testing.expectEqualStrings("{\"a\":\"1\",\"b\":\"2\"}", buf.items);
 }
 
 test "writeJsonObject empty" {
-    var buf: [256]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
-    const writer = stream.writer();
-
+    var buf: std.ArrayList(u8) = .empty;
     const fields: [0][2][]const u8 = .{};
-    try json_util.writeJsonObject(writer, &fields);
+    try json_util.writeJsonObject(&buf, std.testing.allocator, &fields);
+    defer std.testing.allocator.free(buf.toOwnedSlice(std.testing.allocator) catch unreachable);
 
-    try std.testing.expectEqualStrings("{}", stream.getWritten());
+    try std.testing.expectEqualStrings("{}", buf.items);
 }
 
 // ─── Harness Self-Tests ─────────────────────────────────────────────────

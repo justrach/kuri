@@ -223,22 +223,21 @@ pub fn buildSnapshot(
 /// ~6x fewer tokens than JSON for the same data.
 pub fn formatCompact(nodes: []const A11yNode, allocator: std.mem.Allocator) ![]const u8 {
     var buf: std.ArrayList(u8) = .empty;
-    const w = buf.writer(allocator);
 
     for (nodes) |node| {
         // Indent by depth
         var d: u16 = 0;
-        while (d < node.depth) : (d += 1) try w.writeAll("  ");
+        while (d < node.depth) : (d += 1) try buf.appendSlice(allocator, "  ");
 
-        try w.writeAll(node.role);
+        try buf.appendSlice(allocator, node.role);
         if (node.name.len > 0) {
-            try w.print(" \"{s}\"", .{node.name});
+            try buf.print(allocator, " \"{s}\"", .{node.name});
         }
-        if (node.ref.len > 0) try w.print(" @{s}", .{node.ref});
+        if (node.ref.len > 0) try buf.print(allocator, " @{s}", .{node.ref});
         if (node.value.len > 0) {
-            try w.print(" = {s}", .{node.value});
+            try buf.print(allocator, " = {s}", .{node.value});
         }
-        try w.writeAll("\n");
+        try buf.appendSlice(allocator, "\n");
     }
 
     return buf.toOwnedSlice(allocator);
@@ -247,20 +246,19 @@ pub fn formatCompact(nodes: []const A11yNode, allocator: std.mem.Allocator) ![]c
 /// Legacy indented text format (kept for --text flag).
 pub fn formatText(nodes: []const A11yNode, allocator: std.mem.Allocator) ![]const u8 {
     var buf: std.ArrayList(u8) = .empty;
-    const writer = buf.writer(allocator);
 
     for (nodes) |node| {
         for (0..node.depth) |_| {
-            try writer.writeAll("  ");
+            try buf.appendSlice(allocator, "  ");
         }
-        try writer.print("[{s}] {s}", .{ node.ref, node.role });
+        try buf.print(allocator, "[{s}] {s}", .{ node.ref, node.role });
         if (node.name.len > 0) {
-            try writer.print(" \"{s}\"", .{node.name});
+            try buf.print(allocator, " \"{s}\"", .{node.name});
         }
         if (node.value.len > 0) {
-            try writer.print(" value=\"{s}\"", .{node.value});
+            try buf.print(allocator, " value=\"{s}\"", .{node.value});
         }
-        try writer.writeAll("\n");
+        try buf.appendSlice(allocator, "\n");
     }
 
     return buf.toOwnedSlice(allocator);
