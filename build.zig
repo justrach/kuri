@@ -11,6 +11,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/main.zig"),
             .target = target,
             .optimize = optimize,
+            .link_libc = true,
         }),
     });
 
@@ -31,6 +32,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/main.zig"),
             .target = target,
             .optimize = optimize,
+            .link_libc = true,
         }),
     });
     const test_step = b.step("test", "Run unit tests");
@@ -42,11 +44,13 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/compat.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
     });
     const merjs_e2e_mod = b.createModule(.{
         .root_source_file = b.path("src/test/merjs_e2e.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
     });
     merjs_e2e_mod.addImport("compat", compat_mod);
     const merjs_e2e = b.addExecutable(.{
@@ -69,6 +73,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/fetch_main.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
     });
     fetch_mod.addImport("quickjs", quickjs_dep.module("quickjs"));
     const fetch_exe = b.addExecutable(.{
@@ -90,6 +95,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/fetch_main.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
     });
     fetch_test_mod.addImport("quickjs", quickjs_dep.module("quickjs"));
     const fetch_tests = b.addTest(.{
@@ -107,6 +113,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/browse_main.zig"),
             .target = target,
             .optimize = optimize,
+            .link_libc = true,
         }),
     });
     b.installArtifact(browse_exe);
@@ -124,6 +131,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/browse_main.zig"),
             .target = target,
             .optimize = optimize,
+            .link_libc = true,
         }),
     });
     const run_browse_tests = b.addRunArtifact(browse_tests);
@@ -137,6 +145,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/bench.zig"),
             .target = target,
             .optimize = .ReleaseFast,
+            .link_libc = true,
         }),
     });
     const run_bench = b.addRunArtifact(bench);
@@ -150,6 +159,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/agent_main.zig"),
             .target = target,
             .optimize = optimize,
+            .link_libc = true,
         }),
     });
     b.installArtifact(agent_exe);

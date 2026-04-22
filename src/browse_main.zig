@@ -7,13 +7,14 @@ const http_fetch = @import("util/http_fetch.zig");
 const version = "0.1.0";
 const user_agent = "kuri-browse/" ++ version;
 
-pub fn main() !void {
+pub fn main(init: std.process.Init.Minimal) !void {
     var gpa_impl: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa_impl.deinit();
     const gpa = gpa_impl.allocator();
 
-    const args = try compat.collectArgs(gpa);
-    defer gpa.free(args);
+    var arena_impl = std.heap.ArenaAllocator.init(gpa);
+    defer arena_impl.deinit();
+    const args = try init.args.toSlice(arena_impl.allocator());
 
     if (args.len > 1 and (std.mem.eql(u8, args[1], "--version") or std.mem.eql(u8, args[1], "-V"))) {
         compat.writeToStdout("kuri-browse " ++ version ++ "\n");

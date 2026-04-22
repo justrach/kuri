@@ -70,27 +70,6 @@ pub fn randomBytes(buf: []u8) void {
     arc4random_buf(buf.ptr, buf.len);
 }
 
-// --- Process Args ---
-
-extern "c" fn _NSGetArgc() *c_int;
-extern "c" fn _NSGetArgv() *[*][*:0]const u8;
-
-pub fn getArgv() struct { argc: usize, argv: [*][*:0]const u8 } {
-    return .{
-        .argc = @intCast(_NSGetArgc().*),
-        .argv = _NSGetArgv().*,
-    };
-}
-
-pub fn collectArgs(allocator: std.mem.Allocator) ![]const []const u8 {
-    const info = getArgv();
-    const args = try allocator.alloc([]const u8, info.argc);
-    for (0..info.argc) |i| {
-        args[i] = std.mem.sliceTo(info.argv[i], 0);
-    }
-    return args;
-}
-
 // --- Environment ---
 
 pub fn getenv(name: []const u8) ?[]const u8 {

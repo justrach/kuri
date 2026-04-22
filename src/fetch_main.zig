@@ -7,13 +7,16 @@ const http_fetch = @import("util/http_fetch.zig");
 
 const version = "0.2.0";
 
-pub fn main() !void {
+pub fn main(init: std.process.Init.Minimal) !void {
     var gpa_impl: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa_impl.deinit();
     const gpa = gpa_impl.allocator();
 
-    const args = try compat.collectArgs(gpa);
-    defer gpa.free(args);
+    var arena_impl = std.heap.ArenaAllocator.init(gpa);
+    defer arena_impl.deinit();
+    const arena = arena_impl.allocator();
+
+    const args = try init.args.toSlice(arena);
 
     var opts = Options{};
 
@@ -74,10 +77,6 @@ pub fn main() !void {
             std.debug.print("  hint: private/localhost URLs are blocked for SSRF protection\n", .{});
         std.process.exit(1);
     };
-
-    var arena_impl = std.heap.ArenaAllocator.init(gpa);
-    defer arena_impl.deinit();
-    const arena = arena_impl.allocator();
 
     // Status: fetching
     if (!opts.quiet) {
