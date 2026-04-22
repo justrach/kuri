@@ -64,10 +64,31 @@ pub const PthreadRwLock = struct {
 
 // --- Random ---
 
-extern "c" fn arc4random_buf(buf: *anyopaque, nbytes: usize) void;
-
 pub fn randomBytes(buf: []u8) void {
-    arc4random_buf(buf.ptr, buf.len);
+    if (buf.len == 0) return;
+
+    if (@import("builtin").os.tag == .linux and @TypeOf(std.c.getrandom) != void) {
+        var filled: usize = 0;
+        while (filled < buf.len) {
+            const rc = std.c.getrandom(buf[filled..].ptr, buf.len - filled, 0);
+            switch (std.c.errno(rc)) {
+                .SUCCESS => {
+                    const n: usize = @intCast(rc);
+                    if (n == 0) break;
+                    filled += n;
+                },
+                .INTR => continue,
+                else => break,
+            }
+        }
+        if (filled == buf.len) return;
+    } else if (@TypeOf(std.c.arc4random_buf) != void) {
+        std.c.arc4random_buf(buf.ptr, buf.len);
+        return;
+    }
+
+    var prng = std.Random.DefaultPrng.init(@as(u64, @truncate(@as(u128, @intCast(nanoTimestamp())))));
+    prng.random().bytes(buf);
 }
 
 // --- Environment ---
@@ -193,7 +214,7 @@ pub fn fdClose(fd: std.c.fd_t) void {
 
 // --- Process (replaces removed std.process.Child.init/run) ---
 
-extern "c" fn execvp(file: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_int;
+pub extern "c" fn execvp(file: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_int;
 
 pub fn runCommand(allocator: std.mem.Allocator, argv: []const []const u8, max_output: usize) !struct { stdout: []u8, term: i32 } {
     var arg_storage: std.ArrayList([:0]u8) = .empty;

@@ -152,12 +152,23 @@ pub const Launcher = struct {
         }
 
         // Build null-terminated argv for execv
-        const argv_z = try self.allocator.alloc(?[*:0]const u8, argv_list.items.len + 1);
-        defer self.allocator.free(argv_z);
-        for (argv_list.items, 0..) |arg, i| {
-            argv_z[i] = @ptrCast(arg.ptr);
+        var argv_storage: std.ArrayList([:0]u8) = .empty;
+        defer {
+            for (argv_storage.items) |arg| self.allocator.free(arg);
+            argv_storage.deinit(self.allocator);
         }
-        argv_z[argv_list.items.len] = null;
+        for (argv_list.items) |arg| {
+            const arg_z = try self.allocator.allocSentinel(u8, arg.len, 0);
+            @memcpy(arg_z[0..arg.len], arg);
+            try argv_storage.append(self.allocator, arg_z);
+        }
+
+        const argv_z = try self.allocator.alloc(?[*:0]const u8, argv_storage.items.len + 1);
+        defer self.allocator.free(argv_z);
+        for (argv_storage.items, 0..) |arg, i| {
+            argv_z[i] = arg.ptr;
+        }
+        argv_z[argv_storage.items.len] = null;
 
         const pid = std.c.fork();
         if (pid < 0) return error.ForkFailed;
@@ -170,7 +181,7 @@ pub const Launcher = struct {
                 _ = std.c.dup2(devnull, 2);
                 _ = std.c.close(devnull);
             }
-            _ = std.c.execve(argv_z[0].?, @ptrCast(argv_z.ptr), @ptrCast(std.c.environ));
+            _ = compat.execvp(argv_z[0].?, @ptrCast(argv_z.ptr));
             std.c.exit(127);
         }
 
@@ -297,13 +308,13 @@ pub const Launcher = struct {
 
     fn waitForDebuggerUrl(self: *Launcher) !void {
         var attempts: u8 = 0;
-        while (attempts < 20) : (attempts += 1) {
+        while (attempts < 30) : (attempts += 1) {
             const status = self.healthCheck();
             if (status.alive and status.ws_url != null) {
                 try self.storeWsUrl(status.ws_url.?);
                 return;
             }
-            compat.threadSleep(250 * std.time.ns_per_ms);
+            compat.threadSleep(500 * std.time.ns_per_ms);
         }
         return error.ConnectionRefused;
     }
