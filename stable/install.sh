@@ -45,12 +45,15 @@ echo "Installing kuri ${VERSION} (${TARGET})..."
 curl -fL "$URL" -o "$TMP/kuri.tar.gz"
 
 if [ -n "$SHA256" ]; then
+  ACTUAL=""
   if command -v shasum >/dev/null 2>&1; then
-    ACTUAL="$(shasum -a 256 "$TMP/kuri.tar.gz" | awk '{print $1}')"
-  elif command -v sha256sum >/dev/null 2>&1; then
-    ACTUAL="$(sha256sum "$TMP/kuri.tar.gz" | awk '{print $1}')"
-  else
-    ACTUAL=""
+    ACTUAL="$(shasum -a 256 "$TMP/kuri.tar.gz" 2>/dev/null | awk '{print $1}')" || ACTUAL=""
+  fi
+  if [ -z "$ACTUAL" ] && command -v sha256sum >/dev/null 2>&1; then
+    ACTUAL="$(sha256sum "$TMP/kuri.tar.gz" 2>/dev/null | awk '{print $1}')" || ACTUAL=""
+  fi
+  if [ -z "$ACTUAL" ] && command -v openssl >/dev/null 2>&1; then
+    ACTUAL="$(openssl dgst -sha256 "$TMP/kuri.tar.gz" 2>/dev/null | awk '{print $NF}')" || ACTUAL=""
   fi
   if [ -n "$ACTUAL" ] && [ "$ACTUAL" != "$SHA256" ]; then
     echo "Error: checksum mismatch for ${TARGET}" >&2
