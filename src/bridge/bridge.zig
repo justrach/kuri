@@ -459,6 +459,8 @@ pub const Bridge = struct {
                 self.allocator.free(node.role);
                 self.allocator.free(node.name);
                 self.allocator.free(node.value);
+                self.allocator.free(node.description);
+                self.allocator.free(node.state);
             }
         }
 
@@ -468,6 +470,8 @@ pub const Bridge = struct {
                 .role = try self.allocator.dupe(u8, node.role),
                 .name = try self.allocator.dupe(u8, node.name),
                 .value = try self.allocator.dupe(u8, node.value),
+                .description = try self.allocator.dupe(u8, node.description),
+                .state = try self.allocator.dupe(u8, node.state),
                 .backend_node_id = node.backend_node_id,
                 .depth = node.depth,
             };
@@ -484,6 +488,8 @@ fn freeSnapshot(allocator: std.mem.Allocator, snapshot: []const A11yNode) void {
         allocator.free(node.role);
         allocator.free(node.name);
         allocator.free(node.value);
+        allocator.free(node.description);
+        allocator.free(node.state);
     }
     allocator.free(snapshot);
 }

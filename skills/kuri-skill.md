@@ -1,6 +1,6 @@
 ---
 name: kuri-skill
-description: Use Kuri's HTTP server as a session-based browser skill. Prefer X-Kuri-Session with /tab/new, /tab/current, /page/info, /snapshot?filter=interactive, and /action for low-token agent loops. Use when an agent needs to browse, read, click, or fill through Kuri without managing raw CDP details.
+description: Use Kuri's HTTP server as a session-based browser skill. Prefer X-Kuri-Session with /tab/new, /tab/current, /page/info, /snapshot?filter=interactive&format=compact, and /action for low-token agent loops. Use when an agent needs to browse, read, click, or fill through Kuri without managing raw CDP details.
 ---
 
 # Kuri Skill
@@ -12,7 +12,7 @@ Use this when driving `kuri` over HTTP as an agent loop.
 1. Start `kuri`.
 2. Create or select a tab for your session.
 3. Read live page state with `/page/info`.
-4. Read actionable refs with `/snapshot?filter=interactive`.
+4. Read actionable refs with `/snapshot?filter=interactive&format=compact`.
 5. Act with `/action`.
 6. After navigation or DOM changes, re-run `/page/info` and take a fresh snapshot.
 
@@ -26,8 +26,8 @@ curl -s -H "X-Kuri-Session: $SESSION" \
   "$BASE/tab/new?url=https%3A%2F%2Fnews.ycombinator.com"
 
 curl -s -H "X-Kuri-Session: $SESSION" "$BASE/page/info"
-SNAP=$(curl -s -H "X-Kuri-Session: $SESSION" "$BASE/snapshot?filter=interactive")
-MORE_REF=$(printf '%s' "$SNAP" | python3 -c 'import json,sys; nodes=json.load(sys.stdin); print(next(n["ref"] for n in nodes if n.get("name") == "More"))')
+SNAP=$(curl -s -H "X-Kuri-Session: $SESSION" "$BASE/snapshot?filter=interactive&format=compact")
+MORE_REF=$(printf '%s' "$SNAP" | python3 -c 'import re,sys; print(re.search(r"\"More\" @(e\\d+)", sys.stdin.read()).group(1))')
 curl -s -H "X-Kuri-Session: $SESSION" "$BASE/action?action=click&ref=$MORE_REF"
 curl -s -H "X-Kuri-Session: $SESSION" "$BASE/page/info"
 ```
@@ -37,7 +37,8 @@ curl -s -H "X-Kuri-Session: $SESSION" "$BASE/page/info"
 - Prefer `X-Kuri-Session` over repeating `tab_id`.
 - Use `/tab/current?tab_id=...` when you already know which tab should become current.
 - Use `/page/info` before assuming the page moved.
-- Use `filter=interactive` snapshots for agent loops.
+- Use `filter=interactive&format=compact` snapshots for agent loops unless you need JSON.
+- Read snapshot `state` before acting on controls. Examples: `checked=false`, `disabled`, `readonly`, `expanded=false`, `selected`.
 - Treat refs as snapshot-local. Refresh them after navigation or major DOM updates.
 - Use HAR only when you need network or API discovery.
 
