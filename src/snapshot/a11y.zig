@@ -5,6 +5,8 @@ pub const A11yNode = struct {
     role: []const u8,
     name: []const u8,
     value: []const u8,
+    description: []const u8 = "",
+    state: []const u8 = "",
     backend_node_id: ?u32,
     depth: u16,
 };
@@ -153,12 +155,17 @@ pub fn buildSnapshot(
 
         // Truncate name — 70 chars captures all useful info without waste
         const name = if (node.name.len > 70) node.name[0..70] else node.name;
+        const value = if (node.value.len > 80) node.value[0..80] else node.value;
+        const description = if (node.description.len > 100) node.description[0..100] else node.description;
+        const state = if (node.state.len > 120) node.state[0..120] else node.state;
 
         try result.append(allocator, .{
             .ref = ref,
             .role = node.role,
             .name = name,
-            .value = node.value,
+            .value = value,
+            .description = description,
+            .state = state,
             .backend_node_id = node.backend_node_id,
             .depth = node.depth,
         });
@@ -206,6 +213,8 @@ pub fn buildSnapshot(
                 .role = node.role,
                 .name = node.name,
                 .value = node.value,
+                .description = node.description,
+                .state = node.state,
                 .backend_node_id = node.backend_node_id,
                 .depth = node.depth,
             });
@@ -216,7 +225,6 @@ pub fn buildSnapshot(
     }
 
     return result.toOwnedSlice(allocator);
-
 }
 
 /// Compact text-tree format: `role "name" @ref` — agent-browser style.
@@ -236,6 +244,12 @@ pub fn formatCompact(nodes: []const A11yNode, allocator: std.mem.Allocator) ![]c
         if (node.ref.len > 0) try buf.print(allocator, " @{s}", .{node.ref});
         if (node.value.len > 0) {
             try buf.print(allocator, " = {s}", .{node.value});
+        }
+        if (node.state.len > 0) {
+            try buf.print(allocator, " [{s}]", .{node.state});
+        }
+        if (node.description.len > 0) {
+            try buf.print(allocator, " desc=\"{s}\"", .{node.description});
         }
         try buf.appendSlice(allocator, "\n");
     }
@@ -257,6 +271,12 @@ pub fn formatText(nodes: []const A11yNode, allocator: std.mem.Allocator) ![]cons
         }
         if (node.value.len > 0) {
             try buf.print(allocator, " value=\"{s}\"", .{node.value});
+        }
+        if (node.state.len > 0) {
+            try buf.print(allocator, " state=\"{s}\"", .{node.state});
+        }
+        if (node.description.len > 0) {
+            try buf.print(allocator, " description=\"{s}\"", .{node.description});
         }
         try buf.appendSlice(allocator, "\n");
     }
@@ -318,4 +338,25 @@ test "buildSnapshot filters interactive" {
 
     try std.testing.expectEqual(@as(usize, 2), result.len);
     try std.testing.expectEqualStrings("button", result[0].role);
+}
+
+test "formatCompact includes state and description" {
+    const nodes = [_]A11yNode{
+        .{
+            .ref = "e0",
+            .role = "checkbox",
+            .name = "Email me",
+            .value = "",
+            .description = "Receives weekly updates",
+            .state = "checked=false required",
+            .backend_node_id = 1,
+            .depth = 0,
+        },
+    };
+
+    const text = try formatCompact(&nodes, std.testing.allocator);
+    defer std.testing.allocator.free(text);
+
+    try std.testing.expect(std.mem.indexOf(u8, text, "[checked=false required]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "desc=\"Receives weekly updates\"") != null);
 }

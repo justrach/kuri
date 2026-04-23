@@ -42,7 +42,7 @@ curl -s -H "X-Kuri-Session: $SESSION" "$BASE/page/info"
 # → {"tab_id":"ABC123","url":"https://example.com/","title":"Example Domain",...}
 
 # 3. Snapshot (a11y tree with element refs)
-curl -s -H "X-Kuri-Session: $SESSION" "$BASE/snapshot?filter=interactive"
+curl -s -H "X-Kuri-Session: $SESSION" "$BASE/snapshot?filter=interactive&format=compact"
 # → [{"ref":"e0","role":"heading","name":"Example Domain"},
 #    {"ref":"e1","role":"link","name":"More information..."}]
 
@@ -52,7 +52,7 @@ curl -s -H "X-Kuri-Session: $SESSION" "$BASE/action?ref=e2&action=fill&value=hel
 
 # 5. Read results
 curl -s -H "X-Kuri-Session: $SESSION" "$BASE/page/info"
-curl -s -H "X-Kuri-Session: $SESSION" "$BASE/snapshot?filter=interactive"
+curl -s -H "X-Kuri-Session: $SESSION" "$BASE/snapshot?filter=interactive&format=compact"
 ```
 
 If you already know a tab id, set it directly with:
@@ -79,8 +79,8 @@ curl -s -H "X-Kuri-Session: $SESSION" "$BASE/tab/current?tab_id=ABC123"
 ### Reading the page
 | Endpoint | Description |
 |---|---|
-| `GET /snapshot?tab_id=X&format=compact` | A11y tree with refs (best for agents) |
-| `GET /snapshot?tab_id=X&filter=interactive` | Only interactive elements |
+| `GET /snapshot?tab_id=X&filter=interactive&format=compact` | Lowest-token interactive a11y refs (best for agents) |
+| `GET /snapshot?tab_id=X&filter=interactive` | Only interactive elements as JSON |
 | `GET /diff/snapshot?tab_id=X` | Changes since last snapshot |
 | `GET /text?tab_id=X` | Page text content |
 | `GET /evaluate?tab_id=X&expression=JS` | Run JavaScript |
@@ -156,7 +156,7 @@ curl -s 'https://target.com/api/v4/data' \
 
 1. **Prefer session headers** — set `X-Kuri-Session` and let the server remember the current tab.
 2. **Use `/page/info` between steps** — it is the cheapest live state check for URL/title/ready state.
-3. **Use interactive snapshots** — `filter=interactive` gives refs like `e0`, `e1` for low-token loops.
+3. **Use compact interactive snapshots** — `filter=interactive&format=compact` gives refs like `e0`, `e1` plus useful `state` such as `checked=false`, `disabled`, or `expanded=false` at lower token cost.
 4. **Bot detection is automatic** — if navigate returns `{"blocked":true}`, read the `fallback.suggestions`.
 5. **HAR for API discovery** — start HAR before navigating, then use `/har/replay?filter=api` to find the site's API endpoints.
 6. **Cookies transfer** — use `/cookies` to get browser session cookies, then make direct `curl` calls.

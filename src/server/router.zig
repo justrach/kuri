@@ -107,9 +107,9 @@ fn route(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *B
     } else if (std.mem.eql(u8, clean_path, "/har/stop")) {
         handleHarStop(request, arena, bridge);
     } else if (std.mem.eql(u8, clean_path, "/har/status")) {
-            handleHarStatus(request, arena, bridge);
-        } else if (std.mem.eql(u8, clean_path, "/har/replay")) {
-            handleHarReplay(request, arena, bridge);
+        handleHarStatus(request, arena, bridge);
+    } else if (std.mem.eql(u8, clean_path, "/har/replay")) {
+        handleHarReplay(request, arena, bridge);
     } else if (std.mem.eql(u8, clean_path, "/close")) {
         handleClose(request, arena, bridge);
     } else if (std.mem.eql(u8, clean_path, "/cookies")) {
@@ -397,6 +397,30 @@ fn waitForRegisteredTab(arena: std.mem.Allocator, bridge: *Bridge, cfg: Config, 
         if (bridge.getTab(tab_id)) |tab| return tab;
         compat.threadSleep(100 * std.time.ns_per_ms);
     }
+    return bridge.getTab(tab_id);
+}
+
+fn waitForTabPageReady(arena: std.mem.Allocator, bridge: *Bridge, tab_id: []const u8, requested_url: []const u8) ?TabEntry {
+    const client = bridge.getCdpClient(tab_id) orelse return bridge.getTab(tab_id);
+    const wants_blank = requested_url.len == 0 or std.mem.eql(u8, requested_url, "about:blank");
+
+    var attempts: u8 = 0;
+    while (attempts < 50) : (attempts += 1) {
+        const live_url = evalValueString(arena, client, "window.location.href") orelse "";
+        const live_title = evalValueString(arena, client, "document.title") orelse "";
+        const ready_state = evalValueString(arena, client, "document.readyState") orelse "";
+
+        if (live_url.len > 0) {
+            _ = bridge.updateTabMetadata(tab_id, live_url, live_title) catch false;
+        }
+
+        const reached_url = wants_blank or !std.mem.eql(u8, live_url, "about:blank");
+        const ready_enough = std.mem.eql(u8, ready_state, "interactive") or std.mem.eql(u8, ready_state, "complete");
+        if (reached_url and ready_enough) return bridge.getTab(tab_id);
+
+        compat.threadSleep(100 * std.time.ns_per_ms);
+    }
+
     return bridge.getTab(tab_id);
 }
 
@@ -764,9 +788,13 @@ fn handleSnapshot(request: *std.http.Server.Request, arena: std.mem.Allocator, b
 
     const max_depth: ?u16 = if (depth_str) |ds| std.fmt.parseInt(u16, ds, 10) catch null else null;
 
+    const format_text = if (format) |f| std.mem.eql(u8, f, "text") else false;
+    const format_compact = if (format) |f| std.mem.eql(u8, f, "compact") else false;
+
     const opts = a11y.SnapshotOpts{
         .filter_interactive = if (filter) |f| std.mem.eql(u8, f, "interactive") else false,
-        .format_text = if (format) |f| std.mem.eql(u8, f, "text") else false,
+        .format_text = format_text,
+        .compact = format_compact,
         .max_depth = max_depth,
     };
 
@@ -803,7 +831,8 @@ fn handleSnapshot(request: *std.http.Server.Request, arena: std.mem.Allocator, b
         // Clear old refs and repopulate
         ref_cache.clear();
         for (snapshot) |node| {
-            if (node.backend_node_id) |bid| {
+            if (node.ref.len > 0 and node.backend_node_id != null) {
+                const bid = node.backend_node_id.?;
                 const owned_ref = bridge.allocator.dupe(u8, node.ref) catch continue;
                 ref_cache.refs.put(owned_ref, bid) catch continue;
             }
@@ -816,6 +845,16 @@ fn handleSnapshot(request: *std.http.Server.Request, arena: std.mem.Allocator, b
 
 fn sendSnapshotResponse(request: *std.http.Server.Request, arena: std.mem.Allocator, snapshot: []const @import("../snapshot/a11y.zig").A11yNode, opts: @import("../snapshot/a11y.zig").SnapshotOpts) void {
     const a11y_mod = @import("../snapshot/a11y.zig");
+    // Compact format is the lowest-token server response for agent loops.
+    if (opts.compact) {
+        const text = a11y_mod.formatCompact(snapshot, arena) catch {
+            resp.sendError(request, 500, "Failed to format snapshot");
+            return;
+        };
+        resp.sendJson(request, text);
+        return;
+    }
+
     // Text format for LLM-friendly output
     if (opts.format_text) {
         const text = a11y_mod.formatText(snapshot, arena) catch {
@@ -840,6 +879,14 @@ fn sendSnapshotResponse(request: *std.http.Server.Request, arena: std.mem.Alloca
         if (node.value.len > 0) {
             json_buf.appendSlice(arena, ",") catch return;
             writeJsonField(&json_buf, arena, "value", node.value) catch return;
+        }
+        if (node.description.len > 0) {
+            json_buf.appendSlice(arena, ",") catch return;
+            writeJsonField(&json_buf, arena, "description", node.description) catch return;
+        }
+        if (node.state.len > 0) {
+            json_buf.appendSlice(arena, ",") catch return;
+            writeJsonField(&json_buf, arena, "state", node.state) catch return;
         }
         json_buf.appendSlice(arena, "}") catch return;
     }
@@ -1005,7 +1052,7 @@ fn handleAction(request: *std.http.Server.Request, arena: std.mem.Allocator, bri
         .check => "function() { if (!this.checked) { this.click(); } return 'checked'; }",
         .uncheck => "function() { if (this.checked) { this.click(); } return 'unchecked'; }",
         .blur => "function() { this.blur(); return 'blurred'; }",
-        .fill, .@"type" => blk: {
+        .fill, .type => blk: {
             const v = value orelse {
                 resp.sendError(request, 400, "Missing value parameter for fill/type");
                 return;
@@ -1052,11 +1099,9 @@ fn handleAction(request: *std.http.Server.Request, arena: std.mem.Allocator, bri
                 // Type each character via Input.dispatchKeyEvent
                 for (v) |ch| {
                     const char_str = std.fmt.allocPrint(arena, "{c}", .{ch}) catch continue;
-                    const key_params = std.fmt.allocPrint(arena,
-                        "{{\"type\":\"keyDown\",\"text\":\"{s}\",\"key\":\"{s}\",\"unmodifiedText\":\"{s}\"}}", .{ char_str, char_str, char_str }) catch continue;
+                    const key_params = std.fmt.allocPrint(arena, "{{\"type\":\"keyDown\",\"text\":\"{s}\",\"key\":\"{s}\",\"unmodifiedText\":\"{s}\"}}", .{ char_str, char_str, char_str }) catch continue;
                     _ = client.send(arena, protocol.Methods.input_dispatch_key_event, key_params) catch continue;
-                    const up_params = std.fmt.allocPrint(arena,
-                        "{{\"type\":\"keyUp\",\"key\":\"{s}\"}}", .{char_str}) catch continue;
+                    const up_params = std.fmt.allocPrint(arena, "{{\"type\":\"keyUp\",\"key\":\"{s}\"}}", .{char_str}) catch continue;
                     _ = client.send(arena, protocol.Methods.input_dispatch_key_event, up_params) catch continue;
                 }
                 // Dispatch change event on blur
@@ -1114,7 +1159,7 @@ fn handleAction(request: *std.http.Server.Request, arena: std.mem.Allocator, bri
 
     // Step 3: Call function on the resolved object
     const call_params = switch (kind) {
-        .fill, .@"type" => blk: {
+        .fill, .type => blk: {
             const v = value orelse {
                 resp.sendError(request, 400, "Missing value parameter for fill/type");
                 return;
@@ -1126,7 +1171,7 @@ fn handleAction(request: *std.http.Server.Request, arena: std.mem.Allocator, bri
             break :blk std.fmt.allocPrint(
                 arena,
                 "{{\"objectId\":\"{s}\",\"functionDeclaration\":\"{s}\",\"arguments\":[{{\"value\":\"{s}\"}},{{\"value\":{s}}}],\"returnByValue\":true}}",
-                .{ object_id, escaped_js_fn, escaped_v, if (kind == .@"type") "true" else "false" },
+                .{ object_id, escaped_js_fn, escaped_v, if (kind == .type) "true" else "false" },
             );
         },
         .select => blk: {
@@ -1177,14 +1222,11 @@ fn handleText(request: *std.http.Server.Request, arena: std.mem.Allocator, bridg
             resp.sendError(request, 500, "Internal Server Error");
             return;
         };
-        break :blk std.fmt.allocPrint(arena,
-            "{{\"expression\":\"(() => {{ const el = document.querySelector(\\\"{s}\\\"); return el ? (el.innerText ?? '') : ''; }})()\",\"returnByValue\":true}}", .{escaped_sel}) catch {
+        break :blk std.fmt.allocPrint(arena, "{{\"expression\":\"(() => {{ const el = document.querySelector(\\\"{s}\\\"); return el ? (el.innerText ?? '') : ''; }})()\",\"returnByValue\":true}}", .{escaped_sel}) catch {
             resp.sendError(request, 500, "Internal Server Error");
             return;
         };
-    }
-    else
-        @as([]const u8, "{\"expression\":\"document.body ? document.body.innerText : ''\",\"returnByValue\":true}");
+    } else @as([]const u8, "{\"expression\":\"document.body ? document.body.innerText : ''\",\"returnByValue\":true}");
     const response = client.send(arena, protocol.Methods.runtime_evaluate, params) catch {
         resp.sendError(request, 502, "CDP command failed");
         return;
@@ -1248,8 +1290,7 @@ fn handleEvaluate(request: *std.http.Server.Request, arena: std.mem.Allocator, b
         resp.sendError(request, 500, "Internal Server Error");
         return;
     };
-    const params = std.fmt.allocPrint(arena,
-        "{{\"expression\":\"{s}\",\"returnByValue\":true}}", .{escaped_expr}) catch {
+    const params = std.fmt.allocPrint(arena, "{{\"expression\":\"{s}\",\"returnByValue\":true}}", .{escaped_expr}) catch {
         resp.sendError(request, 500, "Internal Server Error");
         return;
     };
@@ -1385,8 +1426,7 @@ fn handleDiscover(request: *std.http.Server.Request, arena: std.mem.Allocator, b
         return;
     };
 
-    const result = std.fmt.allocPrint(arena,
-        "{{\"discovered\":{d},\"total_tabs\":{d}}}", .{ registered, bridge.tabCount() }) catch {
+    const result = std.fmt.allocPrint(arena, "{{\"discovered\":{d},\"total_tabs\":{d}}}", .{ registered, bridge.tabCount() }) catch {
         resp.sendError(request, 500, "Internal Server Error");
         return;
     };
@@ -1399,6 +1439,8 @@ fn freeOwnedSnapshot(allocator: std.mem.Allocator, snapshot: []const @import("..
         allocator.free(node.role);
         allocator.free(node.name);
         allocator.free(node.value);
+        allocator.free(node.description);
+        allocator.free(node.state);
     }
     allocator.free(snapshot);
 }
@@ -1484,64 +1526,228 @@ fn extractSimpleJsonInt(json: []const u8, start: usize, field: []const u8) ?u32 
 
 fn parseA11yNodes(arena: std.mem.Allocator, raw_json: []const u8) ![]const @import("../snapshot/a11y.zig").A11yNode {
     const a11y = @import("../snapshot/a11y.zig");
-    // Parse the CDP response to extract node info
-    // The response has { "result": { "nodes": [ ... ] } }
-    // We do a simple scan for role/name/nodeId patterns
     var nodes: std.ArrayList(a11y.A11yNode) = .empty;
 
-    // Find "nodes" array start
     const nodes_start = std.mem.indexOf(u8, raw_json, "\"nodes\"") orelse return nodes.toOwnedSlice(arena);
     const array_start = std.mem.indexOfScalarPos(u8, raw_json, nodes_start, '[') orelse return nodes.toOwnedSlice(arena);
 
-    // Simple state-machine parser for CDP a11y nodes
     var pos = array_start + 1;
     var depth: u16 = 0;
     while (pos < raw_json.len) {
-        // Find next nodeId
         const node_start = std.mem.indexOfPos(u8, raw_json, pos, "\"nodeId\"") orelse break;
-        const role_val = extractJsonStringField(raw_json, node_start, "\"role\"") orelse "";
-        const name_val = extractNestedValue(raw_json, node_start) orelse "";
-        const backend_id = extractSimpleJsonInt(raw_json, node_start, "\"backendDOMNodeId\"");
+        const object_start = findContainingObjectStart(raw_json, node_start);
+        const object_end = findJsonObjectEnd(raw_json, object_start) orelse break;
+        const node_json = raw_json[object_start..object_end];
+
+        const role_val = extractTopLevelA11yValue(node_json, "\"role\"") orelse "";
+        const name_val = extractTopLevelA11yValue(node_json, "\"name\"") orelse "";
+        const value_val = extractTopLevelA11yValue(node_json, "\"value\"") orelse "";
+        const description_val = extractTopLevelA11yValue(node_json, "\"description\"") orelse "";
+        const state_val = buildA11yState(arena, node_json);
+        const backend_id = extractSimpleJsonInt(node_json, 0, "\"backendDOMNodeId\"");
 
         if (role_val.len > 0) {
             try nodes.append(arena, .{
                 .ref = "",
                 .role = role_val,
                 .name = name_val,
-                .value = "",
+                .value = value_val,
+                .description = description_val,
+                .state = state_val,
                 .backend_node_id = backend_id,
                 .depth = depth,
             });
         }
 
-        // Move past this node object
-        const next_node = std.mem.indexOfPos(u8, raw_json, node_start + 10, "\"nodeId\"") orelse raw_json.len;
-        pos = next_node;
+        pos = object_end;
         depth = 0; // flat for now
     }
 
     return nodes.toOwnedSlice(arena);
 }
 
-fn extractJsonStringField(json: []const u8, start: usize, field: []const u8) ?[]const u8 {
-    const field_pos = std.mem.indexOfPos(u8, json, start, field) orelse return null;
-    // Limit search to next 500 chars (within same node object)
-    if (field_pos - start > 500) return null;
-    // Find the value string after ":"
-    const colon = std.mem.indexOfScalarPos(u8, json, field_pos + field.len, ':') orelse return null;
-    // Look for nested "value" field
-    const value_field = std.mem.indexOfPos(u8, json, colon, "\"value\"") orelse return null;
-    if (value_field - colon > 100) return null;
-    const val_colon = std.mem.indexOfScalarPos(u8, json, value_field + 7, ':') orelse return null;
-    const quote_start = std.mem.indexOfScalarPos(u8, json, val_colon + 1, '"') orelse return null;
-    const quote_end = std.mem.indexOfScalarPos(u8, json, quote_start + 1, '"') orelse return null;
-    return json[quote_start + 1 .. quote_end];
+fn findContainingObjectStart(json: []const u8, pos: usize) usize {
+    var i = @min(pos, json.len);
+    while (i > 0) {
+        i -= 1;
+        if (json[i] == '{') return i;
+    }
+    return pos;
 }
 
-fn extractNestedValue(json: []const u8, start: usize) ?[]const u8 {
-    const name_pos = std.mem.indexOfPos(u8, json, start, "\"name\"") orelse return null;
-    if (name_pos - start > 800) return null;
-    return extractJsonStringField(json, name_pos - 1, "\"name\"");
+fn findJsonObjectEnd(json: []const u8, object_start: usize) ?usize {
+    if (object_start >= json.len or json[object_start] != '{') return null;
+    var i = object_start;
+    var depth: usize = 0;
+    while (i < json.len) : (i += 1) {
+        switch (json[i]) {
+            '"' => {
+                i = skipJsonString(json, i) orelse return null;
+                if (i == 0) return null;
+                i -= 1;
+            },
+            '{' => depth += 1,
+            '}' => {
+                if (depth == 0) return null;
+                depth -= 1;
+                if (depth == 0) return i + 1;
+            },
+            else => {},
+        }
+    }
+    return null;
+}
+
+fn skipWhitespace(json: []const u8, start: usize) usize {
+    var i = start;
+    while (i < json.len and (json[i] == ' ' or json[i] == '\t' or json[i] == '\n' or json[i] == '\r')) : (i += 1) {}
+    return i;
+}
+
+fn skipJsonString(json: []const u8, quote_start: usize) ?usize {
+    if (quote_start >= json.len or json[quote_start] != '"') return null;
+    var i = quote_start + 1;
+    while (i < json.len) : (i += 1) {
+        if (json[i] == '\\') {
+            i += 1;
+            continue;
+        }
+        if (json[i] == '"') return i + 1;
+    }
+    return null;
+}
+
+fn parseJsonStringValue(json: []const u8, quote_start: usize) ?[]const u8 {
+    const end = skipJsonString(json, quote_start) orelse return null;
+    return json[quote_start + 1 .. end - 1];
+}
+
+fn parseJsonScalarValue(json: []const u8, start: usize) ?[]const u8 {
+    const i = skipWhitespace(json, start);
+    if (i >= json.len) return null;
+    if (json[i] == '"') return parseJsonStringValue(json, i);
+
+    var end = i;
+    while (end < json.len and json[end] != ',' and json[end] != '}' and json[end] != ']' and
+        json[end] != ' ' and json[end] != '\t' and json[end] != '\n' and json[end] != '\r') : (end += 1)
+    {}
+    if (end == i) return null;
+    return json[i..end];
+}
+
+fn extractA11yValueAfterColon(json: []const u8, colon: usize) ?[]const u8 {
+    const value_start = skipWhitespace(json, colon + 1);
+    if (value_start >= json.len) return null;
+    if (json[value_start] == '{') {
+        const value_end = findJsonObjectEnd(json, value_start) orelse return null;
+        return extractTopLevelA11yValue(json[value_start..value_end], "\"value\"");
+    }
+    return parseJsonScalarValue(json, value_start);
+}
+
+fn extractTopLevelA11yValue(object: []const u8, field: []const u8) ?[]const u8 {
+    var i: usize = 0;
+    var depth: usize = 0;
+    while (i < object.len) : (i += 1) {
+        switch (object[i]) {
+            '"' => {
+                if (depth == 1 and std.mem.startsWith(u8, object[i..], field)) {
+                    const after_field = i + field.len;
+                    const j = skipWhitespace(object, after_field);
+                    if (j < object.len and object[j] == ':') {
+                        return extractA11yValueAfterColon(object, j);
+                    }
+                }
+                i = skipJsonString(object, i) orelse return null;
+                if (i == 0) return null;
+                i -= 1;
+            },
+            '{' => depth += 1,
+            '}' => {
+                if (depth == 0) return null;
+                depth -= 1;
+            },
+            else => {},
+        }
+    }
+    return null;
+}
+
+fn extractPropertyValue(object: []const u8, property_name: []const u8) ?[]const u8 {
+    var pos: usize = 0;
+    while (std.mem.indexOfPos(u8, object, pos, "\"name\"")) |name_field| {
+        const colon = std.mem.indexOfScalarPos(u8, object, name_field + 6, ':') orelse return null;
+        const name_start = skipWhitespace(object, colon + 1);
+        if (name_start < object.len and object[name_start] == '"') {
+            const found = parseJsonStringValue(object, name_start) orelse return null;
+            if (std.mem.eql(u8, found, property_name)) {
+                const value_field = std.mem.indexOfPos(u8, object, name_field + 6, "\"value\"") orelse return null;
+                const value_colon = std.mem.indexOfScalarPos(u8, object, value_field + 7, ':') orelse return null;
+                return extractA11yValueAfterColon(object, value_colon);
+            }
+        }
+        pos = name_field + 6;
+    }
+    return null;
+}
+
+fn appendStateToken(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, token: []const u8) !void {
+    if (token.len == 0) return;
+    if (buf.items.len > 0) try buf.append(allocator, ' ');
+    try buf.appendSlice(allocator, token);
+}
+
+fn appendStateKeyValue(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, key: []const u8, value: []const u8) !void {
+    if (value.len == 0 or std.mem.eql(u8, value, "undefined") or std.mem.eql(u8, value, "null")) return;
+    if (buf.items.len > 0) try buf.append(allocator, ' ');
+    try buf.print(allocator, "{s}={s}", .{ key, value });
+}
+
+fn isTruthyA11yValue(value: []const u8) bool {
+    return std.mem.eql(u8, value, "true") or
+        std.mem.eql(u8, value, "mixed") or
+        std.mem.eql(u8, value, "page") or
+        std.mem.eql(u8, value, "spelling") or
+        std.mem.eql(u8, value, "grammar");
+}
+
+fn appendBooleanState(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, object: []const u8, property_name: []const u8, token: []const u8) !void {
+    const value = extractPropertyValue(object, property_name) orelse return;
+    if (isTruthyA11yValue(value)) try appendStateToken(buf, allocator, token);
+}
+
+fn buildA11yState(arena: std.mem.Allocator, object: []const u8) []const u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    appendStateKeyValue(&buf, arena, "checked", extractPropertyValue(object, "checked") orelse "") catch return "";
+    appendStateKeyValue(&buf, arena, "pressed", extractPropertyValue(object, "pressed") orelse "") catch return "";
+    appendStateKeyValue(&buf, arena, "expanded", extractPropertyValue(object, "expanded") orelse "") catch return "";
+    appendBooleanState(&buf, arena, object, "disabled", "disabled") catch return "";
+    appendBooleanState(&buf, arena, object, "readonly", "readonly") catch return "";
+    appendBooleanState(&buf, arena, object, "required", "required") catch return "";
+    appendBooleanState(&buf, arena, object, "selected", "selected") catch return "";
+    appendBooleanState(&buf, arena, object, "focused", "focused") catch return "";
+
+    if (extractPropertyValue(object, "invalid")) |invalid| {
+        if (std.mem.eql(u8, invalid, "true")) {
+            appendStateToken(&buf, arena, "invalid") catch return "";
+        } else if (!std.mem.eql(u8, invalid, "false") and invalid.len > 0) {
+            appendStateKeyValue(&buf, arena, "invalid", invalid) catch return "";
+        }
+    }
+    if (extractPropertyValue(object, "autocomplete")) |autocomplete| {
+        if (autocomplete.len > 0 and !std.mem.eql(u8, autocomplete, "none")) {
+            appendStateKeyValue(&buf, arena, "autocomplete", autocomplete) catch return "";
+        }
+    }
+    if (extractPropertyValue(object, "haspopup")) |haspopup| {
+        if (std.mem.eql(u8, haspopup, "true")) {
+            appendStateToken(&buf, arena, "haspopup") catch return "";
+        } else if (!std.mem.eql(u8, haspopup, "false") and haspopup.len > 0) {
+            appendStateKeyValue(&buf, arena, "haspopup", haspopup) catch return "";
+        }
+    }
+
+    return buf.toOwnedSlice(arena) catch "";
 }
 
 // ── HAR Endpoints ───────────────────────────────────────────────────────
@@ -1930,8 +2136,7 @@ fn handleCookies(request: *std.http.Server.Request, arena: std.mem.Allocator, br
     if (name != null and value != null) {
         // Set cookie
         const domain = getQueryParam(target, "domain") orelse "localhost";
-        const params = std.fmt.allocPrint(arena,
-            "{{\"name\":\"{s}\",\"value\":\"{s}\",\"domain\":\"{s}\",\"path\":\"/\"}}", .{ name.?, value.?, domain }) catch {
+        const params = std.fmt.allocPrint(arena, "{{\"name\":\"{s}\",\"value\":\"{s}\",\"domain\":\"{s}\",\"path\":\"/\"}}", .{ name.?, value.?, domain }) catch {
             resp.sendError(request, 500, "Internal Server Error");
             return;
         };
@@ -2004,8 +2209,7 @@ fn handleStorage(request: *std.http.Server.Request, arena: std.mem.Allocator, br
         return;
     };
 
-    const params = std.fmt.allocPrint(arena,
-        "{{\"expression\":\"{s}\",\"returnByValue\":true}}", .{js}) catch {
+    const params = std.fmt.allocPrint(arena, "{{\"expression\":\"{s}\",\"returnByValue\":true}}", .{js}) catch {
         resp.sendError(request, 500, "Internal Server Error");
         return;
     };
@@ -2026,8 +2230,7 @@ fn handleStorageClear(request: *std.http.Server.Request, arena: std.mem.Allocato
         resp.sendError(request, 404, "Tab not found");
         return;
     };
-    const params = std.fmt.allocPrint(arena,
-        "{{\"expression\":\"{s}.clear() || 'cleared'\",\"returnByValue\":true}}", .{storage_type}) catch {
+    const params = std.fmt.allocPrint(arena, "{{\"expression\":\"{s}.clear() || 'cleared'\",\"returnByValue\":true}}", .{storage_type}) catch {
         resp.sendError(request, 500, "Internal Server Error");
         return;
     };
@@ -2098,8 +2301,7 @@ fn handleGet(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge
         return;
     };
 
-    const params = std.fmt.allocPrint(arena,
-        "{{\"expression\":\"{s}\",\"returnByValue\":true}}", .{js}) catch {
+    const params = std.fmt.allocPrint(arena, "{{\"expression\":\"{s}\",\"returnByValue\":true}}", .{js}) catch {
         resp.sendError(request, 500, "Internal Server Error");
         return;
     };
@@ -2274,7 +2476,8 @@ fn handleEmulate(request: *std.http.Server.Request, arena: std.mem.Allocator, br
     const scale_str = getQueryParam(target, "scale") orelse "1";
     const ua = getQueryParam(target, "ua");
 
-    const params = std.fmt.allocPrint(arena,
+    const params = std.fmt.allocPrint(
+        arena,
         "{{\"width\":{s},\"height\":{s},\"deviceScaleFactor\":{s},\"mobile\":false}}",
         .{ width_str, height_str, scale_str },
     ) catch {
@@ -2317,7 +2520,8 @@ fn handleGeolocation(request: *std.http.Server.Request, arena: std.mem.Allocator
     };
     const accuracy_str = getQueryParam(target, "accuracy") orelse "1";
 
-    const params = std.fmt.allocPrint(arena,
+    const params = std.fmt.allocPrint(
+        arena,
         "{{\"latitude\":{s},\"longitude\":{s},\"accuracy\":{s}}}",
         .{ lat, lng, accuracy_str },
     ) catch {
@@ -3002,8 +3206,7 @@ fn handleMarkdown(request: *std.http.Server.Request, arena: std.mem.Allocator, b
         \\})()
     ;
 
-    const params = std.fmt.allocPrint(arena,
-        "{{\"expression\":\"{s}\",\"returnByValue\":true}}", .{js}) catch {
+    const params = std.fmt.allocPrint(arena, "{{\"expression\":\"{s}\",\"returnByValue\":true}}", .{js}) catch {
         resp.sendError(request, 500, "Internal Server Error");
         return;
     };
@@ -3029,8 +3232,7 @@ fn handleLinks(request: *std.http.Server.Request, arena: std.mem.Allocator, brid
 
     const js = "JSON.stringify([...document.querySelectorAll('a[href]')].map(a=>({text:a.innerText.trim().substring(0,200),href:a.href})))";
 
-    const params = std.fmt.allocPrint(arena,
-        "{{\"expression\":\"{s}\",\"returnByValue\":true}}", .{js}) catch {
+    const params = std.fmt.allocPrint(arena, "{{\"expression\":\"{s}\",\"returnByValue\":true}}", .{js}) catch {
         resp.sendError(request, 500, "Internal Server Error");
         return;
     };
@@ -3055,8 +3257,7 @@ fn handlePdf(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge
     };
 
     const landscape = getQueryParam(target, "landscape") orelse "false";
-    const params = std.fmt.allocPrint(arena,
-        "{{\"landscape\":{s},\"printBackground\":true}}", .{landscape}) catch {
+    const params = std.fmt.allocPrint(arena, "{{\"landscape\":{s},\"printBackground\":true}}", .{landscape}) catch {
         resp.sendError(request, 500, "Internal Server Error");
         return;
     };
@@ -3099,8 +3300,7 @@ fn handleDomQuery(request: *std.http.Server.Request, arena: std.mem.Allocator, b
     const use_all = if (all) |a| std.mem.eql(u8, a, "true") else false;
     const method = if (use_all) protocol.Methods.dom_query_selector_all else protocol.Methods.dom_query_selector;
 
-    const query_params = std.fmt.allocPrint(arena,
-        "{{\"nodeId\":{d},\"selector\":\"{s}\"}}", .{ root_node_id, selector }) catch {
+    const query_params = std.fmt.allocPrint(arena, "{{\"nodeId\":{d},\"selector\":\"{s}\"}}", .{ root_node_id, selector }) catch {
         resp.sendError(request, 500, "Internal Server Error");
         return;
     };
@@ -3127,8 +3327,7 @@ fn handleDomHtml(request: *std.http.Server.Request, arena: std.mem.Allocator, br
         return;
     };
 
-    const params = std.fmt.allocPrint(arena,
-        "{{\"nodeId\":{s}}}", .{node_id_str}) catch {
+    const params = std.fmt.allocPrint(arena, "{{\"nodeId\":{s}}}", .{node_id_str}) catch {
         resp.sendError(request, 500, "Internal Server Error");
         return;
     };
@@ -3166,8 +3365,7 @@ fn handleCookiesDelete(request: *std.http.Server.Request, arena: std.mem.Allocat
             return;
         };
         break :blk std.fmt.allocPrint(arena, "{{\"name\":\"{s}\",\"domain\":\"{s}\"}}", .{ escaped_name, escaped_domain });
-    } else
-        std.fmt.allocPrint(arena, "{{\"name\":\"{s}\"}}", .{escaped_name});
+    } else std.fmt.allocPrint(arena, "{{\"name\":\"{s}\"}}", .{escaped_name});
 
     const delete_params = params catch {
         resp.sendError(request, 500, "Internal Server Error");
@@ -3203,8 +3401,7 @@ fn handleHeaders(request: *std.http.Server.Request, arena: std.mem.Allocator, br
         return;
     };
 
-    const params = std.fmt.allocPrint(arena,
-        "{{\"headers\":{s}}}", .{body}) catch {
+    const params = std.fmt.allocPrint(arena, "{{\"headers\":{s}}}", .{body}) catch {
         resp.sendError(request, 500, "Internal Server Error");
         return;
     };
@@ -3253,8 +3450,7 @@ fn handleScriptInject(request: *std.http.Server.Request, arena: std.mem.Allocato
         resp.sendError(request, 500, "Internal Server Error");
         return;
     };
-    const params = std.fmt.allocPrint(arena,
-        "{{\"source\":\"{s}\"}}", .{escaped}) catch {
+    const params = std.fmt.allocPrint(arena, "{{\"source\":\"{s}\"}}", .{escaped}) catch {
         resp.sendError(request, 500, "Internal Server Error");
         return;
     };
@@ -3756,11 +3952,9 @@ fn handleKeyboardType(request: *std.http.Server.Request, arena: std.mem.Allocato
     // Type each character via Input.dispatchKeyEvent
     for (text) |ch| {
         const char_str = std.fmt.allocPrint(arena, "{c}", .{ch}) catch continue;
-        const key_params = std.fmt.allocPrint(arena,
-            "{{\"type\":\"keyDown\",\"text\":\"{s}\",\"key\":\"{s}\",\"unmodifiedText\":\"{s}\"}}", .{ char_str, char_str, char_str }) catch continue;
+        const key_params = std.fmt.allocPrint(arena, "{{\"type\":\"keyDown\",\"text\":\"{s}\",\"key\":\"{s}\",\"unmodifiedText\":\"{s}\"}}", .{ char_str, char_str, char_str }) catch continue;
         _ = client.send(arena, protocol.Methods.input_dispatch_key_event, key_params) catch continue;
-        const up_params = std.fmt.allocPrint(arena,
-            "{{\"type\":\"keyUp\",\"key\":\"{s}\"}}", .{char_str}) catch continue;
+        const up_params = std.fmt.allocPrint(arena, "{{\"type\":\"keyUp\",\"key\":\"{s}\"}}", .{char_str}) catch continue;
         _ = client.send(arena, protocol.Methods.input_dispatch_key_event, up_params) catch continue;
     }
     const body = std.fmt.allocPrint(arena, "{{\"status\":\"ok\",\"typed\":\"{s}\",\"chars\":{d}}}", .{ text, text.len }) catch {
@@ -4018,10 +4212,11 @@ fn handleTabNew(request: *std.http.Server.Request, arena: std.mem.Allocator, bri
     if (activate and !std.mem.eql(u8, new_tab_id, "unknown")) {
         _ = activateTarget(arena, bridge, new_tab_id);
     }
-    const hydrated_tab = if (wait and !std.mem.eql(u8, new_tab_id, "unknown"))
-        waitForRegisteredTab(arena, bridge, cfg, cdp_port, new_tab_id)
-    else
-        null;
+    var hydrated_tab: ?TabEntry = null;
+    if (wait and !std.mem.eql(u8, new_tab_id, "unknown")) {
+        hydrated_tab = waitForRegisteredTab(arena, bridge, cfg, cdp_port, new_tab_id);
+        hydrated_tab = waitForTabPageReady(arena, bridge, new_tab_id, url) orelse hydrated_tab;
+    }
     rememberCurrentTab(request, bridge, new_tab_id);
     const final_url = if (hydrated_tab) |tab| tab.url else url;
     const final_title = if (hydrated_tab) |tab| tab.title else "";
@@ -4076,8 +4271,7 @@ fn handleHighlight(request: *std.http.Server.Request, arena: std.mem.Allocator, 
             resp.sendError(request, 400, "Ref not found");
             return;
         };
-        const params = std.fmt.allocPrint(arena,
-            "{{\"highlightConfig\":{{\"showInfo\":true,\"contentColor\":{{\"r\":111,\"g\":168,\"b\":220,\"a\":0.66}},\"borderColor\":{{\"r\":111,\"g\":168,\"b\":220,\"a\":1}}}},\"backendNodeId\":{d}}}", .{bid}) catch {
+        const params = std.fmt.allocPrint(arena, "{{\"highlightConfig\":{{\"showInfo\":true,\"contentColor\":{{\"r\":111,\"g\":168,\"b\":220,\"a\":0.66}},\"borderColor\":{{\"r\":111,\"g\":168,\"b\":220,\"a\":1}}}},\"backendNodeId\":{d}}}", .{bid}) catch {
             resp.sendError(request, 500, "Internal Server Error");
             return;
         };
@@ -4088,8 +4282,7 @@ fn handleHighlight(request: *std.http.Server.Request, arena: std.mem.Allocator, 
         resp.sendJson(request, response);
     } else if (selector) |sel| {
         // Highlight via JS + overlay
-        const params = std.fmt.allocPrint(arena,
-            "{{\"expression\":\"(function(){{ var el=document.querySelector('{s}'); if(!el) return 'not_found'; el.style.outline='3px solid #6fa8dc'; return 'highlighted'; }})()\",\"returnByValue\":true}}", .{sel}) catch {
+        const params = std.fmt.allocPrint(arena, "{{\"expression\":\"(function(){{ var el=document.querySelector('{s}'); if(!el) return 'not_found'; el.style.outline='3px solid #6fa8dc'; return 'highlighted'; }})()\",\"returnByValue\":true}}", .{sel}) catch {
             resp.sendError(request, 500, "Internal Server Error");
             return;
         };
@@ -4142,8 +4335,7 @@ fn handleSetOffline(request: *std.http.Server.Request, arena: std.mem.Allocator,
     };
 
     const offline = std.mem.eql(u8, mode, "on") or std.mem.eql(u8, mode, "true");
-    const params = std.fmt.allocPrint(arena,
-        "{{\"offline\":{s},\"latency\":0,\"downloadThroughput\":-1,\"uploadThroughput\":-1}}", .{if (offline) "true" else "false"}) catch {
+    const params = std.fmt.allocPrint(arena, "{{\"offline\":{s},\"latency\":0,\"downloadThroughput\":-1,\"uploadThroughput\":-1}}", .{if (offline) "true" else "false"}) catch {
         resp.sendError(request, 500, "Internal Server Error");
         return;
     };
@@ -4171,8 +4363,7 @@ fn handleSetMedia(request: *std.http.Server.Request, arena: std.mem.Allocator, b
         return;
     };
 
-    const params = std.fmt.allocPrint(arena,
-        "{{\"features\":[{{\"name\":\"prefers-color-scheme\",\"value\":\"{s}\"}}]}}", .{scheme}) catch {
+    const params = std.fmt.allocPrint(arena, "{{\"features\":[{{\"name\":\"prefers-color-scheme\",\"value\":\"{s}\"}}]}}", .{scheme}) catch {
         resp.sendError(request, 500, "Internal Server Error");
         return;
     };
@@ -4223,8 +4414,7 @@ fn handleSetCredentials(request: *std.http.Server.Request, arena: std.mem.Alloca
     };
     _ = encoder.encode(encoded, b64_input);
 
-    const header_params = std.fmt.allocPrint(arena,
-        "{{\"headers\":{{\"Authorization\":\"Basic {s}\"}}}}", .{encoded}) catch {
+    const header_params = std.fmt.allocPrint(arena, "{{\"headers\":{{\"Authorization\":\"Basic {s}\"}}}}", .{encoded}) catch {
         resp.sendError(request, 500, "Internal Server Error");
         return;
     };
@@ -4265,30 +4455,22 @@ fn handleFind(request: *std.http.Server.Request, arena: std.mem.Allocator, bridg
 
     // Build JS to find elements by semantic locator
     const js = if (std.mem.eql(u8, by, "role"))
-        std.fmt.allocPrint(arena,
-            "JSON.stringify([...document.querySelectorAll('[role=\"{s}\"]')].map((el,i)=>{{return {{index:i,tag:el.tagName,text:el.innerText.substring(0,100),ref:'found_'+i}}}}))", .{escaped_value})
+        std.fmt.allocPrint(arena, "JSON.stringify([...document.querySelectorAll('[role=\"{s}\"]')].map((el,i)=>{{return {{index:i,tag:el.tagName,text:el.innerText.substring(0,100),ref:'found_'+i}}}}))", .{escaped_value})
     else if (std.mem.eql(u8, by, "text"))
         if (exact != null and std.mem.eql(u8, exact.?, "true"))
-            std.fmt.allocPrint(arena,
-                "JSON.stringify([...document.querySelectorAll('*')].filter(el=>el.innerText.trim()===\"{s}\"&&el.children.length===0).slice(0,20).map((el,i)=>{{return {{index:i,tag:el.tagName,text:el.innerText.substring(0,100)}}}}))", .{escaped_value})
+            std.fmt.allocPrint(arena, "JSON.stringify([...document.querySelectorAll('*')].filter(el=>el.innerText.trim()===\"{s}\"&&el.children.length===0).slice(0,20).map((el,i)=>{{return {{index:i,tag:el.tagName,text:el.innerText.substring(0,100)}}}}))", .{escaped_value})
         else
-            std.fmt.allocPrint(arena,
-                "JSON.stringify([...document.querySelectorAll('*')].filter(el=>el.innerText.includes(\"{s}\")&&el.children.length===0).slice(0,20).map((el,i)=>{{return {{index:i,tag:el.tagName,text:el.innerText.substring(0,100)}}}}))", .{escaped_value})
+            std.fmt.allocPrint(arena, "JSON.stringify([...document.querySelectorAll('*')].filter(el=>el.innerText.includes(\"{s}\")&&el.children.length===0).slice(0,20).map((el,i)=>{{return {{index:i,tag:el.tagName,text:el.innerText.substring(0,100)}}}}))", .{escaped_value})
     else if (std.mem.eql(u8, by, "label"))
-        std.fmt.allocPrint(arena,
-            "JSON.stringify([...document.querySelectorAll('label')].filter(l=>l.innerText.includes(\"{s}\")).map((l,i)=>{{var el=l.htmlFor?document.getElementById(l.htmlFor):l.querySelector('input,select,textarea');return {{index:i,label:l.innerText.substring(0,100),tag:el?el.tagName:'none'}}}}))", .{escaped_value})
+        std.fmt.allocPrint(arena, "JSON.stringify([...document.querySelectorAll('label')].filter(l=>l.innerText.includes(\"{s}\")).map((l,i)=>{{var el=l.htmlFor?document.getElementById(l.htmlFor):l.querySelector('input,select,textarea');return {{index:i,label:l.innerText.substring(0,100),tag:el?el.tagName:'none'}}}}))", .{escaped_value})
     else if (std.mem.eql(u8, by, "placeholder"))
-        std.fmt.allocPrint(arena,
-            "JSON.stringify([...document.querySelectorAll('[placeholder]')].filter(el=>el.placeholder.includes(\"{s}\")).map((el,i)=>{{return {{index:i,tag:el.tagName,placeholder:el.placeholder}}}}))", .{escaped_value})
+        std.fmt.allocPrint(arena, "JSON.stringify([...document.querySelectorAll('[placeholder]')].filter(el=>el.placeholder.includes(\"{s}\")).map((el,i)=>{{return {{index:i,tag:el.tagName,placeholder:el.placeholder}}}}))", .{escaped_value})
     else if (std.mem.eql(u8, by, "testid"))
-        std.fmt.allocPrint(arena,
-            "JSON.stringify([...document.querySelectorAll('[data-testid=\"{s}\"]')].map((el,i)=>{{return {{index:i,tag:el.tagName,text:el.innerText.substring(0,100)}}}}))", .{escaped_value})
+        std.fmt.allocPrint(arena, "JSON.stringify([...document.querySelectorAll('[data-testid=\"{s}\"]')].map((el,i)=>{{return {{index:i,tag:el.tagName,text:el.innerText.substring(0,100)}}}}))", .{escaped_value})
     else if (std.mem.eql(u8, by, "alt"))
-        std.fmt.allocPrint(arena,
-            "JSON.stringify([...document.querySelectorAll('[alt]')].filter(el=>el.alt.includes(\"{s}\")).map((el,i)=>{{return {{index:i,tag:el.tagName,alt:el.alt}}}}))", .{escaped_value})
+        std.fmt.allocPrint(arena, "JSON.stringify([...document.querySelectorAll('[alt]')].filter(el=>el.alt.includes(\"{s}\")).map((el,i)=>{{return {{index:i,tag:el.tagName,alt:el.alt}}}}))", .{escaped_value})
     else if (std.mem.eql(u8, by, "title"))
-        std.fmt.allocPrint(arena,
-            "JSON.stringify([...document.querySelectorAll('[title]')].filter(el=>el.title.includes(\"{s}\")).map((el,i)=>{{return {{index:i,tag:el.tagName,title:el.title}}}}))", .{escaped_value})
+        std.fmt.allocPrint(arena, "JSON.stringify([...document.querySelectorAll('[title]')].filter(el=>el.title.includes(\"{s}\")).map((el,i)=>{{return {{index:i,tag:el.tagName,title:el.title}}}}))", .{escaped_value})
     else {
         resp.sendError(request, 400, "Unknown 'by' type. Use: role|text|label|placeholder|testid|alt|title");
         return;
@@ -4303,8 +4485,7 @@ fn handleFind(request: *std.http.Server.Request, arena: std.mem.Allocator, bridg
         resp.sendError(request, 500, "Internal Server Error");
         return;
     };
-    const params = std.fmt.allocPrint(arena,
-        "{{\"expression\":\"{s}\",\"returnByValue\":true}}", .{escaped_expr}) catch {
+    const params = std.fmt.allocPrint(arena, "{{\"expression\":\"{s}\",\"returnByValue\":true}}", .{escaped_expr}) catch {
         resp.sendError(request, 500, "Internal Server Error");
         return;
     };
@@ -4328,8 +4509,7 @@ fn handleTraceStart(request: *std.http.Server.Request, arena: std.mem.Allocator,
         return;
     };
     const categories = getQueryParam(target, "categories") orelse "-*,devtools.timeline,v8.execute,disabled-by-default-devtools.timeline";
-    const params = std.fmt.allocPrint(arena,
-        "{{\"categories\":\"{s}\",\"options\":\"sampling-frequency=10000\"}}", .{categories}) catch {
+    const params = std.fmt.allocPrint(arena, "{{\"categories\":\"{s}\",\"options\":\"sampling-frequency=10000\"}}", .{categories}) catch {
         resp.sendError(request, 500, "Internal Server Error");
         return;
     };
@@ -4466,10 +4646,11 @@ fn handleWindowNew(request: *std.http.Server.Request, arena: std.mem.Allocator, 
     if (activate and !std.mem.eql(u8, new_tab_id, "unknown")) {
         _ = activateTarget(arena, bridge, new_tab_id);
     }
-    const hydrated_tab = if (wait and !std.mem.eql(u8, new_tab_id, "unknown"))
-        waitForRegisteredTab(arena, bridge, cfg, cdp_port, new_tab_id)
-    else
-        null;
+    var hydrated_tab: ?TabEntry = null;
+    if (wait and !std.mem.eql(u8, new_tab_id, "unknown")) {
+        hydrated_tab = waitForRegisteredTab(arena, bridge, cfg, cdp_port, new_tab_id);
+        hydrated_tab = waitForTabPageReady(arena, bridge, new_tab_id, url) orelse hydrated_tab;
+    }
     rememberCurrentTab(request, bridge, new_tab_id);
     const final_url = if (hydrated_tab) |tab| tab.url else url;
     const final_title = if (hydrated_tab) |tab| tab.title else "";
@@ -4520,8 +4701,7 @@ fn handleSetViewport(request: *std.http.Server.Request, arena: std.mem.Allocator
         resp.sendError(request, 404, "Tab not found");
         return;
     };
-    const params = std.fmt.allocPrint(arena,
-        "{{\"width\":{s},\"height\":{s},\"deviceScaleFactor\":{s},\"mobile\":false}}", .{ width, height, scale }) catch {
+    const params = std.fmt.allocPrint(arena, "{{\"width\":{s},\"height\":{s},\"deviceScaleFactor\":{s},\"mobile\":false}}", .{ width, height, scale }) catch {
         resp.sendError(request, 500, "Internal Server Error");
         return;
     };
@@ -4530,8 +4710,7 @@ fn handleSetViewport(request: *std.http.Server.Request, arena: std.mem.Allocator
         return;
     };
     _ = response;
-    const body = std.fmt.allocPrint(arena,
-        "{{\"status\":\"ok\",\"width\":{s},\"height\":{s},\"scale\":{s}}}", .{ width, height, scale }) catch {
+    const body = std.fmt.allocPrint(arena, "{{\"status\":\"ok\",\"width\":{s},\"height\":{s},\"scale\":{s}}}", .{ width, height, scale }) catch {
         resp.sendError(request, 500, "Internal Server Error");
         return;
     };
@@ -4604,8 +4783,7 @@ fn handleDomAttributes(request: *std.http.Server.Request, arena: std.mem.Allocat
             resp.sendError(request, 500, "Could not resolve element");
             return;
         };
-        const call_params = std.fmt.allocPrint(arena,
-            "{{\"objectId\":\"{s}\",\"functionDeclaration\":\"function() {{ var attrs={{}}; for(var a of this.attributes){{ attrs[a.name]=a.value; }} return JSON.stringify(attrs); }}\",\"returnByValue\":true}}", .{object_id}) catch {
+        const call_params = std.fmt.allocPrint(arena, "{{\"objectId\":\"{s}\",\"functionDeclaration\":\"function() {{ var attrs={{}}; for(var a of this.attributes){{ attrs[a.name]=a.value; }} return JSON.stringify(attrs); }}\",\"returnByValue\":true}}", .{object_id}) catch {
             resp.sendError(request, 500, "Internal Server Error");
             return;
         };
@@ -4615,8 +4793,7 @@ fn handleDomAttributes(request: *std.http.Server.Request, arena: std.mem.Allocat
         };
         resp.sendJson(request, response);
     } else if (selector) |sel| {
-        const params = std.fmt.allocPrint(arena,
-            "{{\"expression\":\"(function(){{ var el=document.querySelector('{s}'); if(!el) return 'null'; var attrs={{}}; for(var a of el.attributes){{ attrs[a.name]=a.value; }} return JSON.stringify(attrs); }})()\",\"returnByValue\":true}}", .{sel}) catch {
+        const params = std.fmt.allocPrint(arena, "{{\"expression\":\"(function(){{ var el=document.querySelector('{s}'); if(!el) return 'null'; var attrs={{}}; for(var a of el.attributes){{ attrs[a.name]=a.value; }} return JSON.stringify(attrs); }})()\",\"returnByValue\":true}}", .{sel}) catch {
             resp.sendError(request, 500, "Internal Server Error");
             return;
         };
@@ -4713,8 +4890,7 @@ fn handlePerfLcp(request: *std.http.Server.Request, arena: std.mem.Allocator, br
         "setTimeout(() => resolve(JSON.stringify({lcp_ms: null, error: 'timeout'})), 10000); " ++
         "}})";
 
-    const params = std.fmt.allocPrint(arena,
-        "{{\"expression\":\"{s}\",\"awaitPromise\":true,\"returnByValue\":true}}", .{lcp_js}) catch {
+    const params = std.fmt.allocPrint(arena, "{{\"expression\":\"{s}\",\"awaitPromise\":true,\"returnByValue\":true}}", .{lcp_js}) catch {
         resp.sendError(request, 500, "Internal Server Error");
         return;
     };
@@ -4865,8 +5041,7 @@ fn handleAuthExtract(request: *std.http.Server.Request, arena: std.mem.Allocator
     else
         "";
 
-    const query = std.fmt.allocPrint(arena,
-        "sqlite3 -json '{s}' \"SELECT host_key as domain, name, value, path, is_secure as secure, is_httponly as httpOnly, expires_utc as expires FROM cookies{s} LIMIT 500;\"", .{ db_path, domain_filter }) catch {
+    const query = std.fmt.allocPrint(arena, "sqlite3 -json '{s}' \"SELECT host_key as domain, name, value, path, is_secure as secure, is_httponly as httpOnly, expires_utc as expires FROM cookies{s} LIMIT 500;\"", .{ db_path, domain_filter }) catch {
         resp.sendError(request, 500, "Internal Server Error");
         return;
     };
@@ -4970,7 +5145,6 @@ fn handleWsStop(request: *std.http.Server.Request, arena: std.mem.Allocator, bri
     };
     resp.sendJson(request, response);
 }
-
 
 test "screenshot routes match" {
     for ([_][]const u8{ "/screenshot/annotated", "/screenshot/diff", "/screencast/start", "/screencast/stop" }) |p| {
@@ -5210,42 +5384,27 @@ test "action check/uncheck routes" {
 test "total endpoint count" {
     // Verify we have the expected number of routes
     const routes = [_][]const u8{
-        "/health", "/tabs", "/discover", "/navigate", "/snapshot", "/action",
-        "/text", "/screenshot", "/evaluate", "/browdie",
-        "/har/start", "/har/stop", "/har/status",
-        "/close", "/cookies", "/cookies/clear", "/cookies/delete", "/cookies/set",
-        "/storage/local", "/storage/session", "/storage/local/clear", "/storage/session/clear",
-        "/get", "/back", "/forward", "/reload",
-        "/diff/snapshot", "/emulate", "/geolocation", "/upload",
-        "/session/save", "/session/load",
-        "/auth/profile/save", "/auth/profile/load", "/auth/profile/list", "/auth/profile/delete",
-        "/auth/extract",
-        "/debug/enable", "/debug/disable",
-        "/screenshot/annotated", "/screenshot/diff",
-        "/screencast/start", "/screencast/stop", "/video/start", "/video/stop",
-        "/console", "/intercept/start", "/intercept/stop", "/intercept/requests",
-        "/markdown", "/links", "/pdf",
-        "/dom/query", "/dom/html",
-        "/headers", "/script/inject", "/stop",
+        "/health",              "/tabs",            "/discover",            "/navigate",              "/snapshot",          "/action",
+        "/text",                "/screenshot",      "/evaluate",            "/browdie",               "/har/start",         "/har/stop",
+        "/har/status",          "/close",           "/cookies",             "/cookies/clear",         "/cookies/delete",    "/cookies/set",
+        "/storage/local",       "/storage/session", "/storage/local/clear", "/storage/session/clear", "/get",               "/back",
+        "/forward",             "/reload",          "/diff/snapshot",       "/emulate",               "/geolocation",       "/upload",
+        "/session/save",        "/session/load",    "/auth/profile/save",   "/auth/profile/load",     "/auth/profile/list", "/auth/profile/delete",
+        "/auth/extract",        "/debug/enable",    "/debug/disable",       "/screenshot/annotated",  "/screenshot/diff",   "/screencast/start",
+        "/screencast/stop",     "/video/start",     "/video/stop",          "/console",               "/intercept/start",   "/intercept/stop",
+        "/intercept/requests",  "/markdown",        "/links",               "/pdf",                   "/dom/query",         "/dom/html",
+        "/headers",             "/script/inject",   "/stop",
         // Tier 1 new endpoints
-        "/scrollintoview", "/drag",
-        "/keyboard/type", "/keyboard/inserttext",
-        "/keydown", "/keyup",
-        "/wait",
-        "/tab/new", "/tab/close",
-        "/highlight", "/errors",
-        "/set/offline", "/set/media", "/set/credentials",
+                       "/scrollintoview",        "/drag",              "/keyboard/type",
+        "/keyboard/inserttext", "/keydown",         "/keyup",               "/wait",                  "/tab/new",           "/tab/close",
+        "/highlight",           "/errors",          "/set/offline",         "/set/media",             "/set/credentials",
         // Tier 2 new endpoints
-        "/find",
-        "/trace/start", "/trace/stop",
-        "/profiler/start", "/profiler/stop",
-        "/inspect",
-        "/window/new", "/session/list",
-        "/set/viewport", "/set/useragent",
-        "/dom/attributes", "/frames", "/network",
+          "/find",
+        "/trace/start",         "/trace/stop",      "/profiler/start",      "/profiler/stop",         "/inspect",           "/window/new",
+        "/session/list",        "/set/viewport",    "/set/useragent",       "/dom/attributes",        "/frames",            "/network",
         "/perf/lcp",
         // Tier 3 new endpoints
-        "/ws/start", "/ws/stop",
+                   "/ws/start",        "/ws/stop",
     };
     try std.testing.expectEqual(@as(usize, 87), routes.len);
 }
@@ -5312,6 +5471,27 @@ test "runtime evaluate payload escapes embedded expression quotes" {
 
     try std.testing.expect(std.mem.indexOf(u8, payload, "\\\"Text input\\\"") != null);
     try std.testing.expect(std.mem.startsWith(u8, payload, "{\"expression\":\""));
+}
+
+test "parseA11yNodes extracts value description and state" {
+    const raw =
+        \\{"id":1,"result":{"nodes":[{"nodeId":"1","ignored":false,"role":{"type":"role","value":"checkbox"},"name":{"type":"computedString","value":"Email me"},"value":{"type":"string","value":"yes"},"description":{"type":"computedString","value":"Weekly updates"},"properties":[{"name":"checked","value":{"type":"tristate","value":"false"}},{"name":"required","value":{"type":"boolean","value":true}},{"name":"disabled","value":{"type":"boolean","value":false}}],"backendDOMNodeId":42}]}}
+    ;
+    const nodes = try parseA11yNodes(std.testing.allocator, raw);
+    defer {
+        for (nodes) |node| {
+            if (node.state.len > 0) std.testing.allocator.free(node.state);
+        }
+        std.testing.allocator.free(nodes);
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), nodes.len);
+    try std.testing.expectEqualStrings("checkbox", nodes[0].role);
+    try std.testing.expectEqualStrings("Email me", nodes[0].name);
+    try std.testing.expectEqualStrings("yes", nodes[0].value);
+    try std.testing.expectEqualStrings("Weekly updates", nodes[0].description);
+    try std.testing.expectEqualStrings("checked=false required", nodes[0].state);
+    try std.testing.expectEqual(@as(?u32, 42), nodes[0].backend_node_id);
 }
 
 test "buildGetExpression html without selector returns null" {

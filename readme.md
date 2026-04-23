@@ -170,8 +170,8 @@ curl -s -H "X-Kuri-Session: $SESSION" \
   "$BASE/tab/new?url=https%3A%2F%2Fnews.ycombinator.com"
 
 curl -s -H "X-Kuri-Session: $SESSION" "$BASE/page/info"
-SNAP=$(curl -s -H "X-Kuri-Session: $SESSION" "$BASE/snapshot?filter=interactive")
-MORE_REF=$(printf '%s' "$SNAP" | python3 -c 'import json,sys; nodes=json.load(sys.stdin); print(next(n["ref"] for n in nodes if n.get("name") == "More"))')
+SNAP=$(curl -s -H "X-Kuri-Session: $SESSION" "$BASE/snapshot?filter=interactive&format=compact")
+MORE_REF=$(printf '%s' "$SNAP" | python3 -c 'import re,sys; print(re.search(r"\"More\" @(e\\d+)", sys.stdin.read()).group(1))')
 curl -s -H "X-Kuri-Session: $SESSION" "$BASE/action?action=click&ref=$MORE_REF"
 curl -s -H "X-Kuri-Session: $SESSION" "$BASE/page/info"
 ```
@@ -230,7 +230,7 @@ All endpoints return JSON. Optional auth via `KURI_SECRET` env var.
 | `GET /navigate` | `tab_id`, `url` | Navigate tab to URL |
 | `GET /tab/new` | `url`, `activate`, `wait` | Create a new tab and optionally hydrate/set current tab |
 | `GET /window/new` | `url`, `activate`, `wait` | Create a new window/tab target |
-| `GET /snapshot` | `tab_id`, `filter`, `format` | A11y tree snapshot with `eN` refs |
+| `GET /snapshot` | `tab_id`, `filter`, `format` | A11y tree snapshot with `eN` refs, values, descriptions, and control state. Use `filter=interactive&format=compact` for low-token agent loops. |
 | `GET /text` | `tab_id` | Extract page text |
 | `GET /screenshot` | `tab_id`, `format`, `quality` | Capture screenshot (base64) |
 | `GET /action` | `tab_id`, `ref`, `action`, `value` | Click/type/fill/select/scroll by ref |
@@ -293,11 +293,12 @@ The lowest-friction server loop is:
 
 1. `GET /tab/new?url=...`
 2. `GET /page/info`
-3. `GET /snapshot?filter=interactive`
+3. `GET /snapshot?filter=interactive&format=compact`
 4. `GET /action?action=click&ref=eN`
 5. Repeat `page/info` or `snapshot` after state changes
 
 After any navigation or significant interaction, take a fresh snapshot before using refs again.
+Snapshots include `state` when Chrome exposes useful control state, for example `checked=true`, `checked=false`, `disabled`, `readonly`, `expanded=false`, `selected`, or `autocomplete=list`.
 
 ---
 
@@ -721,7 +722,7 @@ For a 50-page monitoring task (from Pinchtab benchmarks):
 | Method | Tokens | Cost ($) | Best For |
 |--------|--------|----------|----------|
 | `/text` | ~40,000 | $0.20 | Read-heavy (13× cheaper than screenshots) |
-| `/snapshot?filter=interactive` | ~180,000 | $0.90 | Element interaction |
+| `/snapshot?filter=interactive&format=compact` | ~40,000 | $0.20 | Low-token element interaction |
 | `/snapshot` (full) | ~525,000 | $2.63 | Full page understanding |
 | `/screenshot` | ~100,000 | $1.00 | Visual verification |
 
