@@ -92,7 +92,7 @@ kuri-agent     →  agentic CLI (scriptable Chrome automation + security testing
 ### One-line install (macOS / Linux)
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/justrach/kuri/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/justrach/kuri/release-channel/stable/install.sh | sh
 ```
 
 Detects your platform, downloads the right binary, installs to `~/.local/bin`.
@@ -107,6 +107,15 @@ bun install -g kuri-agent
 
 Downloads the correct native binary for your platform at install time.
 
+### Release channel
+
+Kuri's stable binaries live on the `release-channel` branch and are served directly from GitHub raw URLs.
+
+- Stable installer: `https://raw.githubusercontent.com/justrach/kuri/release-channel/stable/install.sh`
+- Stable manifest: `https://raw.githubusercontent.com/justrach/kuri/release-channel/stable/latest.json`
+- Branch view: `https://github.com/justrach/kuri/tree/release-channel/stable`
+- Direct download pattern: `https://raw.githubusercontent.com/justrach/kuri/release-channel/stable/<version>/kuri-<version>-<target>.tar.gz`
+
 ### Manual
 
 Download the tarball for your platform from the [stable release manifest](https://raw.githubusercontent.com/justrach/kuri/release-channel/stable/latest.json) and unpack it to your `$PATH`.
@@ -116,6 +125,8 @@ Stable install URL:
 ```sh
 curl -fsSL https://raw.githubusercontent.com/justrach/kuri/release-channel/stable/install.sh | sh
 ```
+
+The manifest includes exact asset URLs plus SHA-256 checksums for `aarch64-linux`, `x86_64-linux`, `aarch64-macos`, and `x86_64-macos`.
 
 ### Build from source
 
