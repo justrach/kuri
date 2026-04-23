@@ -523,18 +523,20 @@ fn cmdAction(arena: std.mem.Allocator, client: *CdpClient, session: *Session, ac
                 jsonError("{s} requires a value", .{action});
                 std.process.exit(1);
             };
+            const escaped_v = try escapeForJsString(arena, v);
             break :blk try std.fmt.allocPrint(arena,
                 "function() {{ this.focus(); this.value = '{s}'; this.dispatchEvent(new Event('input', {{bubbles:true}})); return 'filled'; }}",
-                .{v});
+                .{escaped_v});
         }
         if (std.mem.eql(u8, action, "select")) {
             const v = value orelse {
                 jsonError("select requires a value", .{});
                 std.process.exit(1);
             };
+            const escaped_v = try escapeForJsString(arena, v);
             break :blk try std.fmt.allocPrint(arena,
                 "function() {{ this.value = '{s}'; this.dispatchEvent(new Event('change', {{bubbles:true}})); return 'selected'; }}",
-                .{v});
+                .{escaped_v});
         }
         jsonError("unknown action '{s}'", .{action});
         std.process.exit(1);
@@ -1422,6 +1424,23 @@ fn extractFieldInt(json: []const u8, field: []const u8) ?u32 {
     while (end < json.len and json[end] >= '0' and json[end] <= '9') : (end += 1) {}
     if (end == i) return null;
     return std.fmt.parseInt(u32, json[i..end], 10) catch null;
+}
+
+/// Escape a string for embedding inside a JS single-quoted string literal.
+fn escapeForJsString(arena: std.mem.Allocator, s: []const u8) ![]const u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    const w = buf.writer(arena);
+    for (s) |c| {
+        switch (c) {
+            '\'' => w.writeAll("\\'") catch {},
+            '\\' => w.writeAll("\\\\") catch {},
+            '\n' => w.writeAll("\\n") catch {},
+            '\r' => w.writeAll("\\r") catch {},
+            '\t' => w.writeAll("\\t") catch {},
+            else => w.writeByte(c) catch {},
+        }
+    }
+    return buf.toOwnedSlice(arena);
 }
 
 /// Escape a string for embedding inside a JSON string value.
