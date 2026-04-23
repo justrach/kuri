@@ -1,5 +1,5 @@
 .{
-    .name = .agentic_browdie,
+    .name = .kuri,
     .version = "0.1.0",
     .dependencies = .{
         .quickjs = .{
