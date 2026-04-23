@@ -1,0 +1,4 @@
+db1266d81320405a9e05c2c2e240bf747d0699f378f88f5f1df36cf4b9330f28  kuri-v0.3.2-aarch64-linux.tar.gz
+6378cf056303ba83e0a9af733d5a621e3c3ed6d903d6fa2d3dfa551ca0ced226  kuri-v0.3.2-aarch64-macos.tar.gz
+41ee039ed2857d4f1ef621b3661c155f33e275d0d604ab85b97b3b21a612f000  kuri-v0.3.2-x86_64-linux.tar.gz
+f5cb3f2a0cf724fa348aa579fd9eb61e7a360dad90ea25fecb62e62c4434f377  kuri-v0.3.2-x86_64-macos.tar.gz
