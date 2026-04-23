@@ -18,7 +18,7 @@ CDP automation · A11y snapshots · HAR recording · Standalone fetcher · Inter
 
 [Quick Start](#-quick-start) · [Benchmarks](#-benchmarks) · [kuri-agent](#-kuri-agent) · [Security Testing](#-security-testing) · [API](#-http-api) · [Changelog](CHANGELOG.md)
 
-> **Why teams switch to Kuri:** 464 KB binary, ~3 ms cold start. In a fresh Google Flights rerun on 2026-04-23, a full `kuri-agent` loop (`go→snap→click→snap→eval`) measured **3,392 tokens**. Cross-tool deltas should be rerun in the same environment before quoting a percentage.
+> **Why teams switch to Kuri:** current Apple Silicon `ReleaseFast` builds stay sub-2 MB per binary, and a fresh Google Flights rerun on 2026-04-23 measured **3,392 tokens** for a full `kuri-agent` loop (`go→snap→click→snap→eval`). Cross-tool deltas should be rerun in the same environment before quoting a percentage.
 
 ---
 
@@ -51,25 +51,28 @@ This rerun came in lower than the previous README sample (`4,110`), so the old b
 
 To refresh the full comparison table, install the optional tools used by `bench/token_benchmark.sh` and rerun it in the same Chrome session.
 
-### Small binary, fast start
+### Binary size and memory
 
-Measured on Apple M3 Pro, macOS 15.3. `kuri` built with `-Doptimize=ReleaseFast`. `agent-browser` v0.20.0.
+Measured on Apple M4 Pro, macOS 26.4.1. Current binaries were built with `-Doptimize=ReleaseFast`.
 
-```
-                        agent-browser        kuri             delta
-                        (v0.20)              (v0.3.1)
-─────────────────────────────────────────────────────────────────────
-CLI binary              6.0 MB               464 KB           13× smaller
-Cold start (--version)  3.4 ms               3.0 ms           ~same
-Install (npm)           33 MB                3.3 MB (3 bins)  10× smaller
-Commands                140+                 40+ endpoints    different focus
-Standalone fetcher      ❌                    ✅ kuri-fetch     no Chrome needed
-Terminal browser        ❌                    ✅ kuri-browse    interactive REPL
-JS engine (no Chrome)   ❌                    ✅ QuickJS        SSR-style DOM
-HTTP API server         ❌ (CLI only)         ✅ kuri           thread-per-conn
-```
+| Binary | Current size |
+|---|---:|
+| `kuri` | 886,920 B (866 KiB) |
+| `kuri-agent` | 594,984 B (581 KiB) |
+| `kuri-browse` | 1,053,176 B (1.00 MiB) |
+| `kuri-fetch` | 1,994,776 B (1.90 MiB) |
 
-> agent-browser exposes a broader browser-control surface. Kuri is intentionally narrower: a lightweight HTTP API and CLI stack optimized for agent integration, token economy, and deployment simplicity.
+### RSS stayed flat across the Zig 0.16 migration
+
+Compared the shipped pre-0.16 macOS release artifact `v0.2.0-rc1` against the current `0.3.1` `ReleaseFast` build over 7 runs with `/usr/bin/time -l`.
+
+| Command | `v0.2.0-rc1` mean max RSS | `0.3.1` mean max RSS | Delta |
+|---|---:|---:|---:|
+| `kuri-fetch --version` | ~2.45 MiB | ~2.45 MiB | ~flat |
+| `kuri-browse --version` | ~2.45 MiB | ~2.45 MiB | ~flat |
+| `kuri-fetch --quiet --dump markdown http://example.com/` | 9.12 MiB | 9.17 MiB | +48 KiB (+0.5%) |
+
+Direct source rebuild with `zig 0.15.2` is currently blocked on this macOS release, so the baseline here is the shipped pre-0.16 artifact rather than a local rebuild.
 
 ## The Problem
 
