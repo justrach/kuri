@@ -5,7 +5,7 @@
 <h1 align="center">Kuri 🌰</h1>
 
 <p align="center">
-  <a href="https://github.com/justrach/kuri/releases/latest"><img src="https://img.shields.io/github/v/release/justrach/kuri?style=flat-square" alt="Release"></a>
+  <a href="https://raw.githubusercontent.com/justrach/kuri/release-channel/stable/latest.json"><img src="https://img.shields.io/badge/stable-v0.3.1-brightgreen?style=flat-square" alt="Stable release"></a>
   <a href="https://github.com/justrach/kuri/blob/main/LICENSE"><img src="https://img.shields.io/github/license/justrach/kuri?style=flat-square" alt="License"></a>
   <img src="https://img.shields.io/badge/zig-0.16.0-f7a41d?style=flat-square" alt="Zig">
   <img src="https://img.shields.io/badge/node__modules-0_files-brightgreen?style=flat-square" alt="node_modules">
@@ -96,7 +96,7 @@ curl -fsSL https://raw.githubusercontent.com/justrach/kuri/main/install.sh | sh
 ```
 
 Detects your platform, downloads the right binary, installs to `~/.local/bin`.
-macOS binaries are notarized — no Gatekeeper prompt.
+Downloads come from Kuri's self-managed `release-channel` branch, not GitHub Releases. macOS binaries are signed and notarized.
 
 ### bun / npm
 
@@ -109,7 +109,13 @@ Downloads the correct native binary for your platform at install time.
 
 ### Manual
 
-Download the tarball for your platform from [GitHub Releases](https://github.com/justrach/kuri/releases/latest) and unpack it to your `$PATH`.
+Download the tarball for your platform from the [stable release manifest](https://raw.githubusercontent.com/justrach/kuri/release-channel/stable/latest.json) and unpack it to your `$PATH`.
+
+Stable install URL:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/justrach/kuri/release-channel/stable/install.sh | sh
+```
 
 ### Build from source
 

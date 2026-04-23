@@ -36,6 +36,12 @@ jobs:
   # ── macOS arm64: build + sign + notarize on real macOS runner ───────────────
   build-macos-arm:
     runs-on: macos-latest
+    env:
+      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
     steps:
       - uses: actions/checkout@v4
       - uses: mlugg/setup-zig@v2
@@ -46,12 +52,6 @@ jobs:
 
       - name: Sign & notarize
         if: ${{ env.APPLE_CERTIFICATE != '' }}
-        env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
         run: |
           KEYCHAIN="build-$(uuidgen).keychain"
           KEYCHAIN_PASS="$(uuidgen)"
@@ -89,6 +89,12 @@ jobs:
   # ── macOS x86_64: build + sign + notarize ───────────────────────────────────
   build-macos-x86:
     runs-on: macos-13
+    env:
+      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
     steps:
       - uses: actions/checkout@v4
       - uses: mlugg/setup-zig@v2
@@ -99,12 +105,6 @@ jobs:
 
       - name: Sign & notarize
         if: ${{ env.APPLE_CERTIFICATE != '' }}
-        env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
         run: |
           KEYCHAIN="build-$(uuidgen).keychain"
           KEYCHAIN_PASS="$(uuidgen)"
@@ -139,32 +139,85 @@ jobs:
           name: kuri-x86_64-macos
           path: dist/*.tar.gz
 
-  # ── Create GitHub Release with all artifacts ─────────────────────────────────
-  release:
+  # ── Publish self-managed release channel ────────────────────────────────────
+  publish-channel:
     needs: [build-linux, build-macos-arm, build-macos-x86]
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: release-channel
+          path: channel
       - uses: actions/download-artifact@v4
         with:
           merge-multiple: true
           path: dist
-      - uses: softprops/action-gh-release@v2
-        with:
-          files: dist/*.tar.gz
-          prerelease: ${{ contains(github.ref_name, 'rc') }}
-          generate_release_notes: true
-          body: |
-            ## Install
+      - name: Publish stable channel
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME}"
+          CHANNEL_DIR="channel/stable/${VERSION}"
+          mkdir -p "$CHANNEL_DIR"
+          cp dist/*.tar.gz "$CHANNEL_DIR/"
 
-            **curl (macOS / Linux):**
-            ```sh
-            curl -fsSL https://raw.githubusercontent.com/justrach/kuri/main/install.sh | sh
-            ```
+          python3 - <<'PY'
+          from pathlib import Path
+          import datetime
+          import hashlib
+          import json
+          import os
 
-            **bun / npm:**
-            ```sh
-            bun install -g kuri-agent
-            # or: npm install -g kuri-agent
-            ```
+          version = os.environ["GITHUB_REF_NAME"]
+          commit = os.environ["GITHUB_SHA"]
+          root = Path("channel")
+          version_dir = root / "stable" / version
+          base = "https://raw.githubusercontent.com/justrach/kuri/release-channel/stable"
+          assets = {}
 
-            **Manual:** download the tarball for your platform below, unpack to your `$PATH`.
+          for path in sorted(version_dir.glob("kuri-*.tar.gz")):
+              target = path.name.removeprefix(f"kuri-{version}-").removesuffix(".tar.gz")
+              assets[target] = {
+                  "url": f"{base}/{version}/{path.name}",
+                  "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                  "size": path.stat().st_size,
+                  "notarized": target.endswith("macos"),
+              }
+
+          manifest = {
+              "channel": "stable",
+              "version": version,
+              "commit": commit,
+              "published_at": datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+              "install_url": f"{base}/install.sh",
+              "assets": assets,
+          }
+
+          (root / "stable" / "latest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+          (version_dir / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+          with (version_dir / "sha256sums.txt").open("w") as out:
+              for target, meta in assets.items():
+                  out.write(f"{meta['sha256']}  kuri-{version}-{target}.tar.gz\n")
+          PY
+
+          cat > channel/README.md <<'EOF'
+          # Kuri Release Channel
+
+          Self-managed release channel for `justrach/kuri`. This branch intentionally does not use GitHub Releases.
+
+          ## Stable
+
+          ```sh
+          curl -fsSL https://raw.githubusercontent.com/justrach/kuri/release-channel/stable/install.sh | sh
+          ```
+
+          Manifest:
+
+          - https://raw.githubusercontent.com/justrach/kuri/release-channel/stable/latest.json
+          EOF
+
+          cd channel
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add README.md stable
+          git commit -m "release: publish stable ${VERSION}" || exit 0
+          git push origin HEAD:release-channel
