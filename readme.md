@@ -16,7 +16,7 @@
 
 CDP automation · A11y snapshots · HAR recording · Standalone fetcher · Interactive terminal browser · Agentic CLI · Security testing
 
-[Quick Start](#-quick-start) · [Benchmarks](#-benchmarks) · [kuri-agent](#-kuri-agent) · [Security Testing](#-security-testing) · [API](#-http-api) · [Changelog](CHANGELOG.md)
+[Quick Start](#-quick-start) · [Benchmarks](#-benchmarks) · [kuri-agent](#-kuri-agent) · [Security Testing](#-security-testing) · [API](#-http-api) · [Skills](#-skills) · [Changelog](CHANGELOG.md)
 
 > **Why teams switch to Kuri:** current Apple Silicon `ReleaseFast` builds stay sub-2 MB per binary, and a fresh Google Flights rerun on 2026-04-23 measured **3,392 tokens** for a full `kuri-agent` loop (`go→snap→click→snap→eval`). Cross-tool deltas should be rerun in the same environment before quoting a percentage.
 
@@ -158,6 +158,26 @@ curl -s http://127.0.0.1:8080/discover
 curl -s http://127.0.0.1:8080/tabs
 ```
 
+### Session-first agent loop
+
+For agent-style HTTP usage, prefer a session header plus `/tab/new`, `/page/info`, and `/snapshot` instead of repeating `tab_id` on every call.
+
+```bash
+SESSION=hn-demo
+BASE=http://127.0.0.1:8080
+
+curl -s -H "X-Kuri-Session: $SESSION" \
+  "$BASE/tab/new?url=https%3A%2F%2Fnews.ycombinator.com"
+
+curl -s -H "X-Kuri-Session: $SESSION" "$BASE/page/info"
+SNAP=$(curl -s -H "X-Kuri-Session: $SESSION" "$BASE/snapshot?filter=interactive")
+MORE_REF=$(printf '%s' "$SNAP" | python3 -c 'import json,sys; nodes=json.load(sys.stdin); print(next(n["ref"] for n in nodes if n.get("name") == "More"))')
+curl -s -H "X-Kuri-Session: $SESSION" "$BASE/action?action=click&ref=$MORE_REF"
+curl -s -H "X-Kuri-Session: $SESSION" "$BASE/page/info"
+```
+
+There is also a thin experimental wrapper at `tools/kuri_harness.py` if you want Python helpers on top of the same HTTP surface.
+
 If you already have Chrome running with remote debugging, set `CDP_URL` to either the WebSocket or HTTP endpoint:
 
 ```bash
@@ -199,6 +219,8 @@ All endpoints return JSON. Optional auth via `KURI_SECRET` env var.
 | `GET /health` | Server status, tab count, version |
 | `GET /tabs` | List all registered tabs |
 | `GET /discover` | Auto-discover Chrome tabs via CDP |
+| `GET /tab/current` | Get or set the current tab for an `X-Kuri-Session` |
+| `GET /page/info` | Live URL/title/ready-state/viewport/scroll for the active tab |
 | `GET /browdie` | 🌰 (easter egg) |
 
 ### Browser Control
@@ -206,8 +228,8 @@ All endpoints return JSON. Optional auth via `KURI_SECRET` env var.
 | Path | Params | Description |
 |------|--------|-------------|
 | `GET /navigate` | `tab_id`, `url` | Navigate tab to URL |
-| `GET /tab/new` | `url` | Create a new tab |
-| `GET /window/new` | `url` | Create a new window/tab target |
+| `GET /tab/new` | `url`, `activate`, `wait` | Create a new tab and optionally hydrate/set current tab |
+| `GET /window/new` | `url`, `activate`, `wait` | Create a new window/tab target |
 | `GET /snapshot` | `tab_id`, `filter`, `format` | A11y tree snapshot with `eN` refs |
 | `GET /text` | `tab_id` | Extract page text |
 | `GET /screenshot` | `tab_id`, `format`, `quality` | Capture screenshot (base64) |
@@ -263,6 +285,30 @@ All endpoints return JSON. Optional auth via `KURI_SECRET` env var.
 On macOS, auth profile secrets are stored in the user Keychain. On other platforms, Kuri falls back to `.kuri/auth-profiles/`.
 
 `url` and `expression` query params are percent-decoded by the server, so encoded values like `https%3A%2F%2Fexample.com` are accepted.
+If you send `X-Kuri-Session: my-agent`, Kuri can keep the current tab server-side so later calls can omit `tab_id`.
+
+### Agent-friendly loop
+
+The lowest-friction server loop is:
+
+1. `GET /tab/new?url=...`
+2. `GET /page/info`
+3. `GET /snapshot?filter=interactive`
+4. `GET /action?action=click&ref=eN`
+5. Repeat `page/info` or `snapshot` after state changes
+
+After any navigation or significant interaction, take a fresh snapshot before using refs again.
+
+---
+
+## 🧠 Skills
+
+The repo includes a user-extensible skill area:
+
+- `skills/kuri-skill.md` is the base Kuri HTTP-agent skill
+- `skills/custom/` is reserved for your own project-specific skills
+- `skills/custom/hackernews-page-2.md` is a concrete example custom skill
+- `.claude/skills/kuri-server/SKILL.md` stays in sync for Claude-style repo skills
 
 ### Advanced
 
