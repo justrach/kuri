@@ -5,7 +5,7 @@ const markdown = @import("crawler/markdown.zig");
 const js_engine = @import("js_engine.zig");
 const http_fetch = @import("util/http_fetch.zig");
 
-const version = "0.2.0";
+const version = "0.3.1";
 
 pub fn main(init: std.process.Init.Minimal) !void {
     var gpa_impl: std.heap.DebugAllocator(.{}) = .init;

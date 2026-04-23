@@ -2,6 +2,14 @@
 
 All notable changes to kuri are documented here.
 
+## [0.3.1] — 2026-04-23
+
+### Maintenance
+- **Zig 0.16 migration stabilization** — build, test, and startup paths updated for Zig 0.16 across local and GitHub Actions environments
+- **CI portability fixes** — Linux libc linking, Chrome startup, and validator compatibility regressions resolved
+- **Benchmark refresh** — README benchmark section updated with a fresh `kuri` rerun from `bench/token_benchmark.sh`
+- **Version sync** — runtime strings, package metadata, and docs aligned to `0.3.1`
+
 ## [0.4.0] — 2026-04-10
 
 ### Stealth & Anti-Bot Evasion

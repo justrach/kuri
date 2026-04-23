@@ -341,7 +341,7 @@ fn readRequestBody(request: *std.http.Server.Request, arena: std.mem.Allocator) 
 
 fn handleHealth(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
     const tab_count = bridge.tabCount();
-    const body = std.fmt.allocPrint(arena, "{{\"ok\":true,\"tabs\":{d},\"version\":\"0.1.0\",\"name\":\"kuri\"}}", .{tab_count}) catch {
+    const body = std.fmt.allocPrint(arena, "{{\"ok\":true,\"tabs\":{d},\"version\":\"0.3.1\",\"name\":\"kuri\"}}", .{tab_count}) catch {
         resp.sendError(request, 500, "Internal Server Error");
         return;
     };
@@ -1074,7 +1074,7 @@ fn handleBrowdie(request: *std.http.Server.Request) void {
         \\"vibe":"not just a bro, not just a baddie — a browdie.",
         \\"powers":["sees the web through a11y trees","97% token reduction","stealth mode UA rotation","zero node_modules"],
         \\"catchphrase":"she browses different.",
-        \\"built_with":"zig 0.15.1 btw"}
+        \\"built_with":"zig 0.16.0 btw"}
     ;
     resp.sendJson(request, browdie);
 }

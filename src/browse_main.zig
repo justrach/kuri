@@ -4,7 +4,7 @@ const markdown = @import("crawler/markdown.zig");
 const validator = @import("crawler/validator.zig");
 const http_fetch = @import("util/http_fetch.zig");
 
-const version = "0.1.0";
+const version = "0.3.1";
 const user_agent = "kuri-browse/" ++ version;
 
 pub fn main(init: std.process.Init.Minimal) !void {

@@ -218,7 +218,7 @@ fn benchEventBuffer() void {
 
     for (0..32) |_| {
         const ev = gpa.dupe(u8, "{\"method\":\"Network.dataReceived\",\"params\":{}}") catch return;
-        buf.push(ev);
+        buf.push(gpa, ev);
     }
     std.mem.doNotOptimizeAway(buf.hasEvent("Page.loadEventFired"));
     std.mem.doNotOptimizeAway(buf.hasEvent("Network.dataReceived"));
