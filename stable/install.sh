@@ -94,7 +94,8 @@ case ":$PATH:" in
 esac
 
 echo "Quick start:"
-echo "  kuri --help"
-echo "  kuri-agent tabs"
+echo "  kuri-agent tabs          # list Chrome tabs"
+echo "  kuri-agent use <ws_url>  # attach to a tab"
+echo "  kuri-agent snap          # compact a11y snapshot (~2.8k tokens)"
 echo ""
 echo "Docs: https://github.com/${REPO}"
