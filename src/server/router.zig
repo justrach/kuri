@@ -84,6 +84,8 @@ fn route(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *B
         handleHealth(request, arena, bridge);
     } else if (std.mem.eql(u8, clean_path, "/tabs")) {
         handleTabs(request, arena, bridge);
+    } else if (std.mem.eql(u8, clean_path, "/page/info")) {
+        handlePageInfo(request, arena, bridge);
     } else if (std.mem.eql(u8, clean_path, "/discover")) {
         handleDiscover(request, arena, bridge, cfg, cdp_port);
     } else if (std.mem.eql(u8, clean_path, "/navigate")) {
@@ -210,8 +212,10 @@ fn route(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *B
         handleKeyUp(request, arena, bridge);
     } else if (std.mem.eql(u8, clean_path, "/wait")) {
         handleWait(request, arena, bridge);
+    } else if (std.mem.eql(u8, clean_path, "/tab/current")) {
+        handleTabCurrent(request, arena, bridge);
     } else if (std.mem.eql(u8, clean_path, "/tab/new")) {
-        handleTabNew(request, arena, bridge);
+        handleTabNew(request, arena, bridge, cfg, cdp_port);
     } else if (std.mem.eql(u8, clean_path, "/tab/close")) {
         handleTabClose(request, arena, bridge);
     } else if (std.mem.eql(u8, clean_path, "/highlight")) {
@@ -237,7 +241,7 @@ fn route(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *B
     } else if (std.mem.eql(u8, clean_path, "/inspect")) {
         handleInspect(request, arena, bridge);
     } else if (std.mem.eql(u8, clean_path, "/window/new")) {
-        handleWindowNew(request, arena, bridge);
+        handleWindowNew(request, arena, bridge, cfg, cdp_port);
     } else if (std.mem.eql(u8, clean_path, "/session/list")) {
         handleSessionList(request, arena, bridge);
     } else if (std.mem.eql(u8, clean_path, "/set/viewport")) {
@@ -323,6 +327,79 @@ fn getDecodedQueryParamAlloc(allocator: std.mem.Allocator, target: []const u8, k
     return decodeUrlComponentAlloc(allocator, value);
 }
 
+fn getHeaderValue(request: *const std.http.Server.Request, key: []const u8) ?[]const u8 {
+    var it = request.iterateHeaders();
+    while (it.next()) |header| {
+        if (std.ascii.eqlIgnoreCase(header.name, key)) {
+            return header.value;
+        }
+    }
+    return null;
+}
+
+fn getSessionId(request: *const std.http.Server.Request) ?[]const u8 {
+    return getHeaderValue(request, "x-kuri-session") orelse getQueryParam(request.head.target, "session");
+}
+
+fn resolveEffectiveTabIdAlloc(arena: std.mem.Allocator, request: *const std.http.Server.Request, bridge: *Bridge) ?[]u8 {
+    const target = request.head.target;
+    if (getQueryParam(target, "tab_id")) |tab_id| {
+        return arena.dupe(u8, tab_id) catch null;
+    }
+    const session_id = getSessionId(request) orelse return null;
+    return bridge.getCurrentTab(arena, session_id);
+}
+
+fn requireEffectiveTabId(arena: std.mem.Allocator, request: *std.http.Server.Request, bridge: *Bridge) ?[]u8 {
+    return resolveEffectiveTabIdAlloc(arena, request, bridge) orelse {
+        resp.sendError(request, 400, "Missing tab_id parameter and no current tab is set for this session");
+        return null;
+    };
+}
+
+fn rememberCurrentTab(request: *const std.http.Server.Request, bridge: *Bridge, tab_id: []const u8) void {
+    const session_id = getSessionId(request) orelse return;
+    bridge.setCurrentTab(session_id, tab_id) catch {};
+}
+
+fn anyCdpClient(arena: std.mem.Allocator, bridge: *Bridge, preferred_tab_id: ?[]const u8) ?*CdpClient {
+    if (preferred_tab_id) |tab_id| {
+        if (bridge.getCdpClient(tab_id)) |client| return client;
+    }
+    const tabs = bridge.listTabs(arena) catch return null;
+    for (tabs) |tab| {
+        if (preferred_tab_id) |preferred| {
+            if (std.mem.eql(u8, preferred, tab.id)) continue;
+        }
+        if (bridge.getCdpClient(tab.id)) |client| return client;
+    }
+    return null;
+}
+
+fn activateTarget(arena: std.mem.Allocator, bridge: *Bridge, tab_id: []const u8) bool {
+    const client = anyCdpClient(arena, bridge, tab_id) orelse return false;
+    const params = std.fmt.allocPrint(arena, "{{\"targetId\":\"{s}\"}}", .{tab_id}) catch return false;
+    _ = client.send(arena, protocol.Methods.target_activate_target, params) catch return false;
+    return true;
+}
+
+fn closeTarget(arena: std.mem.Allocator, bridge: *Bridge, tab_id: []const u8) bool {
+    const client = anyCdpClient(arena, bridge, tab_id) orelse return false;
+    const params = std.fmt.allocPrint(arena, "{{\"targetId\":\"{s}\"}}", .{tab_id}) catch return false;
+    _ = client.send(arena, protocol.Methods.target_close_target, params) catch return false;
+    return true;
+}
+
+fn waitForRegisteredTab(arena: std.mem.Allocator, bridge: *Bridge, cfg: Config, cdp_port: u16, tab_id: []const u8) ?TabEntry {
+    var attempts: u8 = 0;
+    while (attempts < 20) : (attempts += 1) {
+        _ = discoverTabs(arena, bridge, cfg, cdp_port) catch {};
+        if (bridge.getTab(tab_id)) |tab| return tab;
+        compat.threadSleep(100 * std.time.ns_per_ms);
+    }
+    return bridge.getTab(tab_id);
+}
+
 fn readRequestBody(request: *std.http.Server.Request, arena: std.mem.Allocator) ?[]const u8 {
     if (!request.head.method.requestHasBody()) return null;
     if (request.head.expect != null) return null;
@@ -353,6 +430,7 @@ fn handleTabs(request: *std.http.Server.Request, arena: std.mem.Allocator, bridg
         resp.sendError(request, 500, "Internal Server Error");
         return;
     };
+    const current_tab_id = if (getSessionId(request)) |session_id| bridge.getCurrentTab(arena, session_id) else null;
     var json_buf: std.ArrayList(u8) = .empty;
 
     json_buf.appendSlice(arena, "[") catch return;
@@ -364,6 +442,10 @@ fn handleTabs(request: *std.http.Server.Request, arena: std.mem.Allocator, bridg
         writeJsonField(&json_buf, arena, "url", tab.url) catch return;
         json_buf.appendSlice(arena, ",") catch return;
         writeJsonField(&json_buf, arena, "title", tab.title) catch return;
+        if (current_tab_id) |current| {
+            json_buf.appendSlice(arena, ",\"current\":") catch return;
+            json_buf.appendSlice(arena, if (std.mem.eql(u8, current, tab.id)) "true" else "false") catch return;
+        }
         json_buf.appendSlice(arena, "}") catch return;
     }
     json_buf.appendSlice(arena, "]") catch return;
@@ -390,7 +472,7 @@ fn handleNavigate(request: *std.http.Server.Request, arena: std.mem.Allocator, b
         return;
     };
 
-    const tab_id = getQueryParam(target, "tab_id");
+    const tab_id = resolveEffectiveTabIdAlloc(arena, request, bridge);
     const cf_wait = if (getQueryParam(target, "cf_wait")) |v| std.mem.eql(u8, v, "true") else false;
     const cf_timeout_str = getQueryParam(target, "cf_timeout") orelse "15000";
     const cf_timeout_ms = std.fmt.parseInt(u64, cf_timeout_str, 10) catch 15000;
@@ -406,6 +488,11 @@ fn handleNavigate(request: *std.http.Server.Request, arena: std.mem.Allocator, b
             resp.sendError(request, 404, "Tab not found");
             return;
         };
+        rememberCurrentTab(request, bridge, tid);
+        if (bridge.getTab(tid)) |tab| {
+            _ = bridge.updateTabMetadata(tid, url, tab.title) catch false;
+        }
+        _ = bridge.touchTab(tid);
         const params = std.fmt.allocPrint(arena, "{{\"url\":\"{s}\"}}", .{escaped_url}) catch {
             resp.sendError(request, 500, "Internal Server Error");
             return;
@@ -531,12 +618,118 @@ fn handleNavigate(request: *std.http.Server.Request, arena: std.mem.Allocator, b
     resp.sendJson(request, body);
 }
 
-fn handleSnapshot(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
+fn handlePageInfo(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
     const target = request.head.target;
-    const tab_id = getQueryParam(target, "tab_id") orelse {
-        resp.sendError(request, 400, "Missing tab_id parameter");
+    const tab_id = requireEffectiveTabId(arena, request, bridge) orelse return;
+    const client = bridge.getCdpClient(tab_id) orelse {
+        resp.sendError(request, 404, "Tab not found");
         return;
     };
+
+    rememberCurrentTab(request, bridge, tab_id);
+    _ = bridge.touchTab(tab_id);
+
+    const info_expr =
+        \\(() => {
+        \\  const enc = encodeURIComponent;
+        \\  return [
+        \\    enc(window.location.href || ''),
+        \\    enc(document.title || ''),
+        \\    enc(document.readyState || ''),
+        \\    String(window.innerWidth || 0),
+        \\    String(window.innerHeight || 0),
+        \\    String(Math.round(window.scrollX || 0)),
+        \\    String(Math.round(window.scrollY || 0))
+        \\  ].join('|');
+        \\})()
+    ;
+    const escaped_expr = jsonEscapeAlloc(arena, info_expr) orelse {
+        resp.sendError(request, 500, "Internal Server Error");
+        return;
+    };
+    const params = std.fmt.allocPrint(arena, "{{\"expression\":\"{s}\",\"returnByValue\":true}}", .{escaped_expr}) catch {
+        resp.sendError(request, 500, "Internal Server Error");
+        return;
+    };
+    const response = client.send(arena, protocol.Methods.runtime_evaluate, params) catch {
+        resp.sendError(request, 502, "CDP command failed");
+        return;
+    };
+    const encoded = extractSimpleJsonString(response, 0, "\"value\"") orelse {
+        resp.sendError(request, 500, "Could not parse page info");
+        return;
+    };
+
+    var parts = std.mem.splitScalar(u8, encoded, '|');
+    const url_encoded = parts.next() orelse "";
+    const title_encoded = parts.next() orelse "";
+    const ready_encoded = parts.next() orelse "";
+    const width_raw = parts.next() orelse "0";
+    const height_raw = parts.next() orelse "0";
+    const scroll_x_raw = parts.next() orelse "0";
+    const scroll_y_raw = parts.next() orelse "0";
+
+    const live_url = decodeUrlComponentAlloc(arena, url_encoded) orelse {
+        resp.sendError(request, 500, "Could not decode page URL");
+        return;
+    };
+    const live_title = decodeUrlComponentAlloc(arena, title_encoded) orelse {
+        resp.sendError(request, 500, "Could not decode page title");
+        return;
+    };
+    const ready_state = decodeUrlComponentAlloc(arena, ready_encoded) orelse {
+        resp.sendError(request, 500, "Could not decode readyState");
+        return;
+    };
+
+    const viewport_width = std.fmt.parseInt(i64, width_raw, 10) catch 0;
+    const viewport_height = std.fmt.parseInt(i64, height_raw, 10) catch 0;
+    const scroll_x = std.fmt.parseInt(i64, scroll_x_raw, 10) catch 0;
+    const scroll_y = std.fmt.parseInt(i64, scroll_y_raw, 10) catch 0;
+    _ = bridge.updateTabMetadata(tab_id, live_url, live_title) catch false;
+
+    const include_frames = if (getQueryParam(target, "include")) |include|
+        std.mem.indexOf(u8, include, "frames") != null
+    else
+        false;
+    const is_current = if (getSessionId(request)) |session_id| blk: {
+        const current = bridge.getCurrentTab(arena, session_id) orelse break :blk false;
+        break :blk std.mem.eql(u8, current, tab_id);
+    } else false;
+
+    var json_buf: std.ArrayList(u8) = .empty;
+    json_buf.appendSlice(arena, "{") catch return;
+    writeJsonField(&json_buf, arena, "tab_id", tab_id) catch return;
+    json_buf.appendSlice(arena, ",") catch return;
+    writeJsonField(&json_buf, arena, "url", live_url) catch return;
+    json_buf.appendSlice(arena, ",") catch return;
+    writeJsonField(&json_buf, arena, "title", live_title) catch return;
+    json_buf.appendSlice(arena, ",") catch return;
+    writeJsonField(&json_buf, arena, "ready_state", ready_state) catch return;
+    json_buf.print(arena, ",\"viewport_width\":{d},\"viewport_height\":{d},\"scroll_x\":{d},\"scroll_y\":{d},\"current\":{s}", .{
+        viewport_width,
+        viewport_height,
+        scroll_x,
+        scroll_y,
+        if (is_current) "true" else "false",
+    }) catch return;
+
+    if (include_frames) {
+        _ = client.send(arena, protocol.Methods.page_enable, null) catch {};
+        const frames_response = client.send(arena, protocol.Methods.page_get_frame_tree, null) catch null;
+        if (frames_response) |raw_frames| {
+            json_buf.appendSlice(arena, ",\"frames\":") catch return;
+            json_buf.appendSlice(arena, raw_frames) catch return;
+        }
+    }
+
+    json_buf.appendSlice(arena, "}") catch return;
+    resp.sendJson(request, json_buf.items);
+}
+
+fn handleSnapshot(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
+    const target = request.head.target;
+    const tab_id = requireEffectiveTabId(arena, request, bridge) orelse return;
     const filter = getQueryParam(target, "filter");
     const format = getQueryParam(target, "format");
     const depth_str = getQueryParam(target, "depth");
@@ -545,6 +738,8 @@ fn handleSnapshot(request: *std.http.Server.Request, arena: std.mem.Allocator, b
         resp.sendError(request, 404, "Tab not found");
         return;
     };
+    rememberCurrentTab(request, bridge, tab_id);
+    _ = bridge.touchTab(tab_id);
 
     // Get full a11y tree from Chrome
     const raw_response = client.send(arena, protocol.Methods.accessibility_get_full_tree, null) catch {
@@ -654,18 +849,12 @@ fn sendSnapshotResponse(request: *std.http.Server.Request, arena: std.mem.Alloca
 
 fn handleAction(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
     const target = request.head.target;
-    const tab_id = getQueryParam(target, "tab_id") orelse {
-        resp.sendError(request, 400, "Missing tab_id parameter");
-        return;
-    };
+    const tab_id = requireEffectiveTabId(arena, request, bridge) orelse return;
     const action = getQueryParam(target, "action") orelse {
         resp.sendError(request, 400, "Missing action parameter");
         return;
     };
-    const ref = getQueryParam(target, "ref") orelse {
-        resp.sendError(request, 400, "Missing ref parameter (e.g. e0, e1)");
-        return;
-    };
+    const ref = getQueryParam(target, "ref");
     const value = getDecodedQueryParamAlloc(arena, target, "value");
     const realistic = getQueryParam(target, "realistic");
 
@@ -673,13 +862,18 @@ fn handleAction(request: *std.http.Server.Request, arena: std.mem.Allocator, bri
         resp.sendError(request, 404, "Tab not found");
         return;
     };
+    rememberCurrentTab(request, bridge, tab_id);
+    _ = bridge.touchTab(tab_id);
 
     // Look up the ref in the snapshot cache to get the backend node ID
     bridge.mu.lockShared();
     const cache = bridge.snapshots.get(tab_id);
     bridge.mu.unlockShared();
 
-    const node_id = if (cache) |c| c.refs.get(ref) else null;
+    const node_id = if (ref) |ref_id|
+        if (cache) |c| c.refs.get(ref_id) else null
+    else
+        null;
 
     // Build the appropriate CDP command based on action
     const actions = @import("../cdp/actions.zig");
@@ -687,6 +881,10 @@ fn handleAction(request: *std.http.Server.Request, arena: std.mem.Allocator, bri
         resp.sendError(request, 400, "Unknown action type");
         return;
     };
+    if (kind != .scroll and kind != .press and ref == null) {
+        resp.sendError(request, 400, "Missing ref parameter (e.g. e0, e1)");
+        return;
+    }
 
     // For scroll and press, no element reference needed
     if (kind == .scroll) {
@@ -964,15 +1162,14 @@ fn handleAction(request: *std.http.Server.Request, arena: std.mem.Allocator, bri
 
 fn handleText(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
     const target = request.head.target;
-    const tab_id = getQueryParam(target, "tab_id") orelse {
-        resp.sendError(request, 400, "Missing tab_id parameter");
-        return;
-    };
+    const tab_id = requireEffectiveTabId(arena, request, bridge) orelse return;
 
     const client = bridge.getCdpClient(tab_id) orelse {
         resp.sendError(request, 404, "Tab not found");
         return;
     };
+    rememberCurrentTab(request, bridge, tab_id);
+    _ = bridge.touchTab(tab_id);
 
     const selector = getDecodedQueryParamAlloc(arena, target, "selector");
     const params = if (selector) |sel| blk: {
@@ -997,10 +1194,7 @@ fn handleText(request: *std.http.Server.Request, arena: std.mem.Allocator, bridg
 
 fn handleScreenshot(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
     const target = request.head.target;
-    const tab_id = getQueryParam(target, "tab_id") orelse {
-        resp.sendError(request, 400, "Missing tab_id parameter");
-        return;
-    };
+    const tab_id = requireEffectiveTabId(arena, request, bridge) orelse return;
     const format = getQueryParam(target, "format") orelse "png";
     const quality = getQueryParam(target, "quality") orelse "80";
     const full = getQueryParam(target, "full");
@@ -1009,6 +1203,8 @@ fn handleScreenshot(request: *std.http.Server.Request, arena: std.mem.Allocator,
         resp.sendError(request, 404, "Tab not found");
         return;
     };
+    rememberCurrentTab(request, bridge, tab_id);
+    _ = bridge.touchTab(tab_id);
 
     const is_full = if (full) |f| std.mem.eql(u8, f, "true") else false;
 
@@ -1031,10 +1227,7 @@ fn handleScreenshot(request: *std.http.Server.Request, arena: std.mem.Allocator,
 
 fn handleEvaluate(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
     const target = request.head.target;
-    const tab_id = getQueryParam(target, "tab_id") orelse {
-        resp.sendError(request, 400, "Missing tab_id parameter");
-        return;
-    };
+    const tab_id = requireEffectiveTabId(arena, request, bridge) orelse return;
     const expr_decoded = getDecodedQueryParamAlloc(arena, target, "expression") orelse {
         resp.sendError(request, 400, "Missing expression parameter");
         return;
@@ -1048,6 +1241,8 @@ fn handleEvaluate(request: *std.http.Server.Request, arena: std.mem.Allocator, b
         resp.sendError(request, 404, "Tab not found");
         return;
     };
+    rememberCurrentTab(request, bridge, tab_id);
+    _ = bridge.touchTab(tab_id);
 
     const escaped_expr = jsonEscapeAlloc(arena, expr) orelse {
         resp.sendError(request, 500, "Internal Server Error");
@@ -1683,22 +1878,31 @@ fn handleInterceptStop(request: *std.http.Server.Request, arena: std.mem.Allocat
 // ── Close / Cleanup Endpoint ────────────────────────────────────────────
 
 fn handleClose(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
-    const target = request.head.target;
-    const tab_id = getQueryParam(target, "tab_id");
+    const tab_id = resolveEffectiveTabIdAlloc(arena, request, bridge);
 
     if (tab_id) |tid| {
-        // Close a specific tab — disconnect CDP, remove from registry
+        const closed_in_chrome = closeTarget(arena, bridge, tid);
         bridge.removeTab(tid);
-        const body = std.fmt.allocPrint(arena, "{{\"closed\":\"{s}\",\"remaining_tabs\":{d}}}", .{ tid, bridge.tabCount() }) catch {
+        const body = std.fmt.allocPrint(arena, "{{\"closed\":\"{s}\",\"remaining_tabs\":{d},\"cdp_closed\":{s}}}", .{
+            tid,
+            bridge.tabCount(),
+            if (closed_in_chrome) "true" else "false",
+        }) catch {
             resp.sendError(request, 500, "Internal Server Error");
             return;
         };
         resp.sendJson(request, body);
     } else {
-        // Close all tabs
-        const count = bridge.tabCount();
-        // Can't iterate+remove safely, so just report
-        const body = std.fmt.allocPrint(arena, "{{\"status\":\"close_all\",\"tabs_closed\":{d}}}", .{count}) catch {
+        const tabs = bridge.listTabs(arena) catch {
+            resp.sendError(request, 500, "Failed to list tabs");
+            return;
+        };
+        var closed: usize = 0;
+        for (tabs) |tab| {
+            if (closeTarget(arena, bridge, tab.id)) closed += 1;
+            bridge.removeTab(tab.id);
+        }
+        const body = std.fmt.allocPrint(arena, "{{\"status\":\"close_all\",\"tabs_closed\":{d},\"cdp_closed\":{d}}}", .{ tabs.len, closed }) catch {
             resp.sendError(request, 500, "Internal Server Error");
             return;
         };
@@ -1868,10 +2072,7 @@ fn buildGetExpression(arena: std.mem.Allocator, query_type: []const u8, selector
 
 fn handleGet(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
     const target = request.head.target;
-    const tab_id = getQueryParam(target, "tab_id") orelse {
-        resp.sendError(request, 400, "Missing tab_id parameter");
-        return;
-    };
+    const tab_id = requireEffectiveTabId(arena, request, bridge) orelse return;
     const query_type = getQueryParam(target, "type") orelse {
         resp.sendError(request, 400, "Missing type parameter (html|value|attr|title|url|count|box|styles)");
         return;
@@ -1883,6 +2084,8 @@ fn handleGet(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge
         resp.sendError(request, 404, "Tab not found");
         return;
     };
+    rememberCurrentTab(request, bridge, tab_id);
+    _ = bridge.touchTab(tab_id);
 
     // For "attr" type, validate the attr param early
     if (std.mem.eql(u8, query_type, "attr") and attr_name == null) {
@@ -1910,15 +2113,13 @@ fn handleGet(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge
 // ── Navigation Endpoints ────────────────────────────────────────────────
 
 fn handleBack(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
-    const target = request.head.target;
-    const tab_id = getQueryParam(target, "tab_id") orelse {
-        resp.sendError(request, 400, "Missing tab_id parameter");
-        return;
-    };
+    const tab_id = requireEffectiveTabId(arena, request, bridge) orelse return;
     const client = bridge.getCdpClient(tab_id) orelse {
         resp.sendError(request, 404, "Tab not found");
         return;
     };
+    rememberCurrentTab(request, bridge, tab_id);
+    _ = bridge.touchTab(tab_id);
     const params = "{\"expression\":\"history.back() || 'back'\",\"returnByValue\":true}";
     const response = client.send(arena, protocol.Methods.runtime_evaluate, params) catch {
         resp.sendError(request, 502, "CDP command failed");
@@ -1928,15 +2129,13 @@ fn handleBack(request: *std.http.Server.Request, arena: std.mem.Allocator, bridg
 }
 
 fn handleForward(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
-    const target = request.head.target;
-    const tab_id = getQueryParam(target, "tab_id") orelse {
-        resp.sendError(request, 400, "Missing tab_id parameter");
-        return;
-    };
+    const tab_id = requireEffectiveTabId(arena, request, bridge) orelse return;
     const client = bridge.getCdpClient(tab_id) orelse {
         resp.sendError(request, 404, "Tab not found");
         return;
     };
+    rememberCurrentTab(request, bridge, tab_id);
+    _ = bridge.touchTab(tab_id);
     const params = "{\"expression\":\"history.forward() || 'forward'\",\"returnByValue\":true}";
     const response = client.send(arena, protocol.Methods.runtime_evaluate, params) catch {
         resp.sendError(request, 502, "CDP command failed");
@@ -1946,15 +2145,13 @@ fn handleForward(request: *std.http.Server.Request, arena: std.mem.Allocator, br
 }
 
 fn handleReload(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
-    const target = request.head.target;
-    const tab_id = getQueryParam(target, "tab_id") orelse {
-        resp.sendError(request, 400, "Missing tab_id parameter");
-        return;
-    };
+    const tab_id = requireEffectiveTabId(arena, request, bridge) orelse return;
     const client = bridge.getCdpClient(tab_id) orelse {
         resp.sendError(request, 404, "Tab not found");
         return;
     };
+    rememberCurrentTab(request, bridge, tab_id);
+    _ = bridge.touchTab(tab_id);
     const response = client.send(arena, protocol.Methods.page_reload, null) catch {
         resp.sendError(request, 502, "CDP command failed");
         return;
@@ -3718,9 +3915,79 @@ fn handleWait(request: *std.http.Server.Request, arena: std.mem.Allocator, bridg
     }
 }
 
-fn handleTabNew(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
+fn handleTabCurrent(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
+    const session_id = getSessionId(request) orelse {
+        resp.sendError(request, 400, "Missing X-Kuri-Session header or session query parameter");
+        return;
+    };
+    const target = request.head.target;
+    if (getQueryParam(target, "clear")) |clear| {
+        if (std.mem.eql(u8, clear, "true")) {
+            bridge.clearCurrentTab(session_id);
+            const body = std.fmt.allocPrint(arena, "{{\"status\":\"cleared\",\"session\":\"{s}\"}}", .{session_id}) catch {
+                resp.sendError(request, 500, "Internal Server Error");
+                return;
+            };
+            resp.sendJson(request, body);
+            return;
+        }
+    }
+
+    if (getQueryParam(target, "tab_id")) |tab_id| {
+        const tab = bridge.getTab(tab_id) orelse {
+            resp.sendError(request, 404, "Tab not found");
+            return;
+        };
+        if (getQueryParam(target, "activate")) |activate| {
+            if (!std.mem.eql(u8, activate, "false")) {
+                _ = activateTarget(arena, bridge, tab_id);
+            }
+        } else {
+            _ = activateTarget(arena, bridge, tab_id);
+        }
+        bridge.setCurrentTab(session_id, tab_id) catch {
+            resp.sendError(request, 500, "Internal Server Error");
+            return;
+        };
+        const body = std.fmt.allocPrint(arena, "{{\"session\":\"{s}\",\"tab_id\":\"{s}\",\"url\":\"{s}\",\"title\":\"{s}\",\"current\":true}}", .{
+            session_id,
+            tab.id,
+            tab.url,
+            tab.title,
+        }) catch {
+            resp.sendError(request, 500, "Internal Server Error");
+            return;
+        };
+        resp.sendJson(request, body);
+        return;
+    }
+
+    const current_tab_id = bridge.getCurrentTab(arena, session_id) orelse {
+        resp.sendError(request, 404, "No current tab is set for this session");
+        return;
+    };
+    const tab = bridge.getTab(current_tab_id) orelse {
+        bridge.clearCurrentTab(session_id);
+        resp.sendError(request, 404, "Current tab no longer exists");
+        return;
+    };
+    const body = std.fmt.allocPrint(arena, "{{\"session\":\"{s}\",\"tab_id\":\"{s}\",\"url\":\"{s}\",\"title\":\"{s}\",\"current\":true}}", .{
+        session_id,
+        tab.id,
+        tab.url,
+        tab.title,
+    }) catch {
+        resp.sendError(request, 500, "Internal Server Error");
+        return;
+    };
+    resp.sendJson(request, body);
+}
+
+fn handleTabNew(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge, cfg: Config, cdp_port: u16) void {
     const target = request.head.target;
     const url = getDecodedQueryParamAlloc(arena, target, "url") orelse "about:blank";
+    const activate = if (getQueryParam(target, "activate")) |value| !std.mem.eql(u8, value, "false") else true;
+    const wait = if (getQueryParam(target, "wait")) |value| !std.mem.eql(u8, value, "false") else true;
 
     const params = std.fmt.allocPrint(arena, "{{\"url\":\"{s}\"}}", .{url}) catch {
         resp.sendError(request, 500, "Internal Server Error");
@@ -3748,7 +4015,23 @@ fn handleTabNew(request: *std.http.Server.Request, arena: std.mem.Allocator, bri
 
     // Extract targetId from response
     const new_tab_id = extractSimpleJsonString(response, 0, "\"targetId\"") orelse "unknown";
-    const body = std.fmt.allocPrint(arena, "{{\"status\":\"created\",\"tab_id\":\"{s}\",\"url\":\"{s}\"}}", .{ new_tab_id, url }) catch {
+    if (activate and !std.mem.eql(u8, new_tab_id, "unknown")) {
+        _ = activateTarget(arena, bridge, new_tab_id);
+    }
+    const hydrated_tab = if (wait and !std.mem.eql(u8, new_tab_id, "unknown"))
+        waitForRegisteredTab(arena, bridge, cfg, cdp_port, new_tab_id)
+    else
+        null;
+    rememberCurrentTab(request, bridge, new_tab_id);
+    const final_url = if (hydrated_tab) |tab| tab.url else url;
+    const final_title = if (hydrated_tab) |tab| tab.title else "";
+    const body = std.fmt.allocPrint(arena, "{{\"status\":\"created\",\"tab_id\":\"{s}\",\"url\":\"{s}\",\"title\":\"{s}\",\"hydrated\":{s},\"current\":{s}}}", .{
+        new_tab_id,
+        final_url,
+        final_title,
+        if (hydrated_tab != null) "true" else "false",
+        if (getSessionId(request) != null) "true" else "false",
+    }) catch {
         resp.sendError(request, 500, "Internal Server Error");
         return;
     };
@@ -3756,14 +4039,15 @@ fn handleTabNew(request: *std.http.Server.Request, arena: std.mem.Allocator, bri
 }
 
 fn handleTabClose(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
-    const target = request.head.target;
-    const tab_id = getQueryParam(target, "tab_id") orelse {
-        resp.sendError(request, 400, "Missing tab_id parameter");
-        return;
-    };
+    const tab_id = requireEffectiveTabId(arena, request, bridge) orelse return;
 
+    const closed_in_chrome = closeTarget(arena, bridge, tab_id);
     bridge.removeTab(tab_id);
-    const body = std.fmt.allocPrint(arena, "{{\"status\":\"closed\",\"tab_id\":\"{s}\",\"remaining\":{d}}}", .{ tab_id, bridge.tabCount() }) catch {
+    const body = std.fmt.allocPrint(arena, "{{\"status\":\"closed\",\"tab_id\":\"{s}\",\"remaining\":{d},\"cdp_closed\":{s}}}", .{
+        tab_id,
+        bridge.tabCount(),
+        if (closed_in_chrome) "true" else "false",
+    }) catch {
         resp.sendError(request, 500, "Internal Server Error");
         return;
     };
@@ -3955,10 +4239,7 @@ fn handleSetCredentials(request: *std.http.Server.Request, arena: std.mem.Alloca
 
 fn handleFind(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
     const target = request.head.target;
-    const tab_id = getQueryParam(target, "tab_id") orelse {
-        resp.sendError(request, 400, "Missing tab_id parameter");
-        return;
-    };
+    const tab_id = requireEffectiveTabId(arena, request, bridge) orelse return;
     const by = getQueryParam(target, "by") orelse {
         resp.sendError(request, 400, "Missing 'by' parameter (role|text|label|placeholder|testid|alt|title)");
         return;
@@ -3974,6 +4255,8 @@ fn handleFind(request: *std.http.Server.Request, arena: std.mem.Allocator, bridg
         resp.sendError(request, 404, "Tab not found");
         return;
     };
+    rememberCurrentTab(request, bridge, tab_id);
+    _ = bridge.touchTab(tab_id);
 
     const escaped_value = jsonEscapeAlloc(arena, value) orelse {
         resp.sendError(request, 500, "Internal Server Error");
@@ -4141,9 +4424,11 @@ fn handleInspect(request: *std.http.Server.Request, arena: std.mem.Allocator, br
     resp.sendJson(request, body);
 }
 
-fn handleWindowNew(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
+fn handleWindowNew(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge, cfg: Config, cdp_port: u16) void {
     const target = request.head.target;
     const url = getDecodedQueryParamAlloc(arena, target, "url") orelse "about:blank";
+    const activate = if (getQueryParam(target, "activate")) |value| !std.mem.eql(u8, value, "false") else true;
+    const wait = if (getQueryParam(target, "wait")) |value| !std.mem.eql(u8, value, "false") else true;
 
     // Get any existing client to create target
     const tabs = bridge.listTabs(arena) catch {
@@ -4177,7 +4462,28 @@ fn handleWindowNew(request: *std.http.Server.Request, arena: std.mem.Allocator, 
         resp.sendError(request, 502, "Target.createTarget failed");
         return;
     };
-    resp.sendJson(request, response);
+    const new_tab_id = extractSimpleJsonString(response, 0, "\"targetId\"") orelse "unknown";
+    if (activate and !std.mem.eql(u8, new_tab_id, "unknown")) {
+        _ = activateTarget(arena, bridge, new_tab_id);
+    }
+    const hydrated_tab = if (wait and !std.mem.eql(u8, new_tab_id, "unknown"))
+        waitForRegisteredTab(arena, bridge, cfg, cdp_port, new_tab_id)
+    else
+        null;
+    rememberCurrentTab(request, bridge, new_tab_id);
+    const final_url = if (hydrated_tab) |tab| tab.url else url;
+    const final_title = if (hydrated_tab) |tab| tab.title else "";
+    const body = std.fmt.allocPrint(arena, "{{\"status\":\"created\",\"tab_id\":\"{s}\",\"url\":\"{s}\",\"title\":\"{s}\",\"hydrated\":{s},\"current\":{s},\"window\":true}}", .{
+        new_tab_id,
+        final_url,
+        final_title,
+        if (hydrated_tab != null) "true" else "false",
+        if (getSessionId(request) != null) "true" else "false",
+    }) catch {
+        resp.sendError(request, 500, "Internal Server Error");
+        return;
+    };
+    resp.sendJson(request, body);
 }
 
 fn handleSessionList(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
@@ -4325,15 +4631,13 @@ fn handleDomAttributes(request: *std.http.Server.Request, arena: std.mem.Allocat
 }
 
 fn handleFrames(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
-    const target = request.head.target;
-    const tab_id = getQueryParam(target, "tab_id") orelse {
-        resp.sendError(request, 400, "Missing tab_id parameter");
-        return;
-    };
+    const tab_id = requireEffectiveTabId(arena, request, bridge) orelse return;
     const client = bridge.getCdpClient(tab_id) orelse {
         resp.sendError(request, 404, "Tab not found");
         return;
     };
+    rememberCurrentTab(request, bridge, tab_id);
+    _ = bridge.touchTab(tab_id);
     _ = client.send(arena, protocol.Methods.page_enable, null) catch {};
     const response = client.send(arena, protocol.Methods.page_get_frame_tree, null) catch {
         resp.sendError(request, 502, "Page.getFrameTree failed");

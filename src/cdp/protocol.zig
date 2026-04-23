@@ -52,6 +52,7 @@ pub const Methods = struct {
     pub const target_get_targets = "Target.getTargets";
     pub const target_create_target = "Target.createTarget";
     pub const target_close_target = "Target.closeTarget";
+    pub const target_activate_target = "Target.activateTarget";
     pub const target_attach_to_target = "Target.attachToTarget";
     pub const page_navigate = "Page.navigate";
     pub const page_add_script = "Page.addScriptToEvaluateOnNewDocument";
@@ -148,6 +149,7 @@ pub const Methods = struct {
 test "methods are valid strings" {
     try std.testing.expectEqualStrings("Page.navigate", Methods.page_navigate);
     try std.testing.expectEqualStrings("Accessibility.getFullAXTree", Methods.accessibility_get_full_tree);
+    try std.testing.expectEqualStrings("Target.activateTarget", Methods.target_activate_target);
 }
 
 test "lightpanda parity CDP methods" {

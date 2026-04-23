@@ -27,32 +27,38 @@ CDP_URL=ws://127.0.0.1:9222/devtools/browser/... ./zig-out/bin/kuri
 
 ## Core workflow
 
-Every interaction follows: **discover → navigate → snapshot → act → repeat**
+Prefer the session-first loop: **tab/new → page/info → snapshot → act → repeat**
 
 ```bash
 BASE=http://127.0.0.1:8080
+SESSION=agent-demo
 
-# 1. Discover tabs
-curl -s $BASE/discover
-curl -s $BASE/tabs
-# → [{"id":"ABC123","url":"chrome://newtab/","title":"New Tab"}]
+# 1. Create or switch into a session-scoped tab
+curl -s -H "X-Kuri-Session: $SESSION" \
+  "$BASE/tab/new?url=https%3A%2F%2Fexample.com"
 
-# 2. Navigate (auto-detects bot blocks)
-curl -s "$BASE/navigate?tab_id=ABC123&url=https://example.com"
-# If blocked → {"blocked":true,"blocker":"akamai","fallback":{...}}
-# If ok     → {"id":1,"result":{"frameId":"...","loaderId":"..."}}
+# 2. Read live page info
+curl -s -H "X-Kuri-Session: $SESSION" "$BASE/page/info"
+# → {"tab_id":"ABC123","url":"https://example.com/","title":"Example Domain",...}
 
 # 3. Snapshot (a11y tree with element refs)
-curl -s "$BASE/snapshot?tab_id=ABC123&format=compact"
+curl -s -H "X-Kuri-Session: $SESSION" "$BASE/snapshot?filter=interactive"
 # → [{"ref":"e0","role":"heading","name":"Example Domain"},
 #    {"ref":"e1","role":"link","name":"More information..."}]
 
 # 4. Interact via refs
-curl -s "$BASE/action?tab_id=ABC123&ref=e1&action=click"
-curl -s "$BASE/action?tab_id=ABC123&ref=e2&action=fill&value=hello"
+curl -s -H "X-Kuri-Session: $SESSION" "$BASE/action?ref=e1&action=click"
+curl -s -H "X-Kuri-Session: $SESSION" "$BASE/action?ref=e2&action=fill&value=hello"
 
 # 5. Read results
-curl -s "$BASE/snapshot?tab_id=ABC123&format=compact"
+curl -s -H "X-Kuri-Session: $SESSION" "$BASE/page/info"
+curl -s -H "X-Kuri-Session: $SESSION" "$BASE/snapshot?filter=interactive"
+```
+
+If you already know a tab id, set it directly with:
+
+```bash
+curl -s -H "X-Kuri-Session: $SESSION" "$BASE/tab/current?tab_id=ABC123"
 ```
 
 ## Key endpoints
@@ -60,6 +66,8 @@ curl -s "$BASE/snapshot?tab_id=ABC123&format=compact"
 ### Navigation & page control
 | Endpoint | Description |
 |---|---|
+| `GET /tab/current` | Get or set the current tab for an `X-Kuri-Session` |
+| `GET /page/info` | Get live URL, title, ready state, viewport, and scroll |
 | `GET /navigate?tab_id=X&url=URL` | Navigate to URL (auto bot-detection) |
 | `GET /navigate?...&bot_detect=false` | Navigate without bot check (faster) |
 | `GET /back?tab_id=X` | Browser back |
@@ -146,10 +154,10 @@ curl -s 'https://target.com/api/v4/data' \
 
 ## Tips for agents
 
-1. **Always discover first** — `curl /discover` then `curl /tabs` to get `tab_id`
-2. **Use compact snapshots** — `format=compact` gives refs like `e0`, `e1` for interactions
-3. **Bot detection is automatic** — if navigate returns `{"blocked":true}`, read the `fallback.suggestions`
-4. **HAR for API discovery** — start HAR before navigating, then use `/har/replay?filter=api` to find the site's API endpoints
-5. **Cookies transfer** — use `/cookies` to get browser session cookies, then make direct `curl` calls
-6. **Wait for page loads** — heavy SPAs need 5-10 seconds after navigate before snapshot
-7. **Refs persist per snapshot** — take a new snapshot after any navigation/interaction to get fresh refs
+1. **Prefer session headers** — set `X-Kuri-Session` and let the server remember the current tab.
+2. **Use `/page/info` between steps** — it is the cheapest live state check for URL/title/ready state.
+3. **Use interactive snapshots** — `filter=interactive` gives refs like `e0`, `e1` for low-token loops.
+4. **Bot detection is automatic** — if navigate returns `{"blocked":true}`, read the `fallback.suggestions`.
+5. **HAR for API discovery** — start HAR before navigating, then use `/har/replay?filter=api` to find the site's API endpoints.
+6. **Cookies transfer** — use `/cookies` to get browser session cookies, then make direct `curl` calls.
+7. **Refs persist per snapshot only** — take a new snapshot after any navigation or meaningful DOM change.

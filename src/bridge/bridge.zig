@@ -42,6 +42,7 @@ pub const RefCache = struct {
 pub const Bridge = struct {
     allocator: std.mem.Allocator,
     tabs: std.StringHashMap(TabEntry),
+    current_tabs: std.StringHashMap([]const u8),
     snapshots: std.StringHashMap(RefCache),
     prev_snapshots: std.StringHashMap([]const A11yNode),
     cdp_clients: std.StringHashMap(*CdpClient),
@@ -53,6 +54,7 @@ pub const Bridge = struct {
         return .{
             .allocator = allocator,
             .tabs = std.StringHashMap(TabEntry).init(allocator),
+            .current_tabs = std.StringHashMap([]const u8).init(allocator),
             .snapshots = std.StringHashMap(RefCache).init(allocator),
             .prev_snapshots = std.StringHashMap([]const A11yNode).init(allocator),
             .cdp_clients = std.StringHashMap(*CdpClient).init(allocator),
@@ -63,6 +65,13 @@ pub const Bridge = struct {
     }
 
     pub fn deinit(self: *Bridge) void {
+        var current_it = self.current_tabs.iterator();
+        while (current_it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+            self.allocator.free(entry.value_ptr.*);
+        }
+        self.current_tabs.deinit();
+
         var debug_it = self.debug_script_ids.iterator();
         while (debug_it.next()) |entry| {
             self.allocator.free(entry.key_ptr.*);
@@ -157,6 +166,22 @@ pub const Bridge = struct {
         self.mu.lock();
         defer self.mu.unlock();
 
+        while (true) {
+            var session_to_clear: ?[]const u8 = null;
+            var current_it = self.current_tabs.iterator();
+            while (current_it.next()) |entry| {
+                if (std.mem.eql(u8, entry.value_ptr.*, tab_id)) {
+                    session_to_clear = entry.key_ptr.*;
+                    break;
+                }
+            }
+            const session_id = session_to_clear orelse break;
+            if (self.current_tabs.fetchRemove(session_id)) |kv| {
+                self.allocator.free(kv.key);
+                self.allocator.free(kv.value);
+            }
+        }
+
         // Grab owned strings before removing from map
         const tab = self.tabs.get(tab_id) orelse {
             if (self.snapshots.getPtr(tab_id)) |cache| cache.deinit();
@@ -217,6 +242,68 @@ pub const Bridge = struct {
             try list.append(allocator, entry.*);
         }
         return list.toOwnedSlice(allocator);
+    }
+
+    pub fn setCurrentTab(self: *Bridge, session_id: []const u8, tab_id: []const u8) !void {
+        self.mu.lock();
+        defer self.mu.unlock();
+
+        if (self.current_tabs.fetchRemove(session_id)) |old| {
+            self.allocator.free(old.key);
+            self.allocator.free(old.value);
+        }
+
+        try self.current_tabs.put(
+            try self.allocator.dupe(u8, session_id),
+            try self.allocator.dupe(u8, tab_id),
+        );
+
+        if (self.tabs.getPtr(tab_id)) |entry| {
+            entry.last_accessed = compat.timestampSeconds();
+        }
+    }
+
+    pub fn getCurrentTab(self: *Bridge, allocator: std.mem.Allocator, session_id: []const u8) ?[]u8 {
+        self.mu.lockShared();
+        defer self.mu.unlockShared();
+        const tab_id = self.current_tabs.get(session_id) orelse return null;
+        return allocator.dupe(u8, tab_id) catch null;
+    }
+
+    pub fn clearCurrentTab(self: *Bridge, session_id: []const u8) void {
+        self.mu.lock();
+        defer self.mu.unlock();
+        if (self.current_tabs.fetchRemove(session_id)) |kv| {
+            self.allocator.free(kv.key);
+            self.allocator.free(kv.value);
+        }
+    }
+
+    pub fn touchTab(self: *Bridge, tab_id: []const u8) bool {
+        self.mu.lock();
+        defer self.mu.unlock();
+        const entry = self.tabs.getPtr(tab_id) orelse return false;
+        entry.last_accessed = compat.timestampSeconds();
+        return true;
+    }
+
+    pub fn updateTabMetadata(self: *Bridge, tab_id: []const u8, url: []const u8, title: []const u8) !bool {
+        self.mu.lock();
+        defer self.mu.unlock();
+
+        const entry = self.tabs.getPtr(tab_id) orelse return false;
+
+        const owned_url = try self.allocator.dupe(u8, url);
+        errdefer self.allocator.free(owned_url);
+        const owned_title = try self.allocator.dupe(u8, title);
+        errdefer self.allocator.free(owned_title);
+
+        self.allocator.free(entry.url);
+        self.allocator.free(entry.title);
+        entry.url = owned_url;
+        entry.title = owned_title;
+        entry.last_accessed = compat.timestampSeconds();
+        return true;
     }
 
     /// Get or create a CDP client for a tab.
@@ -465,4 +552,44 @@ test "bridge tab CRUD" {
 
     bridge.removeTab("tab-1");
     try std.testing.expectEqual(@as(usize, 0), bridge.tabCount());
+}
+
+test "bridge current tab session mapping" {
+    var bridge = Bridge.init(std.testing.allocator);
+    defer bridge.deinit();
+
+    try bridge.putTab(.{
+        .id = "tab-1",
+        .url = "https://example.com",
+        .title = "Example",
+        .ws_url = "",
+        .created_at = 1000,
+        .last_accessed = 1000,
+    });
+
+    try bridge.setCurrentTab("session-a", "tab-1");
+    const current = bridge.getCurrentTab(std.testing.allocator, "session-a").?;
+    defer std.testing.allocator.free(current);
+    try std.testing.expectEqualStrings("tab-1", current);
+
+    bridge.clearCurrentTab("session-a");
+    try std.testing.expect(bridge.getCurrentTab(std.testing.allocator, "session-a") == null);
+}
+
+test "bridge removeTab clears current-tab session mapping" {
+    var bridge = Bridge.init(std.testing.allocator);
+    defer bridge.deinit();
+
+    try bridge.putTab(.{
+        .id = "tab-1",
+        .url = "https://example.com",
+        .title = "Example",
+        .ws_url = "",
+        .created_at = 1000,
+        .last_accessed = 1000,
+    });
+    try bridge.setCurrentTab("session-a", "tab-1");
+
+    bridge.removeTab("tab-1");
+    try std.testing.expect(bridge.getCurrentTab(std.testing.allocator, "session-a") == null);
 }

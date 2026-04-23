@@ -1,5 +1,7 @@
 zig-out/
 .zig-cache/
+__pycache__/
+*.pyc
 *.o
 *.swp
 .browdie/
