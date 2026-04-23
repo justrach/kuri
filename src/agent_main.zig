@@ -164,8 +164,6 @@ pub fn main() !void {
         autoSnap(arena, &client, &session);
     } else if (std.mem.eql(u8, cmd, "viewport")) {
         try cmdViewport(arena, &client, rest);
-    } else if (std.mem.eql(u8, cmd, "viewport")) {
-        try cmdViewport(arena, &client, rest);
     } else if (std.mem.eql(u8, cmd, "eval")) {
         if (rest.len < 1) fatal("eval: requires <js>\n", .{});
         try cmdEval(arena, &client, rest[0]);
