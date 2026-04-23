@@ -137,7 +137,7 @@ pub const HarRecorder = struct {
     pub fn toJson(self: *HarRecorder) ![]const u8 {
         var buf: std.ArrayList(u8) = .empty;
 
-        try buf.appendSlice(self.allocator, "{\"log\":{\"version\":\"1.2\",\"creator\":{\"name\":\"browdie\",\"version\":\"0.3.1\"},\"entries\":[");
+        try buf.appendSlice(self.allocator, "{\"log\":{\"version\":\"1.2\",\"creator\":{\"name\":\"browdie\",\"version\":\"0.3.2\"},\"entries\":[");
 
         for (self.entries.items, 0..) |entry, i| {
             if (i > 0) try buf.appendSlice(self.allocator, ",");
@@ -266,8 +266,7 @@ pub const HarRecorder = struct {
         var depth: usize = 0;
         var i = obj_start;
         while (i < json.len) : (i += 1) {
-            if (json[i] == '{') depth += 1
-            else if (json[i] == '}') {
+            if (json[i] == '{') depth += 1 else if (json[i] == '}') {
                 depth -= 1;
                 if (depth == 0) return json[obj_start .. i + 1];
             }
@@ -387,7 +386,7 @@ test "HarRecorder toJson empty" {
     const json = try rec.toJson();
     defer std.testing.allocator.free(json);
 
-    try std.testing.expectEqualStrings("{\"log\":{\"version\":\"1.2\",\"creator\":{\"name\":\"browdie\",\"version\":\"0.3.1\"},\"entries\":[]}}", json);
+    try std.testing.expectEqualStrings("{\"log\":{\"version\":\"1.2\",\"creator\":{\"name\":\"browdie\",\"version\":\"0.3.2\"},\"entries\":[]}}", json);
 }
 
 test "HarRecorder handleCdpEvent processes request and response" {

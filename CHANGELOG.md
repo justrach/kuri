@@ -2,6 +2,13 @@
 
 All notable changes to kuri are documented here.
 
+## [0.3.2] — 2026-04-24
+
+### Release channel
+- **Self-managed stable channel** — installers and manifests now resolve binaries from the `release-channel` branch instead of GitHub Releases
+- **Channel-only release flow** — tag publishing updates the raw GitHub channel manifest and asset paths without creating a GitHub Release entry
+- **macOS notarization kept in path** — stable macOS tarballs remain signed and notarized, with raw GitHub download URLs exposed directly in the README and channel manifest
+
 ## [0.3.1] — 2026-04-23
 
 ### Maintenance

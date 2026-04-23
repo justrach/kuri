@@ -442,7 +442,7 @@ fn readRequestBody(request: *std.http.Server.Request, arena: std.mem.Allocator) 
 
 fn handleHealth(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
     const tab_count = bridge.tabCount();
-    const body = std.fmt.allocPrint(arena, "{{\"ok\":true,\"tabs\":{d},\"version\":\"0.3.1\",\"name\":\"kuri\"}}", .{tab_count}) catch {
+    const body = std.fmt.allocPrint(arena, "{{\"ok\":true,\"tabs\":{d},\"version\":\"0.3.2\",\"name\":\"kuri\"}}", .{tab_count}) catch {
         resp.sendError(request, 500, "Internal Server Error");
         return;
     };

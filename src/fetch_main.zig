@@ -5,7 +5,7 @@ const markdown = @import("crawler/markdown.zig");
 const js_engine = @import("js_engine.zig");
 const http_fetch = @import("util/http_fetch.zig");
 
-const version = "0.3.1";
+const version = "0.3.2";
 
 pub fn main(init: std.process.Init.Minimal) !void {
     var gpa_impl: std.heap.DebugAllocator(.{}) = .init;
@@ -147,7 +147,8 @@ pub fn main(init: std.process.Init.Minimal) !void {
             const escaped_url = js_engine.escapeForJs(target_url, arena) orelse target_url;
             const escaped_md = js_engine.escapeForJs(md_content, arena) orelse "";
             const escaped_html = js_engine.escapeForJs(html, arena) orelse "";
-            break :blk std.fmt.allocPrint(arena,
+            break :blk std.fmt.allocPrint(
+                arena,
                 "{{\"url\":\"{s}\",\"status\":200,\"fetch_ms\":{d},\"content_length\":{d},\"markdown\":\"{s}\",\"html\":\"{s}\",\"links\":{s},\"js_enabled\":{s}}}",
                 .{ escaped_url, fetch_ms, html.len, escaped_md, escaped_html, link_json, if (opts.run_js) "true" else "false" },
             ) catch "";

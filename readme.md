@@ -5,7 +5,7 @@
 <h1 align="center">Kuri 🌰</h1>
 
 <p align="center">
-  <a href="https://raw.githubusercontent.com/justrach/kuri/release-channel/stable/latest.json"><img src="https://img.shields.io/badge/stable-v0.3.1-brightgreen?style=flat-square" alt="Stable release"></a>
+  <a href="https://raw.githubusercontent.com/justrach/kuri/release-channel/stable/latest.json"><img src="https://img.shields.io/badge/stable-v0.3.2-brightgreen?style=flat-square" alt="Stable release"></a>
   <a href="https://github.com/justrach/kuri/blob/main/LICENSE"><img src="https://img.shields.io/github/license/justrach/kuri?style=flat-square" alt="License"></a>
   <img src="https://img.shields.io/badge/zig-0.16.0-f7a41d?style=flat-square" alt="Zig">
   <img src="https://img.shields.io/badge/node__modules-0_files-brightgreen?style=flat-square" alt="node_modules">
@@ -64,9 +64,9 @@ Measured on Apple M4 Pro, macOS 26.4.1. Current binaries were built with `-Dopti
 
 ### RSS stayed flat across the Zig 0.16 migration
 
-Compared the shipped pre-0.16 macOS release artifact `v0.2.0-rc1` against the current `0.3.1` `ReleaseFast` build over 7 runs with `/usr/bin/time -l`.
+Compared the shipped pre-0.16 macOS release artifact `v0.2.0-rc1` against the current `0.3.2` `ReleaseFast` build over 7 runs with `/usr/bin/time -l`.
 
-| Command | `v0.2.0-rc1` mean max RSS | `0.3.1` mean max RSS | Delta |
+| Command | `v0.2.0-rc1` mean max RSS | `0.3.2` mean max RSS | Delta |
 |---|---:|---:|---:|
 | `kuri-fetch --version` | ~2.45 MiB | ~2.45 MiB | ~flat |
 | `kuri-browse --version` | ~2.45 MiB | ~2.45 MiB | ~flat |
