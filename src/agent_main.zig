@@ -14,6 +14,7 @@ const compat = @import("compat.zig");
 const CdpClient = @import("cdp/client.zig").CdpClient;
 const protocol = @import("cdp/protocol.zig");
 const a11y = @import("snapshot/a11y.zig");
+const util_json = @import("util/json.zig");
 
 const SESSION_FILE = ".kuri/session.json";
 const DEFAULT_CDP_PORT: u16 = 9222;
@@ -456,8 +457,8 @@ fn autoSnap(arena: std.mem.Allocator, client: *CdpClient, session: *Session) voi
     const url_resp = client.send(arena, protocol.Methods.runtime_evaluate,
         "{\"expression\":\"JSON.stringify({url:location.href,title:document.title})\",\"returnByValue\":true}") catch null;
     if (url_resp) |resp| {
-        const val = extractCdpValue(resp);
-        const unescaped = unescapeJson(arena, val);
+        const raw = extractCdpValue(resp);
+        const unescaped = util_json.jsonUnescape(arena, raw) catch raw;
         compat.writeToStdout(unescaped);
         compat.writeToStdout("\n");
     }
@@ -714,7 +715,8 @@ fn cmdEval(arena: std.mem.Allocator, client: *CdpClient, expr: []const u8) !void
         jsonError("eval failed: {s}", .{@errorName(err)});
         std.process.exit(1);
     };
-    const val = unescapeJson(arena, extractCdpValue(response));
+    const raw = extractCdpValue(response);
+    const val = util_json.jsonUnescape(arena, raw) catch raw;
     compat.writeToStdout(val);
     compat.writeToStdout("\n");
 }
@@ -735,7 +737,8 @@ fn cmdText(arena: std.mem.Allocator, client: *CdpClient, selector: ?[]const u8) 
         jsonError("text failed: {s}", .{@errorName(err)});
         std.process.exit(1);
     };
-    const val = unescapeJson(arena, extractCdpValue(response));
+    const raw = extractCdpValue(response);
+    const val = util_json.jsonUnescape(arena, raw) catch raw;
     compat.writeToStdout(val);
     compat.writeToStdout("\n");
 }
@@ -1045,7 +1048,8 @@ fn cmdHeaders(arena: std.mem.Allocator, client: *CdpClient) !void {
         jsonError("headers eval failed: {s}", .{@errorName(err)});
         std.process.exit(1);
     };
-    compat.writeToStdout(unescapeJson(arena, extractCdpValue(response)));
+    const raw = extractCdpValue(response);
+    compat.writeToStdout(util_json.jsonUnescape(arena, raw) catch raw);
     compat.writeToStdout("\n");
 }
 
@@ -1079,7 +1083,8 @@ fn cmdAudit(arena: std.mem.Allocator, client: *CdpClient) !void {
         jsonError("audit eval failed: {s}", .{@errorName(err)});
         std.process.exit(1);
     };
-    compat.writeToStdout(unescapeJson(arena, extractCdpValue(response)));
+    const raw = extractCdpValue(response);
+    compat.writeToStdout(util_json.jsonUnescape(arena, raw) catch raw);
     compat.writeToStdout("\n");
 }
 
@@ -1424,28 +1429,6 @@ fn extractString(json: []const u8, start: usize, field: []const u8) ?[]const u8 
     i += 1;
     const end = std.mem.indexOfScalarPos(u8, json, i, '"') orelse return null;
     return json[i..end];
-}
-
-/// Unescape JSON string escapes: \n → newline, \t → tab, \\ → backslash, \" → quote
-fn unescapeJson(arena: std.mem.Allocator, s: []const u8) []const u8 {
-    var buf: std.ArrayList(u8) = .empty;
-    var i: usize = 0;
-    while (i < s.len) {
-        if (s[i] == '\\' and i + 1 < s.len) {
-            switch (s[i + 1]) {
-                'n' => { buf.append(arena, '\n') catch {}; i += 2; },
-                't' => { buf.append(arena, '\t') catch {}; i += 2; },
-                '\\' => { buf.append(arena, '\\') catch {}; i += 2; },
-                '"' => { buf.append(arena, '"') catch {}; i += 2; },
-                '/' => { buf.append(arena, '/') catch {}; i += 2; },
-                else => { buf.append(arena, s[i]) catch {}; i += 1; },
-            }
-        } else {
-            buf.append(arena, s[i]) catch {};
-            i += 1;
-        }
-    }
-    return buf.items;
 }
 
 /// Parse CDP a11y tree response into A11yNode slice.
