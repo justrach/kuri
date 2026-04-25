@@ -16,8 +16,8 @@ pub fn usageText() []const u8 {
         \\  kuri-browser --version
         \\  kuri-browser status
         \\  kuri-browser roadmap
-        \\  kuri-browser render <url> [--dump summary|html|text|links|forms] [--selector <css>]
-        \\  kuri-browser submit <url> [--form-index <n>] [--field name=value ...] [--dump summary|html|text|links|forms] [--selector <css>]
+        \\  kuri-browser render <url> [--dump summary|html|text|links|forms] [--selector <css>] [--har <file>]
+        \\  kuri-browser submit <url> [--form-index <n>] [--field name=value ...] [--dump summary|html|text|links|forms] [--selector <css>] [--har <file>]
         \\
         \\EXAMPLES
         \\  zig build run -- --help
@@ -25,8 +25,9 @@ pub fn usageText() []const u8 {
         \\  zig build run -- roadmap
         \\  zig build run -- render https://news.ycombinator.com
         \\  zig build run -- render https://example.com --dump html
+        \\  zig build run -- render https://example.com --har example.har
         \\  zig build run -- render https://quotes.toscrape.com/login --dump forms
-        \\  zig build run -- submit https://quotes.toscrape.com/login --field username=admin --field password=admin --dump text
+        \\  zig build run -- submit https://quotes.toscrape.com/login --field username=admin --field password=admin --dump text --har login.har
         \\  zig build run -- render https://news.ycombinator.com --selector ".titleline a" --dump text
         \\
     ;
@@ -260,4 +261,5 @@ test "usage mentions render command" {
     try std.testing.expect(std.mem.indexOf(u8, usageText(), "submit <url>") != null);
     try std.testing.expect(std.mem.indexOf(u8, usageText(), "--dump summary|html|text|links|forms") != null);
     try std.testing.expect(std.mem.indexOf(u8, usageText(), "--selector <css>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, usageText(), "--har <file>") != null);
 }

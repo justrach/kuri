@@ -1,5 +1,6 @@
 const std = @import("std");
 const cookies = @import("cookies.zig");
+const har = @import("har.zig");
 const process = @import("process.zig");
 
 pub const ValidationError = error{
@@ -40,6 +41,7 @@ pub const Session = struct {
     user_agent: []const u8,
     client: std.http.Client,
     jar: cookies.CookieJar,
+    har_entries: std.ArrayList(har.Entry),
 
     pub fn init(allocator: std.mem.Allocator, user_agent: []const u8) Session {
         return .{
@@ -50,10 +52,13 @@ pub const Session = struct {
                 .io = std.Io.Threaded.global_single_threaded.io(),
             },
             .jar = cookies.CookieJar.init(allocator),
+            .har_entries = .empty,
         };
     }
 
     pub fn deinit(self: *Session) void {
+        for (self.har_entries.items) |*entry| har.deinitEntry(self.allocator, entry);
+        self.har_entries.deinit(self.allocator);
         self.jar.deinit();
         self.client.deinit();
     }
@@ -69,6 +74,10 @@ pub const Session = struct {
             error.TlsInitializationFailed, error.CertificateBundleLoadFailure => try self.requestCurl(url, config),
             else => return err,
         };
+    }
+
+    pub fn harJson(self: *const Session) ![]const u8 {
+        return har.toJson(self.allocator, self.har_entries.items);
     }
 
     fn requestStd(self: *Session, url: []const u8, config: RequestConfig) !FetchResult {
@@ -87,9 +96,11 @@ pub const Session = struct {
         var redirects_seen: usize = 0;
 
         while (true) {
+            const started_ms = milliTimestamp();
             const uri = try std.Uri.parse(current_url);
             const cookie_header = try self.jar.cookieHeader(self.allocator, current_url);
             defer if (cookie_header) |header| self.allocator.free(header);
+            const request_body = current_body orelse "";
 
             var base_headers = [_]std.http.Header{
                 .{ .name = "User-Agent", .value = self.user_agent },
@@ -126,6 +137,7 @@ pub const Session = struct {
 
             var response = try req.receiveHead(&.{});
             const status_code: u16 = @intFromEnum(response.head.status);
+            const response_mime = response.head.content_type orelse "";
 
             try appendSetCookieHeaders(&self.jar, current_url, response.head);
 
@@ -135,6 +147,19 @@ pub const Session = struct {
                 const location = response.head.location orelse return error.RedirectLocationMissing;
                 const next_url_buf = if (use_buf_a) current_url_buf_a[0..] else current_url_buf_b[0..];
                 const next_url = try resolveValidatedRedirectUrl(current_url, location, resolve_buf[0..], next_url_buf);
+                try self.appendHarEntry(.{
+                    .started_ms = started_ms,
+                    .duration_ms = milliTimestamp() - started_ms,
+                    .method = @tagName(current_method),
+                    .url = current_url,
+                    .status = status_code,
+                    .status_text = response.head.status.phrase() orelse "",
+                    .mime_type = response_mime,
+                    .request_body_size = request_body.len,
+                    .request_body_text = request_body,
+                    .response_body_size = 0,
+                    .redirect_url = next_url,
+                });
                 try redirect_chain.append(self.allocator, try self.allocator.dupe(u8, next_url));
 
                 updateRedirectRequest(status_code, &current_method, &current_body, &current_content_type);
@@ -144,7 +169,7 @@ pub const Session = struct {
                 continue;
             }
 
-            const content_type = try self.allocator.dupe(u8, response.head.content_type orelse "text/html");
+            const content_type = try self.allocator.dupe(u8, if (response_mime.len > 0) response_mime else "text/html");
             errdefer self.allocator.free(content_type);
 
             var body: std.ArrayList(u8) = .empty;
@@ -156,6 +181,19 @@ pub const Session = struct {
             const reader = response.readerDecompressing(&transfer_buf, &decompress, &decompress_buf);
             try reader.appendRemainingUnlimited(self.allocator, &body);
             if (body.items.len > max_body_bytes) return error.ResponseTooLarge;
+            try self.appendHarEntry(.{
+                .started_ms = started_ms,
+                .duration_ms = milliTimestamp() - started_ms,
+                .method = @tagName(current_method),
+                .url = current_url,
+                .status = status_code,
+                .status_text = response.head.status.phrase() orelse "",
+                .mime_type = content_type,
+                .request_body_size = request_body.len,
+                .request_body_text = request_body,
+                .response_body_size = body.items.len,
+                .redirect_url = "",
+            });
 
             return .{
                 .requested_url = try self.allocator.dupe(u8, url),
@@ -256,6 +294,20 @@ pub const Session = struct {
         const meta = try parseCurlHeaderDump(self.allocator, &self.jar, url, header_bytes, &redirect_chain);
         errdefer self.allocator.free(meta.url);
         errdefer self.allocator.free(meta.content_type);
+        const curl_status: std.http.Status = @enumFromInt(meta.status_code);
+        try self.appendHarEntry(.{
+            .started_ms = milliTimestamp(),
+            .duration_ms = 0,
+            .method = @tagName(config.method),
+            .url = url,
+            .status = meta.status_code,
+            .status_text = curl_status.phrase() orelse "",
+            .mime_type = meta.content_type,
+            .request_body_size = if (config.body) |body_bytes| body_bytes.len else 0,
+            .request_body_text = config.body orelse "",
+            .response_body_size = body.len,
+            .redirect_url = "",
+        });
 
         return .{
             .requested_url = try self.allocator.dupe(u8, url),
@@ -266,6 +318,22 @@ pub const Session = struct {
             .redirect_chain = try redirect_chain.toOwnedSlice(self.allocator),
             .cookie_count = self.jar.count(),
         };
+    }
+
+    fn appendHarEntry(self: *Session, entry: har.Entry) !void {
+        try self.har_entries.append(self.allocator, .{
+            .started_ms = entry.started_ms,
+            .duration_ms = entry.duration_ms,
+            .method = try self.allocator.dupe(u8, entry.method),
+            .url = try self.allocator.dupe(u8, entry.url),
+            .status = entry.status,
+            .status_text = try self.allocator.dupe(u8, entry.status_text),
+            .mime_type = try self.allocator.dupe(u8, entry.mime_type),
+            .request_body_size = entry.request_body_size,
+            .request_body_text = if (entry.request_body_text.len > 0) try self.allocator.dupe(u8, entry.request_body_text) else "",
+            .response_body_size = entry.response_body_size,
+            .redirect_url = if (entry.redirect_url.len > 0) try self.allocator.dupe(u8, entry.redirect_url) else "",
+        });
     }
 };
 
@@ -278,6 +346,12 @@ pub fn fetchHtml(allocator: std.mem.Allocator, url: []const u8, user_agent: []co
     var session = Session.init(allocator, user_agent);
     defer session.deinit();
     return session.navigate(url);
+}
+
+fn milliTimestamp() i64 {
+    var ts: std.c.timespec = undefined;
+    _ = std.c.clock_gettime(.REALTIME, &ts);
+    return @as(i64, ts.sec) * 1000 + @divTrunc(@as(i64, ts.nsec), 1_000_000);
 }
 
 fn appendSetCookieHeaders(jar: *cookies.CookieJar, request_url: []const u8, head: std.http.Client.Response.Head) !void {

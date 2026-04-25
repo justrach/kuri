@@ -6,6 +6,11 @@ const model = @import("model.zig");
 const default_pipeline = "fetch -> cookies -> redirects -> parsed-dom -> text/forms";
 const submit_pipeline = "fetch -> cookies -> redirects -> submit -> parsed-dom -> text/forms";
 
+pub const PageArtifacts = struct {
+    page: model.Page,
+    har_json: ?[]const u8 = null,
+};
+
 const Submission = struct {
     method: std.http.Method,
     url: []const u8,
@@ -14,8 +19,17 @@ const Submission = struct {
 };
 
 pub fn renderUrl(allocator: std.mem.Allocator, url: []const u8) !model.Page {
-    const result = try fetch.fetchHtml(allocator, url, "kuri-browser/0.0.0");
-    return pageFromFetchResultWithPipeline(allocator, result, default_pipeline);
+    return (try renderUrlArtifacts(allocator, url, false)).page;
+}
+
+pub fn renderUrlArtifacts(allocator: std.mem.Allocator, url: []const u8, capture_har: bool) !PageArtifacts {
+    var session = fetch.Session.init(allocator, "kuri-browser/0.0.0");
+    defer session.deinit();
+    const result = try session.navigate(url);
+    return .{
+        .page = try pageFromFetchResultWithPipeline(allocator, result, default_pipeline),
+        .har_json = if (capture_har) try session.harJson() else null,
+    };
 }
 
 pub fn submitFormUrl(
@@ -24,9 +38,22 @@ pub fn submitFormUrl(
     form_index: usize,
     overrides: []const model.FieldInput,
 ) !model.Page {
+    return (try submitFormArtifacts(allocator, url, form_index, overrides, false)).page;
+}
+
+pub fn submitFormArtifacts(
+    allocator: std.mem.Allocator,
+    url: []const u8,
+    form_index: usize,
+    overrides: []const model.FieldInput,
+    capture_har: bool,
+) !PageArtifacts {
     var session = fetch.Session.init(allocator, "kuri-browser/0.0.0");
     defer session.deinit();
-    return submitFormWithSession(allocator, &session, url, form_index, overrides);
+    return .{
+        .page = try submitFormWithSession(allocator, &session, url, form_index, overrides),
+        .har_json = if (capture_har) try session.harJson() else null,
+    };
 }
 
 pub fn extractLinks(allocator: std.mem.Allocator, document: *const dom.Document, root_id: dom.NodeId) ![]model.Link {
