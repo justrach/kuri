@@ -17,6 +17,7 @@ pub fn usageText() []const u8 {
         \\  kuri-browser status
         \\  kuri-browser roadmap
         \\  kuri-browser render <url> [--dump summary|html|text|links|forms] [--selector <css>]
+        \\  kuri-browser submit <url> [--form-index <n>] [--field name=value ...] [--dump summary|html|text|links|forms] [--selector <css>]
         \\
         \\EXAMPLES
         \\  zig build run -- --help
@@ -25,6 +26,7 @@ pub fn usageText() []const u8 {
         \\  zig build run -- render https://news.ycombinator.com
         \\  zig build run -- render https://example.com --dump html
         \\  zig build run -- render https://quotes.toscrape.com/login --dump forms
+        \\  zig build run -- submit https://quotes.toscrape.com/login --field username=admin --field password=admin --dump text
         \\  zig build run -- render https://news.ycombinator.com --selector ".titleline a" --dump text
         \\
     ;
@@ -255,6 +257,7 @@ fn previewText(text: []const u8, max_len: usize) []const u8 {
 
 test "usage mentions render command" {
     try std.testing.expect(std.mem.indexOf(u8, usageText(), "render <url>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, usageText(), "submit <url>") != null);
     try std.testing.expect(std.mem.indexOf(u8, usageText(), "--dump summary|html|text|links|forms") != null);
     try std.testing.expect(std.mem.indexOf(u8, usageText(), "--selector <css>") != null);
 }

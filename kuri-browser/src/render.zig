@@ -3,9 +3,30 @@ const dom = @import("dom.zig");
 const fetch = @import("fetch.zig");
 const model = @import("model.zig");
 
+const default_pipeline = "fetch -> cookies -> redirects -> parsed-dom -> text/forms";
+const submit_pipeline = "fetch -> cookies -> redirects -> submit -> parsed-dom -> text/forms";
+
+const Submission = struct {
+    method: std.http.Method,
+    url: []const u8,
+    body: ?[]const u8 = null,
+    content_type: ?[]const u8 = null,
+};
+
 pub fn renderUrl(allocator: std.mem.Allocator, url: []const u8) !model.Page {
     const result = try fetch.fetchHtml(allocator, url, "kuri-browser/0.0.0");
-    return pageFromFetchResult(allocator, result);
+    return pageFromFetchResultWithPipeline(allocator, result, default_pipeline);
+}
+
+pub fn submitFormUrl(
+    allocator: std.mem.Allocator,
+    url: []const u8,
+    form_index: usize,
+    overrides: []const model.FieldInput,
+) !model.Page {
+    var session = fetch.Session.init(allocator, "kuri-browser/0.0.0");
+    defer session.deinit();
+    return submitFormWithSession(allocator, &session, url, form_index, overrides);
 }
 
 pub fn extractLinks(allocator: std.mem.Allocator, document: *const dom.Document, root_id: dom.NodeId) ![]model.Link {
@@ -32,7 +53,7 @@ pub fn extractForms(allocator: std.mem.Allocator, document: *const dom.Document,
     return try forms.toOwnedSlice(allocator);
 }
 
-fn pageFromFetchResult(allocator: std.mem.Allocator, result: fetch.FetchResult) !model.Page {
+fn pageFromFetchResultWithPipeline(allocator: std.mem.Allocator, result: fetch.FetchResult, pipeline: []const u8) !model.Page {
     const html = result.body;
     const document = try dom.Document.parse(allocator, html);
     const title = try extractTitle(allocator, &document);
@@ -56,8 +77,30 @@ fn pageFromFetchResult(allocator: std.mem.Allocator, result: fetch.FetchResult) 
         .status_code = result.status_code,
         .content_type = result.content_type,
         .fallback_mode = .native_static,
-        .pipeline = "fetch -> cookies -> redirects -> parsed-dom -> text/forms",
+        .pipeline = pipeline,
     };
+}
+
+fn submitFormWithSession(
+    allocator: std.mem.Allocator,
+    session: *fetch.Session,
+    url: []const u8,
+    form_index: usize,
+    overrides: []const model.FieldInput,
+) !model.Page {
+    const initial_result = try session.navigate(url);
+    const initial_page = try pageFromFetchResultWithPipeline(allocator, initial_result, default_pipeline);
+
+    if (form_index == 0 or form_index > initial_page.forms.len) return error.FormNotFound;
+    const form = initial_page.forms[form_index - 1];
+    const submission = try buildFormSubmission(allocator, form, overrides);
+
+    const submit_result = try session.request(submission.url, .{
+        .method = submission.method,
+        .body = submission.body,
+        .content_type = submission.content_type,
+    });
+    return pageFromFetchResultWithPipeline(allocator, submit_result, submit_pipeline);
 }
 
 fn extractTitle(allocator: std.mem.Allocator, document: *const dom.Document) ![]const u8 {
@@ -81,6 +124,46 @@ fn extractFormFields(allocator: std.mem.Allocator, document: *const dom.Document
     var fields: std.ArrayList(model.FormField) = .empty;
     try collectFormFields(allocator, document, form_id, &fields);
     return try fields.toOwnedSlice(allocator);
+}
+
+fn buildFormSubmission(allocator: std.mem.Allocator, form: model.Form, overrides: []const model.FieldInput) !Submission {
+    const method = try parseFormMethod(form.method);
+    if (method == .POST and !std.ascii.eqlIgnoreCase(form.enctype, "application/x-www-form-urlencoded")) {
+        return error.UnsupportedFormEncoding;
+    }
+
+    var pairs: std.ArrayList(model.FieldInput) = .empty;
+    for (form.fields) |field| {
+        if (shouldSkipField(field)) continue;
+        const value = if (findOverride(overrides, field.name)) |override| override.value else field.value;
+        try pairs.append(allocator, .{
+            .name = field.name,
+            .value = value,
+        });
+    }
+    for (overrides) |override| {
+        if (!formHasField(form, override.name)) {
+            try pairs.append(allocator, override);
+        }
+    }
+
+    const encoded = try encodeFormFields(allocator, pairs.items);
+    switch (method) {
+        .GET => {
+            const submitted_url = try appendQueryString(allocator, form.action, encoded);
+            return .{
+                .method = .GET,
+                .url = submitted_url,
+            };
+        },
+        .POST => return .{
+            .method = .POST,
+            .url = try allocator.dupe(u8, form.action),
+            .body = encoded,
+            .content_type = "application/x-www-form-urlencoded",
+        },
+        else => return error.UnsupportedFormMethod,
+    }
 }
 
 fn collectLinks(allocator: std.mem.Allocator, document: *const dom.Document, node_id: dom.NodeId, links: *std.ArrayList(model.Link)) !void {
@@ -168,6 +251,17 @@ fn fieldValue(allocator: std.mem.Allocator, document: *const dom.Document, node_
         return allocator.dupe(u8, "");
     }
 
+    if (std.ascii.eqlIgnoreCase(node.name, "input")) {
+        if (document.getAttribute(node_id, "type")) |input_type| {
+            if ((std.ascii.eqlIgnoreCase(input_type, "checkbox") or std.ascii.eqlIgnoreCase(input_type, "radio")) and
+                document.getAttribute(node_id, "checked") != null and
+                document.getAttribute(node_id, "value") == null)
+            {
+                return allocator.dupe(u8, "on");
+            }
+        }
+    }
+
     return allocator.dupe(u8, document.getAttribute(node_id, "value") orelse "");
 }
 
@@ -210,6 +304,70 @@ fn lowerDuped(allocator: std.mem.Allocator, input: []const u8) ![]const u8 {
     const out = try allocator.alloc(u8, input.len);
     for (input, 0..) |c, i| out[i] = std.ascii.toLower(c);
     return out;
+}
+
+fn parseFormMethod(method: []const u8) !std.http.Method {
+    if (std.ascii.eqlIgnoreCase(method, "get")) return .GET;
+    if (std.ascii.eqlIgnoreCase(method, "post")) return .POST;
+    return error.UnsupportedFormMethod;
+}
+
+fn shouldSkipField(field: model.FormField) bool {
+    if (field.name.len == 0) return true;
+    if (std.mem.eql(u8, field.value, "(unchecked)")) return true;
+    return std.ascii.eqlIgnoreCase(field.kind, "submit") or
+        std.ascii.eqlIgnoreCase(field.kind, "button") or
+        std.ascii.eqlIgnoreCase(field.kind, "reset");
+}
+
+fn formHasField(form: model.Form, name: []const u8) bool {
+    for (form.fields) |field| {
+        if (std.mem.eql(u8, field.name, name)) return true;
+    }
+    return false;
+}
+
+fn findOverride(overrides: []const model.FieldInput, name: []const u8) ?model.FieldInput {
+    for (overrides) |override| {
+        if (std.mem.eql(u8, override.name, name)) return override;
+    }
+    return null;
+}
+
+fn encodeFormFields(allocator: std.mem.Allocator, fields: []const model.FieldInput) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    for (fields, 0..) |field, index| {
+        if (index > 0) try out.append(allocator, '&');
+        try appendFormEncodedComponent(allocator, &out, field.name);
+        try out.append(allocator, '=');
+        try appendFormEncodedComponent(allocator, &out, field.value);
+    }
+    return try out.toOwnedSlice(allocator);
+}
+
+fn appendFormEncodedComponent(allocator: std.mem.Allocator, out: *std.ArrayList(u8), input: []const u8) !void {
+    const hex = "0123456789ABCDEF";
+    for (input) |c| {
+        if (isUnreserved(c)) {
+            try out.append(allocator, c);
+        } else if (c == ' ') {
+            try out.append(allocator, '+');
+        } else {
+            try out.append(allocator, '%');
+            try out.append(allocator, hex[c >> 4]);
+            try out.append(allocator, hex[c & 0x0F]);
+        }
+    }
+}
+
+fn isUnreserved(c: u8) bool {
+    return std.ascii.isAlphanumeric(c) or c == '-' or c == '.' or c == '_' or c == '*';
+}
+
+fn appendQueryString(allocator: std.mem.Allocator, url: []const u8, encoded: []const u8) ![]const u8 {
+    if (encoded.len == 0) return allocator.dupe(u8, url);
+    const separator: []const u8 = if (std.mem.indexOfScalar(u8, url, '?') != null) "&" else "?";
+    return std.fmt.allocPrint(allocator, "{s}{s}{s}", .{ url, separator, encoded });
 }
 
 test "extractTitle finds title text" {
@@ -270,4 +428,34 @@ test "extractForms captures form metadata and fields" {
     try std.testing.expectEqualStrings("note", forms[0].fields[2].name);
     try std.testing.expectEqualStrings("hello", forms[0].fields[2].value);
     try std.testing.expectEqualStrings("admin", forms[0].fields[3].value);
+}
+
+test "buildFormSubmission merges overrides and encodes post bodies" {
+    const form: model.Form = .{
+        .method = "post",
+        .action = "https://example.com/login",
+        .enctype = "application/x-www-form-urlencoded",
+        .id = "",
+        .class_name = "",
+        .fields = &.{
+            .{ .name = "csrf", .kind = "hidden", .value = "abc123" },
+            .{ .name = "username", .kind = "text", .value = "" },
+            .{ .name = "remember", .kind = "checkbox", .value = "(unchecked)" },
+            .{ .name = "", .kind = "submit", .value = "Login" },
+        },
+    };
+    const submission = try buildFormSubmission(std.testing.allocator, form, &.{
+        .{ .name = "username", .value = "admin" },
+        .{ .name = "password", .value = "admin" },
+    });
+    defer std.testing.allocator.free(submission.url);
+    defer std.testing.allocator.free(submission.body.?);
+
+    try std.testing.expectEqual(std.http.Method.POST, submission.method);
+    try std.testing.expectEqualStrings("https://example.com/login", submission.url);
+    try std.testing.expectEqualStrings("application/x-www-form-urlencoded", submission.content_type.?);
+    try std.testing.expect(std.mem.indexOf(u8, submission.body.?, "csrf=abc123") != null);
+    try std.testing.expect(std.mem.indexOf(u8, submission.body.?, "username=admin") != null);
+    try std.testing.expect(std.mem.indexOf(u8, submission.body.?, "password=admin") != null);
+    try std.testing.expect(std.mem.indexOf(u8, submission.body.?, "remember") == null);
 }

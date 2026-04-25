@@ -29,180 +29,255 @@ pub const FetchResult = struct {
     cookie_count: usize,
 };
 
+pub const RequestConfig = struct {
+    method: std.http.Method = .GET,
+    body: ?[]const u8 = null,
+    content_type: ?[]const u8 = null,
+};
+
+pub const Session = struct {
+    allocator: std.mem.Allocator,
+    user_agent: []const u8,
+    client: std.http.Client,
+    jar: cookies.CookieJar,
+
+    pub fn init(allocator: std.mem.Allocator, user_agent: []const u8) Session {
+        return .{
+            .allocator = allocator,
+            .user_agent = user_agent,
+            .client = .{
+                .allocator = allocator,
+                .io = std.Io.Threaded.global_single_threaded.io(),
+            },
+            .jar = cookies.CookieJar.init(allocator),
+        };
+    }
+
+    pub fn deinit(self: *Session) void {
+        self.jar.deinit();
+        self.client.deinit();
+    }
+
+    pub fn navigate(self: *Session, url: []const u8) !FetchResult {
+        return self.request(url, .{});
+    }
+
+    pub fn request(self: *Session, url: []const u8, config: RequestConfig) !FetchResult {
+        try validateUrl(url);
+
+        return self.requestStd(url, config) catch |err| switch (err) {
+            error.TlsInitializationFailed, error.CertificateBundleLoadFailure => try self.requestCurl(url, config),
+            else => return err,
+        };
+    }
+
+    fn requestStd(self: *Session, url: []const u8, config: RequestConfig) !FetchResult {
+        var redirect_chain: std.ArrayList([]const u8) = .empty;
+        defer redirect_chain.deinit(self.allocator);
+
+        var current_url = url;
+        var current_method = config.method;
+        var current_body = config.body;
+        var current_content_type = config.content_type;
+
+        var current_url_buf_a: [redirect_buf_len]u8 = undefined;
+        var current_url_buf_b: [redirect_buf_len]u8 = undefined;
+        var resolve_buf: [redirect_buf_len]u8 = undefined;
+        var use_buf_a = true;
+        var redirects_seen: usize = 0;
+
+        while (true) {
+            const uri = try std.Uri.parse(current_url);
+            const cookie_header = try self.jar.cookieHeader(self.allocator, current_url);
+            defer if (cookie_header) |header| self.allocator.free(header);
+
+            var base_headers = [_]std.http.Header{
+                .{ .name = "User-Agent", .value = self.user_agent },
+                .{ .name = "Accept", .value = "text/html,application/xhtml+xml,*/*" },
+                .{ .name = "Accept-Encoding", .value = "gzip, deflate" },
+            };
+            var cookie_headers = [_]std.http.Header{
+                .{ .name = "User-Agent", .value = self.user_agent },
+                .{ .name = "Accept", .value = "text/html,application/xhtml+xml,*/*" },
+                .{ .name = "Accept-Encoding", .value = "gzip, deflate" },
+                .{ .name = "Cookie", .value = "" },
+            };
+            const extra_headers = if (cookie_header) |header| blk: {
+                cookie_headers[3].value = header;
+                break :blk cookie_headers[0..];
+            } else base_headers[0..];
+
+            var req = try self.client.request(current_method, uri, .{
+                .redirect_behavior = .unhandled,
+                .headers = .{
+                    .content_type = if (current_content_type) |value| .{ .override = value } else .default,
+                },
+                .extra_headers = extra_headers,
+            });
+            defer req.deinit();
+
+            if (current_body) |body| {
+                const mutable_body = try self.allocator.dupe(u8, body);
+                defer self.allocator.free(mutable_body);
+                try req.sendBodyComplete(mutable_body);
+            } else {
+                try req.sendBodiless();
+            }
+
+            var response = try req.receiveHead(&.{});
+            const status_code: u16 = @intFromEnum(response.head.status);
+
+            try appendSetCookieHeaders(&self.jar, current_url, response.head);
+
+            if (isRedirectStatus(status_code)) {
+                if (redirects_seen >= max_redirects) return error.TooManyRedirects;
+
+                const location = response.head.location orelse return error.RedirectLocationMissing;
+                const next_url_buf = if (use_buf_a) current_url_buf_a[0..] else current_url_buf_b[0..];
+                const next_url = try resolveValidatedRedirectUrl(current_url, location, resolve_buf[0..], next_url_buf);
+                try redirect_chain.append(self.allocator, try self.allocator.dupe(u8, next_url));
+
+                updateRedirectRequest(status_code, &current_method, &current_body, &current_content_type);
+                current_url = next_url;
+                use_buf_a = !use_buf_a;
+                redirects_seen += 1;
+                continue;
+            }
+
+            const content_type = try self.allocator.dupe(u8, response.head.content_type orelse "text/html");
+            errdefer self.allocator.free(content_type);
+
+            var body: std.ArrayList(u8) = .empty;
+            errdefer body.deinit(self.allocator);
+
+            var transfer_buf: [8192]u8 = undefined;
+            var decompress: std.http.Decompress = undefined;
+            var decompress_buf: [std.compress.flate.max_window_len]u8 = undefined;
+            const reader = response.readerDecompressing(&transfer_buf, &decompress, &decompress_buf);
+            try reader.appendRemainingUnlimited(self.allocator, &body);
+            if (body.items.len > max_body_bytes) return error.ResponseTooLarge;
+
+            return .{
+                .requested_url = try self.allocator.dupe(u8, url),
+                .url = try self.allocator.dupe(u8, current_url),
+                .body = body.items,
+                .status_code = status_code,
+                .content_type = content_type,
+                .redirect_chain = try redirect_chain.toOwnedSlice(self.allocator),
+                .cookie_count = self.jar.count(),
+            };
+        }
+    }
+
+    fn requestCurl(self: *Session, url: []const u8, config: RequestConfig) !FetchResult {
+        const io = std.Io.Threaded.global_single_threaded.io();
+        const cwd = std.Io.Dir.cwd();
+        const temp_dir_path = try createTempDir(self.allocator);
+        defer self.allocator.free(temp_dir_path);
+        defer cwd.deleteTree(io, temp_dir_path) catch {};
+
+        const headers_path = try std.fmt.allocPrint(self.allocator, "{s}/headers.txt", .{temp_dir_path});
+        defer self.allocator.free(headers_path);
+        const body_path = try std.fmt.allocPrint(self.allocator, "{s}/body.bin", .{temp_dir_path});
+        defer self.allocator.free(body_path);
+        const cookie_path = try std.fmt.allocPrint(self.allocator, "{s}/cookies.txt", .{temp_dir_path});
+        defer self.allocator.free(cookie_path);
+
+        const cookie_header = try self.jar.cookieHeader(self.allocator, url);
+        defer if (cookie_header) |value| self.allocator.free(value);
+
+        var argv: std.ArrayList([]const u8) = .empty;
+        defer argv.deinit(self.allocator);
+
+        var owned_strings: std.ArrayList([]const u8) = .empty;
+        defer {
+            for (owned_strings.items) |value| self.allocator.free(value);
+            owned_strings.deinit(self.allocator);
+        }
+
+        try argv.appendSlice(self.allocator, &.{
+            "curl",
+            "-fsSL",
+            "--compressed",
+            "-A",
+            self.user_agent,
+            "-D",
+            headers_path,
+            "-o",
+            body_path,
+            "-c",
+            cookie_path,
+            "-b",
+            cookie_path,
+        });
+
+        if (config.method != .GET or config.body != null) {
+            try argv.append(self.allocator, "-X");
+            try argv.append(self.allocator, @tagName(config.method));
+        }
+
+        if (config.content_type) |content_type| {
+            const content_type_header = try std.fmt.allocPrint(self.allocator, "Content-Type: {s}", .{content_type});
+            try owned_strings.append(self.allocator, content_type_header);
+            try argv.appendSlice(self.allocator, &.{ "-H", content_type_header });
+        }
+
+        if (cookie_header) |value| {
+            const cookie_arg = try std.fmt.allocPrint(self.allocator, "Cookie: {s}", .{value});
+            try owned_strings.append(self.allocator, cookie_arg);
+            try argv.appendSlice(self.allocator, &.{ "-H", cookie_arg });
+        }
+
+        if (config.body) |body| {
+            try argv.appendSlice(self.allocator, &.{ "--data-raw", body });
+        }
+
+        try argv.append(self.allocator, url);
+
+        const result = try process.runCommand(self.allocator, argv.items, 64 * 1024);
+        defer self.allocator.free(result.stdout);
+
+        if (result.term != 0) return error.HttpError;
+
+        const header_bytes = cwd.readFileAlloc(io, headers_path, self.allocator, .limited(max_header_bytes)) catch |err| switch (err) {
+            error.StreamTooLong => return error.ResponseTooLarge,
+            else => return err,
+        };
+        defer self.allocator.free(header_bytes);
+
+        const body = cwd.readFileAlloc(io, body_path, self.allocator, .limited(max_body_bytes)) catch |err| switch (err) {
+            error.StreamTooLong => return error.ResponseTooLarge,
+            else => return err,
+        };
+
+        var redirect_chain: std.ArrayList([]const u8) = .empty;
+        defer redirect_chain.deinit(self.allocator);
+
+        const meta = try parseCurlHeaderDump(self.allocator, &self.jar, url, header_bytes, &redirect_chain);
+        errdefer self.allocator.free(meta.url);
+        errdefer self.allocator.free(meta.content_type);
+
+        return .{
+            .requested_url = try self.allocator.dupe(u8, url),
+            .url = meta.url,
+            .body = body,
+            .status_code = meta.status_code,
+            .content_type = meta.content_type,
+            .redirect_chain = try redirect_chain.toOwnedSlice(self.allocator),
+            .cookie_count = self.jar.count(),
+        };
+    }
+};
+
 const max_redirects = 10;
 const max_body_bytes = 8 * 1024 * 1024;
 const max_header_bytes = 256 * 1024;
-const max_cookie_bytes = 64 * 1024;
 const redirect_buf_len = 8192;
 
 pub fn fetchHtml(allocator: std.mem.Allocator, url: []const u8, user_agent: []const u8) !FetchResult {
-    try validateUrl(url);
-
-    return fetchHtmlStd(allocator, url, user_agent) catch |err| switch (err) {
-        error.TlsInitializationFailed, error.CertificateBundleLoadFailure => try fetchHtmlCurl(allocator, url, user_agent),
-        else => return err,
-    };
-}
-
-fn fetchHtmlStd(allocator: std.mem.Allocator, url: []const u8, user_agent: []const u8) !FetchResult {
-    try validateUrl(url);
-
-    var client: std.http.Client = .{
-        .allocator = allocator,
-        .io = std.Io.Threaded.global_single_threaded.io(),
-    };
-    defer client.deinit();
-
-    var jar = cookies.CookieJar.init(allocator);
-    defer jar.deinit();
-
-    var redirect_chain: std.ArrayList([]const u8) = .empty;
-    defer redirect_chain.deinit(allocator);
-
-    var current_url = url;
-    var current_url_buf_a: [redirect_buf_len]u8 = undefined;
-    var current_url_buf_b: [redirect_buf_len]u8 = undefined;
-    var resolve_buf: [redirect_buf_len]u8 = undefined;
-    var use_buf_a = true;
-    var redirects_seen: usize = 0;
-
-    while (true) {
-        const uri = try std.Uri.parse(current_url);
-        const cookie_header = try jar.cookieHeader(allocator, current_url);
-        defer if (cookie_header) |header| allocator.free(header);
-
-        var base_headers = [_]std.http.Header{
-            .{ .name = "User-Agent", .value = user_agent },
-            .{ .name = "Accept", .value = "text/html,application/xhtml+xml,*/*" },
-            .{ .name = "Accept-Encoding", .value = "gzip, deflate" },
-        };
-        var cookie_headers = [_]std.http.Header{
-            .{ .name = "User-Agent", .value = user_agent },
-            .{ .name = "Accept", .value = "text/html,application/xhtml+xml,*/*" },
-            .{ .name = "Accept-Encoding", .value = "gzip, deflate" },
-            .{ .name = "Cookie", .value = "" },
-        };
-        const extra_headers = if (cookie_header) |header| blk: {
-            cookie_headers[3].value = header;
-            break :blk cookie_headers[0..];
-        } else base_headers[0..];
-
-        var req = try client.request(.GET, uri, .{
-            .redirect_behavior = .unhandled,
-            .extra_headers = extra_headers,
-        });
-        defer req.deinit();
-
-        try req.sendBodiless();
-        var response = try req.receiveHead(&.{});
-        const status_code: u16 = @intFromEnum(response.head.status);
-
-        try appendSetCookieHeaders(&jar, current_url, response.head);
-
-        if (isRedirectStatus(status_code)) {
-            if (redirects_seen >= max_redirects) return error.TooManyRedirects;
-
-            const location = response.head.location orelse return error.RedirectLocationMissing;
-            const next_url_buf = if (use_buf_a) current_url_buf_a[0..] else current_url_buf_b[0..];
-            const next_url = try resolveValidatedRedirectUrl(current_url, location, resolve_buf[0..], next_url_buf);
-            try redirect_chain.append(allocator, try allocator.dupe(u8, next_url));
-
-            current_url = next_url;
-            use_buf_a = !use_buf_a;
-            redirects_seen += 1;
-            continue;
-        }
-
-        if (status_code < 200 or status_code >= 300) {
-            return error.HttpError;
-        }
-
-        const content_type = try allocator.dupe(u8, response.head.content_type orelse "text/html");
-        errdefer allocator.free(content_type);
-
-        var body: std.ArrayList(u8) = .empty;
-        errdefer body.deinit(allocator);
-
-        var transfer_buf: [8192]u8 = undefined;
-        var decompress: std.http.Decompress = undefined;
-        var decompress_buf: [std.compress.flate.max_window_len]u8 = undefined;
-        const reader = response.readerDecompressing(&transfer_buf, &decompress, &decompress_buf);
-        try reader.appendRemainingUnlimited(allocator, &body);
-        if (body.items.len > max_body_bytes) return error.ResponseTooLarge;
-
-        return .{
-            .requested_url = try allocator.dupe(u8, url),
-            .url = try allocator.dupe(u8, current_url),
-            .body = body.items,
-            .status_code = status_code,
-            .content_type = content_type,
-            .redirect_chain = try redirect_chain.toOwnedSlice(allocator),
-            .cookie_count = jar.count(),
-        };
-    }
-}
-
-fn fetchHtmlCurl(allocator: std.mem.Allocator, url: []const u8, user_agent: []const u8) !FetchResult {
-    const io = std.Io.Threaded.global_single_threaded.io();
-    const cwd = std.Io.Dir.cwd();
-    const temp_dir_path = try createTempDir(allocator);
-    defer allocator.free(temp_dir_path);
-    defer cwd.deleteTree(io, temp_dir_path) catch {};
-
-    const headers_path = try std.fmt.allocPrint(allocator, "{s}/headers.txt", .{temp_dir_path});
-    defer allocator.free(headers_path);
-    const body_path = try std.fmt.allocPrint(allocator, "{s}/body.bin", .{temp_dir_path});
-    defer allocator.free(body_path);
-    const cookie_path = try std.fmt.allocPrint(allocator, "{s}/cookies.txt", .{temp_dir_path});
-    defer allocator.free(cookie_path);
-
-    const result = try process.runCommand(allocator, &.{
-        "curl",
-        "-fsSL",
-        "--compressed",
-        "-A",
-        user_agent,
-        "-D",
-        headers_path,
-        "-o",
-        body_path,
-        "-c",
-        cookie_path,
-        "-b",
-        cookie_path,
-        url,
-    }, 64 * 1024);
-    defer allocator.free(result.stdout);
-
-    if (result.term != 0) return error.HttpError;
-
-    const header_bytes = cwd.readFileAlloc(io, headers_path, allocator, .limited(max_header_bytes)) catch |err| switch (err) {
-        error.StreamTooLong => return error.ResponseTooLarge,
-        else => return err,
-    };
-    defer allocator.free(header_bytes);
-
-    const body = cwd.readFileAlloc(io, body_path, allocator, .limited(max_body_bytes)) catch |err| switch (err) {
-        error.StreamTooLong => return error.ResponseTooLarge,
-        else => return err,
-    };
-
-    var redirect_chain: std.ArrayList([]const u8) = .empty;
-    defer redirect_chain.deinit(allocator);
-
-    const meta = try parseCurlHeaderDump(allocator, url, header_bytes, &redirect_chain);
-    errdefer allocator.free(meta.url);
-    errdefer allocator.free(meta.content_type);
-
-    return .{
-        .requested_url = try allocator.dupe(u8, url),
-        .url = meta.url,
-        .body = body,
-        .status_code = meta.status_code,
-        .content_type = meta.content_type,
-        .redirect_chain = try redirect_chain.toOwnedSlice(allocator),
-        .cookie_count = try countCurlCookies(allocator, cookie_path),
-    };
+    var session = Session.init(allocator, user_agent);
+    defer session.deinit();
+    return session.navigate(url);
 }
 
 fn appendSetCookieHeaders(jar: *cookies.CookieJar, request_url: []const u8, head: std.http.Client.Response.Head) !void {
@@ -211,6 +286,22 @@ fn appendSetCookieHeaders(jar: *cookies.CookieJar, request_url: []const u8, head
         if (std.ascii.eqlIgnoreCase(header.name, "set-cookie")) {
             try jar.absorbSetCookie(request_url, header.value);
         }
+    }
+}
+
+fn updateRedirectRequest(status_code: u16, method: *std.http.Method, body: *?[]const u8, content_type: *?[]const u8) void {
+    switch (status_code) {
+        301, 302 => if (method.*.requestHasBody()) {
+            method.* = .GET;
+            body.* = null;
+            content_type.* = null;
+        },
+        303 => {
+            method.* = .GET;
+            body.* = null;
+            content_type.* = null;
+        },
+        else => {},
     }
 }
 
@@ -228,6 +319,7 @@ const HeaderBlock = struct {
 
 fn parseCurlHeaderDump(
     allocator: std.mem.Allocator,
+    jar: *cookies.CookieJar,
     start_url: []const u8,
     header_bytes: []const u8,
     redirect_chain: *std.ArrayList([]const u8),
@@ -262,6 +354,9 @@ fn parseCurlHeaderDump(
         if (std.ascii.eqlIgnoreCase(name, "content-type")) {
             block.content_type = value;
             continue;
+        }
+        if (std.ascii.eqlIgnoreCase(name, "set-cookie")) {
+            try jar.absorbSetCookie(current_url, value);
         }
     }
 
@@ -305,26 +400,6 @@ fn parseStatusCode(line: []const u8) ?u16 {
     return std.fmt.parseInt(u16, status_str, 10) catch null;
 }
 
-fn countCurlCookies(allocator: std.mem.Allocator, cookie_path: []const u8) !usize {
-    const io = std.Io.Threaded.global_single_threaded.io();
-    const cwd = std.Io.Dir.cwd();
-    const cookie_bytes = cwd.readFileAlloc(io, cookie_path, allocator, .limited(max_cookie_bytes)) catch |err| switch (err) {
-        error.FileNotFound => return 0,
-        error.StreamTooLong => return 0,
-        else => return err,
-    };
-    defer allocator.free(cookie_bytes);
-
-    var count: usize = 0;
-    var lines = std.mem.splitScalar(u8, cookie_bytes, '\n');
-    while (lines.next()) |raw_line| {
-        const line = std.mem.trim(u8, raw_line, " \r\t");
-        if (line.len == 0 or line[0] == '#') continue;
-        count += 1;
-    }
-    return count;
-}
-
 fn createTempDir(allocator: std.mem.Allocator) ![]const u8 {
     const io = std.Io.Threaded.global_single_threaded.io();
     const cwd = std.Io.Dir.cwd();
@@ -346,10 +421,6 @@ fn createTempDir(allocator: std.mem.Allocator) ![]const u8 {
     }
 
     return error.TempDirCreateFailed;
-}
-
-fn freeOwnedStrings(allocator: std.mem.Allocator, values: []const []const u8) void {
-    for (values) |value| allocator.free(value);
 }
 
 pub fn validateUrl(url: []const u8) ValidationError!void {
@@ -445,7 +516,7 @@ fn resolveValidatedRedirectUrl(base_url: []const u8, location: []const u8, aux_b
     if (location.len > aux_buf.len) return error.RedirectLocationOversize;
 
     @memcpy(aux_buf[0..location.len], location);
-    var remaining_aux = aux_buf;
+    var remaining_aux: []u8 = aux_buf;
     const resolved_uri = base_uri.resolveInPlace(location.len, &remaining_aux) catch {
         return error.RedirectLocationInvalid;
     };
@@ -469,19 +540,23 @@ test "validateUrl rejects localhost and private ranges" {
 test "parseCurlHeaderDump tracks redirect chain and final content type" {
     var redirect_chain: std.ArrayList([]const u8) = .empty;
     defer {
-        freeOwnedStrings(std.testing.allocator, redirect_chain.items);
+        for (redirect_chain.items) |value| std.testing.allocator.free(value);
         redirect_chain.deinit(std.testing.allocator);
     }
+
+    var jar = cookies.CookieJar.init(std.testing.allocator);
+    defer jar.deinit();
 
     const headers =
         "HTTP/1.1 302 Found\r\n" ++
         "Location: /final\r\n" ++
+        "Set-Cookie: session=abc; Path=/\r\n" ++
         "\r\n" ++
         "HTTP/1.1 200 OK\r\n" ++
         "Content-Type: text/html; charset=utf-8\r\n" ++
         "\r\n";
 
-    const meta = try parseCurlHeaderDump(std.testing.allocator, "https://example.com/start", headers, &redirect_chain);
+    const meta = try parseCurlHeaderDump(std.testing.allocator, &jar, "https://example.com/start", headers, &redirect_chain);
     defer std.testing.allocator.free(meta.url);
     defer std.testing.allocator.free(meta.content_type);
 
@@ -490,4 +565,15 @@ test "parseCurlHeaderDump tracks redirect chain and final content type" {
     try std.testing.expectEqualStrings("https://example.com/final", meta.url);
     try std.testing.expectEqual(@as(u16, 200), meta.status_code);
     try std.testing.expectEqualStrings("text/html; charset=utf-8", meta.content_type);
+    try std.testing.expectEqual(@as(usize, 1), jar.count());
+}
+
+test "updateRedirectRequest converts post redirects to get when needed" {
+    var method: std.http.Method = .POST;
+    var body: ?[]const u8 = "username=admin";
+    var content_type: ?[]const u8 = "application/x-www-form-urlencoded";
+    updateRedirectRequest(302, &method, &body, &content_type);
+    try std.testing.expectEqual(std.http.Method.GET, method);
+    try std.testing.expectEqual(@as(?[]const u8, null), body);
+    try std.testing.expectEqual(@as(?[]const u8, null), content_type);
 }

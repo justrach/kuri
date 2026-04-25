@@ -21,6 +21,19 @@ pub fn renderUrlText(allocator: std.mem.Allocator, url: []const u8, format: mode
     return shell.renderPageWithFormat(allocator, page, format, selector);
 }
 
+pub fn submitFormText(
+    allocator: std.mem.Allocator,
+    url: []const u8,
+    form_index: usize,
+    overrides: []const model.FieldInput,
+    format: model.DumpFormat,
+    selector: ?[]const u8,
+) ![]const u8 {
+    const runtime = BrowserRuntime.init(allocator);
+    const page = try runtime.submitForm(url, form_index, overrides);
+    return shell.renderPageWithFormat(allocator, page, format, selector);
+}
+
 const model = @import("model.zig");
 
 test "shape reports scaffold defaults" {

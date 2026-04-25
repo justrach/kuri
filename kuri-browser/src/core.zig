@@ -40,13 +40,17 @@ pub const BrowserRuntime = struct {
             .transport = "stateful fetcher with redirects, cookies, and curl fallback",
             .dom = "parsed HTML tree with basic selector queries",
             .js = "deferred until the core page model is stable",
-            .automation_surface = "DOM queries only until JS and action primitives land",
+            .automation_surface = "DOM queries and basic form submission",
             .fallback_strategy = "native_static -> native_js_later -> external_browser",
         };
     }
 
     pub fn loadPage(self: *const BrowserRuntime, url: []const u8) !model.Page {
         return render.renderUrl(self.allocator, url);
+    }
+
+    pub fn submitForm(self: *const BrowserRuntime, url: []const u8, form_index: usize, overrides: []const model.FieldInput) !model.Page {
+        return render.submitFormUrl(self.allocator, url, form_index, overrides);
     }
 };
 

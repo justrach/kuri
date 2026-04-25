@@ -26,6 +26,11 @@ pub const FormField = struct {
     value: []const u8,
 };
 
+pub const FieldInput = struct {
+    name: []const u8,
+    value: []const u8,
+};
+
 pub const Form = struct {
     method: []const u8,
     action: []const u8,
