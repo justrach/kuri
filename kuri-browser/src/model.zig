@@ -26,7 +26,20 @@ pub const Resource = struct {
     status_code: u16 = 0,
     content_type: []const u8 = "",
     body_size: usize = 0,
+    body_text: []const u8 = "",
     loaded: bool = false,
+    error_message: []const u8 = "",
+};
+
+pub const JsExecution = struct {
+    enabled: bool = false,
+    inline_scripts: usize = 0,
+    external_scripts: usize = 0,
+    executed_scripts: usize = 0,
+    failed_scripts: usize = 0,
+    output: []const u8 = "",
+    eval_result: []const u8 = "",
+    document_title: []const u8 = "",
     error_message: []const u8 = "",
 };
 
@@ -57,6 +70,7 @@ pub const DumpFormat = enum {
     links,
     forms,
     resources,
+    js,
 
     pub fn parse(value: []const u8) ?DumpFormat {
         if (std.mem.eql(u8, value, "summary")) return .summary;
@@ -65,6 +79,7 @@ pub const DumpFormat = enum {
         if (std.mem.eql(u8, value, "links")) return .links;
         if (std.mem.eql(u8, value, "forms")) return .forms;
         if (std.mem.eql(u8, value, "resources")) return .resources;
+        if (std.mem.eql(u8, value, "js")) return .js;
         return null;
     }
 
@@ -76,6 +91,7 @@ pub const DumpFormat = enum {
             .links => "links",
             .forms => "forms",
             .resources => "resources",
+            .js => "js",
         };
     }
 };
@@ -90,6 +106,7 @@ pub const Page = struct {
     links: []Link,
     forms: []Form,
     resources: []Resource,
+    js: JsExecution,
     redirect_chain: []const []const u8,
     cookie_count: usize,
     status_code: u16,
@@ -111,8 +128,10 @@ test "dump formats parse and label" {
     try std.testing.expectEqual(DumpFormat.links, DumpFormat.parse("links").?);
     try std.testing.expectEqual(DumpFormat.forms, DumpFormat.parse("forms").?);
     try std.testing.expectEqual(DumpFormat.resources, DumpFormat.parse("resources").?);
+    try std.testing.expectEqual(DumpFormat.js, DumpFormat.parse("js").?);
     try std.testing.expectEqual(@as(?DumpFormat, null), DumpFormat.parse("wat"));
     try std.testing.expectEqualStrings("links", DumpFormat.links.label());
     try std.testing.expectEqualStrings("forms", DumpFormat.forms.label());
     try std.testing.expectEqualStrings("resources", DumpFormat.resources.label());
+    try std.testing.expectEqualStrings("js", DumpFormat.js.label());
 }

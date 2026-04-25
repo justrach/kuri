@@ -27,6 +27,8 @@ const RenderCommand = struct {
     url: []const u8,
     dump: model.DumpFormat = .summary,
     selector: ?[]const u8 = null,
+    js_enabled: bool = false,
+    eval_expression: ?[]const u8 = null,
     har_path: ?[]const u8 = null,
 };
 
@@ -36,6 +38,8 @@ const SubmitCommand = struct {
     fields: []const model.FieldInput = &.{},
     dump: model.DumpFormat = .summary,
     selector: ?[]const u8 = null,
+    js_enabled: bool = false,
+    eval_expression: ?[]const u8 = null,
     har_path: ?[]const u8 = null,
 };
 
@@ -103,6 +107,11 @@ pub fn main(init: std.process.Init.Minimal) !void {
             std.debug.print("{s}", .{shell.usageText()});
             std.process.exit(1);
         },
+        error.MissingEvalValue => {
+            std.debug.print("error: --eval requires an expression\n", .{});
+            std.debug.print("{s}", .{shell.usageText()});
+            std.process.exit(1);
+        },
         else => return err,
     };
 
@@ -118,14 +127,20 @@ pub fn main(init: std.process.Init.Minimal) !void {
             std.debug.print("{s}", .{text});
         },
         .render => |render_cmd| {
-            const output = try runtime.renderUrlOutput(arena, render_cmd.url, render_cmd.dump, render_cmd.selector, render_cmd.har_path != null);
+            const output = try runtime.renderUrlOutput(arena, render_cmd.url, render_cmd.dump, render_cmd.selector, render_cmd.har_path != null, .{
+                .enabled = render_cmd.js_enabled,
+                .eval_expression = render_cmd.eval_expression,
+            });
             if (render_cmd.har_path) |path| {
                 try writeFile(path, output.har_json.?);
             }
             std.debug.print("{s}", .{output.text});
         },
         .submit => |submit_cmd| {
-            const output = runtime.submitFormOutput(arena, submit_cmd.url, submit_cmd.form_index, submit_cmd.fields, submit_cmd.dump, submit_cmd.selector, submit_cmd.har_path != null) catch |err| switch (err) {
+            const output = runtime.submitFormOutput(arena, submit_cmd.url, submit_cmd.form_index, submit_cmd.fields, submit_cmd.dump, submit_cmd.selector, submit_cmd.har_path != null, .{
+                .enabled = submit_cmd.js_enabled,
+                .eval_expression = submit_cmd.eval_expression,
+            }) catch |err| switch (err) {
                 error.FormNotFound => {
                     std.debug.print("error: form index {d} not found on page\n", .{submit_cmd.form_index});
                     std.process.exit(1);
@@ -184,6 +199,18 @@ fn parseRenderCommand(args: []const []const u8) !RenderCommand {
             i += 2;
             continue;
         }
+        if (std.mem.eql(u8, arg, "--js")) {
+            render_cmd.js_enabled = true;
+            i += 1;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--eval")) {
+            if (i + 1 >= args.len) return error.MissingEvalValue;
+            render_cmd.js_enabled = true;
+            render_cmd.eval_expression = args[i + 1];
+            i += 2;
+            continue;
+        }
         if (std.mem.eql(u8, arg, "--har")) {
             if (i + 1 >= args.len) return error.MissingHarPathValue;
             render_cmd.har_path = args[i + 1];
@@ -218,6 +245,18 @@ fn parseSubmitCommand(allocator: std.mem.Allocator, args: []const []const u8) !S
         if (std.mem.eql(u8, arg, "--selector")) {
             if (i + 1 >= args.len) return error.MissingSelectorValue;
             submit_cmd.selector = args[i + 1];
+            i += 2;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--js")) {
+            submit_cmd.js_enabled = true;
+            i += 1;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--eval")) {
+            if (i + 1 >= args.len) return error.MissingEvalValue;
+            submit_cmd.js_enabled = true;
+            submit_cmd.eval_expression = args[i + 1];
             i += 2;
             continue;
         }
@@ -297,8 +336,15 @@ test "parseCommand handles standard flags" {
     const forms_cmd = try parseCommand(arena, &.{ "kuri-browser", "render", "https://example.com", "--dump", "forms" });
     try std.testing.expectEqual(model.DumpFormat.forms, forms_cmd.render.dump);
 
+    const js_dump_cmd = try parseCommand(arena, &.{ "kuri-browser", "render", "https://example.com", "--dump", "js" });
+    try std.testing.expectEqual(model.DumpFormat.js, js_dump_cmd.render.dump);
+
     const har_cmd = try parseCommand(arena, &.{ "kuri-browser", "render", "https://example.com", "--har", "tmp.har" });
     try std.testing.expectEqualStrings("tmp.har", har_cmd.render.har_path.?);
+
+    const js_cmd = try parseCommand(arena, &.{ "kuri-browser", "render", "https://example.com", "--js", "--eval", "document.title" });
+    try std.testing.expect(js_cmd.render.js_enabled);
+    try std.testing.expectEqualStrings("document.title", js_cmd.render.eval_expression.?);
 
     const submit_cmd = try parseCommand(arena, &.{ "kuri-browser", "submit", "https://example.com/login", "--form-index", "2", "--field", "username=admin", "--field", "password=admin" });
     try std.testing.expectEqual(CommandTag.submit, std.meta.activeTag(submit_cmd));
@@ -309,6 +355,10 @@ test "parseCommand handles standard flags" {
 
     const submit_har_cmd = try parseCommand(arena, &.{ "kuri-browser", "submit", "https://example.com/login", "--field", "username=admin", "--har", "submit.har" });
     try std.testing.expectEqualStrings("submit.har", submit_har_cmd.submit.har_path.?);
+
+    const submit_js_cmd = try parseCommand(arena, &.{ "kuri-browser", "submit", "https://example.com/login", "--field", "username=admin", "--js", "--eval", "document.title" });
+    try std.testing.expect(submit_js_cmd.submit.js_enabled);
+    try std.testing.expectEqualStrings("document.title", submit_js_cmd.submit.eval_expression.?);
 
     const selector_cmd = try parseCommand(arena, &.{ "kuri-browser", "render", "https://example.com", "--selector", ".titleline a" });
     try std.testing.expectEqualStrings(".titleline a", selector_cmd.render.selector.?);
@@ -324,6 +374,7 @@ test "parseCommand rejects unknown input" {
     try std.testing.expectError(error.MissingDumpValue, parseCommand(arena, &.{ "kuri-browser", "render", "https://example.com", "--dump" }));
     try std.testing.expectError(error.InvalidDump, parseCommand(arena, &.{ "kuri-browser", "render", "https://example.com", "--dump", "wat" }));
     try std.testing.expectError(error.MissingSelectorValue, parseCommand(arena, &.{ "kuri-browser", "render", "https://example.com", "--selector" }));
+    try std.testing.expectError(error.MissingEvalValue, parseCommand(arena, &.{ "kuri-browser", "render", "https://example.com", "--eval" }));
     try std.testing.expectError(error.MissingHarPathValue, parseCommand(arena, &.{ "kuri-browser", "render", "https://example.com", "--har" }));
     try std.testing.expectError(error.MissingFieldValue, parseCommand(arena, &.{ "kuri-browser", "submit", "https://example.com/login", "--field" }));
     try std.testing.expectError(error.InvalidFieldSyntax, parseCommand(arena, &.{ "kuri-browser", "submit", "https://example.com/login", "--field", "=admin" }));

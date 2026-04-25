@@ -1,4 +1,5 @@
 const std = @import("std");
+const js_runtime = @import("js_runtime.zig");
 const model = @import("model.zig");
 const render = @import("render.zig");
 
@@ -39,18 +40,32 @@ pub const BrowserRuntime = struct {
             .shell = "CLI shell with text-first views",
             .transport = "stateful fetcher with redirects, cookies, subresource loading, and curl fallback",
             .dom = "parsed HTML tree with basic selector queries",
-            .js = "deferred until the core page model is stable",
-            .automation_surface = "DOM queries, resource inspection, and basic form submission",
+            .js = "QuickJS evaluation with DOM shims for inline and external scripts",
+            .automation_surface = "DOM queries, resource inspection, JS eval, and basic form submission",
             .fallback_strategy = "native_static -> native_js_later -> external_browser",
         };
     }
 
     pub fn loadPage(self: *const BrowserRuntime, url: []const u8) !model.Page {
-        return render.renderUrl(self.allocator, url);
+        return self.loadPageWithOptions(url, .{});
+    }
+
+    pub fn loadPageWithOptions(self: *const BrowserRuntime, url: []const u8, js_options: js_runtime.Options) !model.Page {
+        return (try render.renderUrlArtifacts(self.allocator, url, .{ .js = js_options })).page;
     }
 
     pub fn submitForm(self: *const BrowserRuntime, url: []const u8, form_index: usize, overrides: []const model.FieldInput) !model.Page {
-        return render.submitFormUrl(self.allocator, url, form_index, overrides);
+        return self.submitFormWithOptions(url, form_index, overrides, .{});
+    }
+
+    pub fn submitFormWithOptions(
+        self: *const BrowserRuntime,
+        url: []const u8,
+        form_index: usize,
+        overrides: []const model.FieldInput,
+        js_options: js_runtime.Options,
+    ) !model.Page {
+        return (try render.submitFormArtifacts(self.allocator, url, form_index, overrides, .{ .js = js_options })).page;
     }
 };
 

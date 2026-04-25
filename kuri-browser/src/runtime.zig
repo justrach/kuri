@@ -1,5 +1,6 @@
 const std = @import("std");
 const core = @import("core.zig");
+const js_runtime = @import("js_runtime.zig");
 const render = @import("render.zig");
 const shell = @import("shell.zig");
 
@@ -17,8 +18,18 @@ pub fn roadmapText(allocator: std.mem.Allocator) ![]const u8 {
 }
 
 pub fn renderUrlText(allocator: std.mem.Allocator, url: []const u8, format: model.DumpFormat, selector: ?[]const u8) ![]const u8 {
+    return renderUrlTextWithOptions(allocator, url, format, selector, .{});
+}
+
+pub fn renderUrlTextWithOptions(
+    allocator: std.mem.Allocator,
+    url: []const u8,
+    format: model.DumpFormat,
+    selector: ?[]const u8,
+    js_options: js_runtime.Options,
+) ![]const u8 {
     const runtime = BrowserRuntime.init(allocator);
-    const page = try runtime.loadPage(url);
+    const page = try runtime.loadPageWithOptions(url, js_options);
     return shell.renderPageWithFormat(allocator, page, format, selector);
 }
 
@@ -30,8 +41,20 @@ pub fn submitFormText(
     format: model.DumpFormat,
     selector: ?[]const u8,
 ) ![]const u8 {
+    return submitFormTextWithOptions(allocator, url, form_index, overrides, format, selector, .{});
+}
+
+pub fn submitFormTextWithOptions(
+    allocator: std.mem.Allocator,
+    url: []const u8,
+    form_index: usize,
+    overrides: []const model.FieldInput,
+    format: model.DumpFormat,
+    selector: ?[]const u8,
+    js_options: js_runtime.Options,
+) ![]const u8 {
     const runtime = BrowserRuntime.init(allocator);
-    const page = try runtime.submitForm(url, form_index, overrides);
+    const page = try runtime.submitFormWithOptions(url, form_index, overrides, js_options);
     return shell.renderPageWithFormat(allocator, page, format, selector);
 }
 
@@ -46,11 +69,15 @@ pub fn renderUrlOutput(
     format: model.DumpFormat,
     selector: ?[]const u8,
     capture_har: bool,
+    js_options: js_runtime.Options,
 ) !CommandOutput {
     if (!capture_har) {
-        return .{ .text = try renderUrlText(allocator, url, format, selector) };
+        return .{ .text = try renderUrlTextWithOptions(allocator, url, format, selector, js_options) };
     }
-    const artifacts = try render.renderUrlArtifacts(allocator, url, true);
+    const artifacts = try render.renderUrlArtifacts(allocator, url, .{
+        .capture_har = true,
+        .js = js_options,
+    });
     return .{
         .text = try shell.renderPageWithFormat(allocator, artifacts.page, format, selector),
         .har_json = artifacts.har_json,
@@ -65,11 +92,15 @@ pub fn submitFormOutput(
     format: model.DumpFormat,
     selector: ?[]const u8,
     capture_har: bool,
+    js_options: js_runtime.Options,
 ) !CommandOutput {
     if (!capture_har) {
-        return .{ .text = try submitFormText(allocator, url, form_index, overrides, format, selector) };
+        return .{ .text = try submitFormTextWithOptions(allocator, url, form_index, overrides, format, selector, js_options) };
     }
-    const artifacts = try render.submitFormArtifacts(allocator, url, form_index, overrides, true);
+    const artifacts = try render.submitFormArtifacts(allocator, url, form_index, overrides, .{
+        .capture_har = true,
+        .js = js_options,
+    });
     return .{
         .text = try shell.renderPageWithFormat(allocator, artifacts.page, format, selector),
         .har_json = artifacts.har_json,

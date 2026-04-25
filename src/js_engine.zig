@@ -124,6 +124,17 @@ pub fn evalHtmlScriptsWithUrl(html: []const u8, url: ?[]const u8, allocator: std
     return engine.evalAlloc(allocator, "globalThis.__browdie_output");
 }
 
+/// Prepare an existing QuickJS engine with the current page HTML and URL.
+/// This exposes the same DOM/window shims used by evalHtmlScriptsWithUrl.
+pub fn prepareDomEngine(engine: *JsEngine, html: []const u8, url: ?[]const u8, allocator: std.mem.Allocator) void {
+    injectDomStubs(engine, html, url, allocator);
+}
+
+/// Return the current captured document.write-style output from an existing engine.
+pub fn outputAlloc(engine: *JsEngine, allocator: std.mem.Allocator) ?[]const u8 {
+    return engine.evalAlloc(allocator, "globalThis.__browdie_output");
+}
+
 /// Inject Layer 3 DOM stubs into a JsEngine context.
 /// Provides: document.querySelector/All, getElementById, title, body,
 ///           window.location, console.log, document.write/writeln.

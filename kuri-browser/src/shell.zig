@@ -16,8 +16,8 @@ pub fn usageText() []const u8 {
         \\  kuri-browser --version
         \\  kuri-browser status
         \\  kuri-browser roadmap
-        \\  kuri-browser render <url> [--dump summary|html|text|links|forms|resources] [--selector <css>] [--har <file>]
-        \\  kuri-browser submit <url> [--form-index <n>] [--field name=value ...] [--dump summary|html|text|links|forms|resources] [--selector <css>] [--har <file>]
+        \\  kuri-browser render <url> [--dump summary|html|text|links|forms|resources|js] [--selector <css>] [--js] [--eval <expr>] [--har <file>]
+        \\  kuri-browser submit <url> [--form-index <n>] [--field name=value ...] [--dump summary|html|text|links|forms|resources|js] [--selector <css>] [--js] [--eval <expr>] [--har <file>]
         \\
         \\EXAMPLES
         \\  zig build run -- --help
@@ -26,9 +26,10 @@ pub fn usageText() []const u8 {
         \\  zig build run -- render https://news.ycombinator.com
         \\  zig build run -- render https://example.com --dump html
         \\  zig build run -- render https://example.com --har example.har
+        \\  zig build run -- render https://news.ycombinator.com --js --eval "document.querySelectorAll('a').length" --dump js
         \\  zig build run -- render https://quotes.toscrape.com/login --dump forms
         \\  zig build run -- render https://www.wikipedia.org/ --dump resources --har wiki.har
-        \\  zig build run -- submit https://quotes.toscrape.com/login --field username=admin --field password=admin --dump text --har login.har
+        \\  zig build run -- submit https://quotes.toscrape.com/login --field username=admin --field password=admin --js --dump text --har login.har
         \\  zig build run -- render https://news.ycombinator.com --selector ".titleline a" --dump text
         \\
     ;
@@ -91,10 +92,11 @@ pub fn renderPageWithFormat(allocator: std.mem.Allocator, page: model.Page, form
     return switch (format) {
         .summary => renderSummaryPageText(allocator, page),
         .html => allocator.dupe(u8, page.html),
-        .text => allocator.dupe(u8, page.text),
+        .text => renderFullText(allocator, page),
         .links => renderLinksOnlyText(allocator, page.links),
         .forms => renderFormsText(allocator, page.forms),
         .resources => renderResourcesText(allocator, page.resources),
+        .js => renderJsText(allocator, page.js),
     };
 }
 
@@ -117,6 +119,17 @@ fn renderSummaryPageText(allocator: std.mem.Allocator, page: model.Page) ![]cons
     try out.print(allocator, "links: {d}\n", .{page.links.len});
     try out.print(allocator, "forms: {d}\n", .{page.forms.len});
     try out.print(allocator, "resources: {d} total, {d} loaded\n\n", .{ page.resources.len, loadedResourceCount(page.resources) });
+    if (page.js.enabled) {
+        try out.print(allocator, "js: enabled\n", .{});
+        try out.print(allocator, "js-scripts: {d} executed ({d} inline, {d} external, {d} failed)\n\n", .{
+            page.js.executed_scripts,
+            page.js.inline_scripts,
+            page.js.external_scripts,
+            page.js.failed_scripts,
+        });
+    } else {
+        try out.appendSlice(allocator, "js: disabled\n\n");
+    }
 
     try out.appendSlice(allocator, "--- text ---\n");
     const preview = previewText(page.text, 2500);
@@ -164,6 +177,21 @@ fn renderSummaryPageText(allocator: std.mem.Allocator, page: model.Page) ![]cons
         }
     }
 
+    if (page.js.enabled and (page.js.output.len > 0 or page.js.eval_result.len > 0 or page.js.error_message.len > 0)) {
+        try out.appendSlice(allocator, "\n--- js ---\n");
+        if (page.js.eval_result.len > 0) {
+            try out.print(allocator, "eval: {s}\n", .{page.js.eval_result});
+        }
+        if (page.js.output.len > 0) {
+            try out.appendSlice(allocator, "output:\n");
+            try out.appendSlice(allocator, page.js.output);
+            try out.append(allocator, '\n');
+        }
+        if (page.js.error_message.len > 0) {
+            try out.print(allocator, "error: {s}\n", .{page.js.error_message});
+        }
+    }
+
     return try out.toOwnedSlice(allocator);
 }
 
@@ -180,6 +208,7 @@ fn renderSelectorView(allocator: std.mem.Allocator, page: model.Page, format: mo
         .links => renderSelectedLinks(allocator, page, matches),
         .forms => std.fmt.allocPrint(allocator, "Selector-scoped form rendering is not supported for: {s}\n", .{selector}),
         .resources => std.fmt.allocPrint(allocator, "Selector-scoped resource rendering is not supported for: {s}\n", .{selector}),
+        .js => std.fmt.allocPrint(allocator, "Selector-scoped JS rendering is not supported for: {s}\n", .{selector}),
     };
 }
 
@@ -275,6 +304,11 @@ fn renderFormsText(allocator: std.mem.Allocator, forms: []const model.Form) ![]c
     return try out.toOwnedSlice(allocator);
 }
 
+fn renderFullText(allocator: std.mem.Allocator, page: model.Page) ![]const u8 {
+    if (!page.js.enabled or page.js.output.len == 0) return allocator.dupe(u8, page.text);
+    return std.fmt.allocPrint(allocator, "{s}\n\n--- js-output ---\n{s}", .{ page.text, page.js.output });
+}
+
 fn renderResourcesText(allocator: std.mem.Allocator, resources: []const model.Resource) ![]const u8 {
     if (resources.len == 0) return allocator.dupe(u8, "No resources found.\n");
 
@@ -295,6 +329,32 @@ fn renderResourcesText(allocator: std.mem.Allocator, resources: []const model.Re
     return try out.toOwnedSlice(allocator);
 }
 
+fn renderJsText(allocator: std.mem.Allocator, js: model.JsExecution) ![]const u8 {
+    if (!js.enabled) return allocator.dupe(u8, "JavaScript evaluation is disabled.\n");
+
+    var out: std.ArrayList(u8) = .empty;
+    try out.print(allocator, "enabled: yes\n", .{});
+    try out.print(allocator, "executed-scripts: {d}\n", .{js.executed_scripts});
+    try out.print(allocator, "inline-scripts: {d}\n", .{js.inline_scripts});
+    try out.print(allocator, "external-scripts: {d}\n", .{js.external_scripts});
+    try out.print(allocator, "failed-scripts: {d}\n", .{js.failed_scripts});
+    if (js.document_title.len > 0) {
+        try out.print(allocator, "document-title: {s}\n", .{js.document_title});
+    }
+    if (js.eval_result.len > 0) {
+        try out.print(allocator, "eval-result: {s}\n", .{js.eval_result});
+    }
+    if (js.error_message.len > 0) {
+        try out.print(allocator, "error: {s}\n", .{js.error_message});
+    }
+    if (js.output.len > 0) {
+        try out.appendSlice(allocator, "\n--- output ---\n");
+        try out.appendSlice(allocator, js.output);
+        try out.append(allocator, '\n');
+    }
+    return try out.toOwnedSlice(allocator);
+}
+
 fn loadedResourceCount(resources: []const model.Resource) usize {
     var count: usize = 0;
     for (resources) |resource| {
@@ -311,7 +371,9 @@ fn previewText(text: []const u8, max_len: usize) []const u8 {
 test "usage mentions render command" {
     try std.testing.expect(std.mem.indexOf(u8, usageText(), "render <url>") != null);
     try std.testing.expect(std.mem.indexOf(u8, usageText(), "submit <url>") != null);
-    try std.testing.expect(std.mem.indexOf(u8, usageText(), "--dump summary|html|text|links|forms|resources") != null);
+    try std.testing.expect(std.mem.indexOf(u8, usageText(), "--dump summary|html|text|links|forms|resources|js") != null);
     try std.testing.expect(std.mem.indexOf(u8, usageText(), "--selector <css>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, usageText(), "--js") != null);
+    try std.testing.expect(std.mem.indexOf(u8, usageText(), "--eval <expr>") != null);
     try std.testing.expect(std.mem.indexOf(u8, usageText(), "--har <file>") != null);
 }

@@ -1,6 +1,7 @@
 const std = @import("std");
 const dom = @import("dom.zig");
 const fetch = @import("fetch.zig");
+const js_runtime = @import("js_runtime.zig");
 const model = @import("model.zig");
 
 const default_pipeline = "fetch -> cookies -> redirects -> parsed-dom -> subresources -> text/forms";
@@ -12,6 +13,11 @@ pub const PageArtifacts = struct {
     har_json: ?[]const u8 = null,
 };
 
+pub const RenderOptions = struct {
+    capture_har: bool = false,
+    js: js_runtime.Options = .{},
+};
+
 const Submission = struct {
     method: std.http.Method,
     url: []const u8,
@@ -20,16 +26,16 @@ const Submission = struct {
 };
 
 pub fn renderUrl(allocator: std.mem.Allocator, url: []const u8) !model.Page {
-    return (try renderUrlArtifacts(allocator, url, false)).page;
+    return (try renderUrlArtifacts(allocator, url, .{})).page;
 }
 
-pub fn renderUrlArtifacts(allocator: std.mem.Allocator, url: []const u8, capture_har: bool) !PageArtifacts {
+pub fn renderUrlArtifacts(allocator: std.mem.Allocator, url: []const u8, options: RenderOptions) !PageArtifacts {
     var session = fetch.Session.init(allocator, "kuri-browser/0.0.0");
     defer session.deinit();
     const result = try session.navigate(url);
     return .{
-        .page = try pageFromFetchResultWithPipeline(allocator, &session, result, default_pipeline),
-        .har_json = if (capture_har) try session.harJson() else null,
+        .page = try pageFromFetchResultWithPipeline(allocator, &session, result, default_pipeline, options.js),
+        .har_json = if (options.capture_har) try session.harJson() else null,
     };
 }
 
@@ -39,7 +45,7 @@ pub fn submitFormUrl(
     form_index: usize,
     overrides: []const model.FieldInput,
 ) !model.Page {
-    return (try submitFormArtifacts(allocator, url, form_index, overrides, false)).page;
+    return (try submitFormArtifacts(allocator, url, form_index, overrides, .{})).page;
 }
 
 pub fn submitFormArtifacts(
@@ -47,13 +53,13 @@ pub fn submitFormArtifacts(
     url: []const u8,
     form_index: usize,
     overrides: []const model.FieldInput,
-    capture_har: bool,
+    options: RenderOptions,
 ) !PageArtifacts {
     var session = fetch.Session.init(allocator, "kuri-browser/0.0.0");
     defer session.deinit();
     return .{
-        .page = try submitFormWithSession(allocator, &session, url, form_index, overrides),
-        .har_json = if (capture_har) try session.harJson() else null,
+        .page = try submitFormWithSession(allocator, &session, url, form_index, overrides, options.js),
+        .har_json = if (options.capture_har) try session.harJson() else null,
     };
 }
 
@@ -92,10 +98,11 @@ fn pageFromFetchResultWithPipeline(
     session: *fetch.Session,
     result: fetch.FetchResult,
     pipeline: []const u8,
+    js_options: js_runtime.Options,
 ) !model.Page {
     const html = result.body;
     const document = try dom.Document.parse(allocator, html);
-    const title = try extractTitle(allocator, &document);
+    var title = try extractTitle(allocator, &document);
 
     const text_root = (try document.querySelector(allocator, "body")) orelse document.root();
     const text = try document.textContent(allocator, text_root);
@@ -103,6 +110,11 @@ fn pageFromFetchResultWithPipeline(
     const forms = try extractForms(allocator, &document, result.url);
     const resources = try extractResources(allocator, &document, result.url);
     try loadResources(allocator, session, resources, result.url);
+    const js = try js_runtime.evaluatePage(allocator, session, &document, html, result.url, resources, js_options);
+
+    if (js.document_title.len > 0 and !std.mem.eql(u8, js.document_title, title)) {
+        title = js.document_title;
+    }
 
     return .{
         .requested_url = result.requested_url,
@@ -114,12 +126,13 @@ fn pageFromFetchResultWithPipeline(
         .links = links,
         .forms = forms,
         .resources = resources,
+        .js = js,
         .redirect_chain = result.redirect_chain,
         .cookie_count = result.cookie_count,
         .status_code = result.status_code,
         .content_type = result.content_type,
         .fallback_mode = .native_static,
-        .pipeline = pipeline,
+        .pipeline = if (js_options.active()) try std.fmt.allocPrint(allocator, "{s} -> quickjs", .{pipeline}) else pipeline,
     };
 }
 
@@ -129,9 +142,10 @@ fn submitFormWithSession(
     url: []const u8,
     form_index: usize,
     overrides: []const model.FieldInput,
+    js_options: js_runtime.Options,
 ) !model.Page {
     const initial_result = try session.navigate(url);
-    const initial_page = try pageFromFetchResultWithPipeline(allocator, session, initial_result, default_pipeline);
+    const initial_page = try pageFromFetchResultWithPipeline(allocator, session, initial_result, default_pipeline, .{});
 
     if (form_index == 0 or form_index > initial_page.forms.len) return error.FormNotFound;
     const form = initial_page.forms[form_index - 1];
@@ -143,7 +157,7 @@ fn submitFormWithSession(
         .content_type = submission.content_type,
         .referer = initial_page.url,
     });
-    return pageFromFetchResultWithPipeline(allocator, session, submit_result, submit_pipeline);
+    return pageFromFetchResultWithPipeline(allocator, session, submit_result, submit_pipeline, js_options);
 }
 
 fn extractTitle(allocator: std.mem.Allocator, document: *const dom.Document) ![]const u8 {
@@ -366,7 +380,17 @@ fn loadResources(
         resource.status_code = result.status_code;
         resource.content_type = try allocator.dupe(u8, result.content_type);
         resource.body_size = result.body.len;
+        if (std.mem.eql(u8, resource.kind, "script") and isTextualResource(result.content_type) and result.body.len > 0) {
+            resource.body_text = try allocator.dupe(u8, result.body);
+        }
     }
+}
+
+fn isTextualResource(content_type: []const u8) bool {
+    return std.mem.startsWith(u8, content_type, "text/") or
+        std.mem.indexOf(u8, content_type, "javascript") != null or
+        std.mem.indexOf(u8, content_type, "json") != null or
+        std.mem.indexOf(u8, content_type, "xml") != null;
 }
 
 fn classifyLinkResource(rel_value: []const u8) ?[]const u8 {

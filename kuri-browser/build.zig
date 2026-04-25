@@ -3,15 +3,32 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const quickjs_dep = b.dependency("quickjs", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const jsengine_mod = b.createModule(.{
+        .root_source_file = b.path("../src/js_engine.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    jsengine_mod.addImport("quickjs", quickjs_dep.module("quickjs"));
+
+    const root_mod = b.createModule(.{
+        .root_source_file = b.path("src/main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    root_mod.addImport("jsengine", jsengine_mod);
 
     const exe = b.addExecutable(.{
         .name = "kuri-browser",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
+        .root_module = root_mod,
     });
+    exe.root_module.linkLibrary(quickjs_dep.artifact("quickjs-ng"));
 
     b.installArtifact(exe);
 
@@ -24,22 +41,30 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run kuri-browser");
     run_step.dependOn(&run_cmd.step);
 
-    const main_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
+    const main_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
     });
+    main_test_mod.addImport("jsengine", jsengine_mod);
+    const main_tests = b.addTest(.{
+        .root_module = main_test_mod,
+    });
+    main_tests.root_module.linkLibrary(quickjs_dep.artifact("quickjs-ng"));
     const run_main_tests = b.addRunArtifact(main_tests);
 
-    const runtime_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/runtime.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
+    const runtime_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/runtime.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
     });
+    runtime_test_mod.addImport("jsengine", jsengine_mod);
+    const runtime_tests = b.addTest(.{
+        .root_module = runtime_test_mod,
+    });
+    runtime_tests.root_module.linkLibrary(quickjs_dep.artifact("quickjs-ng"));
     const run_runtime_tests = b.addRunArtifact(runtime_tests);
 
     const test_step = b.step("test", "Run kuri-browser tests");
