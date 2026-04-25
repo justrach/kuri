@@ -146,6 +146,9 @@ test "parseCommand handles standard flags" {
     const links_cmd = try parseCommand(&.{ "kuri-browser", "render", "https://example.com", "--dump", "links" });
     try std.testing.expectEqual(model.DumpFormat.links, links_cmd.render.dump);
 
+    const forms_cmd = try parseCommand(&.{ "kuri-browser", "render", "https://example.com", "--dump", "forms" });
+    try std.testing.expectEqual(model.DumpFormat.forms, forms_cmd.render.dump);
+
     const selector_cmd = try parseCommand(&.{ "kuri-browser", "render", "https://example.com", "--selector", ".titleline a" });
     try std.testing.expectEqualStrings(".titleline a", selector_cmd.render.selector.?);
 }

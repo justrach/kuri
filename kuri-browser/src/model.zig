@@ -20,17 +20,34 @@ pub const Link = struct {
     href: []const u8,
 };
 
+pub const FormField = struct {
+    name: []const u8,
+    kind: []const u8,
+    value: []const u8,
+};
+
+pub const Form = struct {
+    method: []const u8,
+    action: []const u8,
+    enctype: []const u8,
+    id: []const u8,
+    class_name: []const u8,
+    fields: []FormField,
+};
+
 pub const DumpFormat = enum {
     summary,
     html,
     text,
     links,
+    forms,
 
     pub fn parse(value: []const u8) ?DumpFormat {
         if (std.mem.eql(u8, value, "summary")) return .summary;
         if (std.mem.eql(u8, value, "html")) return .html;
         if (std.mem.eql(u8, value, "text")) return .text;
         if (std.mem.eql(u8, value, "links")) return .links;
+        if (std.mem.eql(u8, value, "forms")) return .forms;
         return null;
     }
 
@@ -40,6 +57,7 @@ pub const DumpFormat = enum {
             .html => "html",
             .text => "text",
             .links => "links",
+            .forms => "forms",
         };
     }
 };
@@ -52,6 +70,7 @@ pub const Page = struct {
     title: []const u8,
     text: []const u8,
     links: []Link,
+    forms: []Form,
     redirect_chain: []const []const u8,
     cookie_count: usize,
     status_code: u16,
@@ -71,6 +90,8 @@ test "dump formats parse and label" {
     try std.testing.expectEqual(DumpFormat.html, DumpFormat.parse("html").?);
     try std.testing.expectEqual(DumpFormat.text, DumpFormat.parse("text").?);
     try std.testing.expectEqual(DumpFormat.links, DumpFormat.parse("links").?);
+    try std.testing.expectEqual(DumpFormat.forms, DumpFormat.parse("forms").?);
     try std.testing.expectEqual(@as(?DumpFormat, null), DumpFormat.parse("wat"));
     try std.testing.expectEqualStrings("links", DumpFormat.links.label());
+    try std.testing.expectEqualStrings("forms", DumpFormat.forms.label());
 }

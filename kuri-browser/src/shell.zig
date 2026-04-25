@@ -16,7 +16,7 @@ pub fn usageText() []const u8 {
         \\  kuri-browser --version
         \\  kuri-browser status
         \\  kuri-browser roadmap
-        \\  kuri-browser render <url> [--dump summary|html|text|links] [--selector <css>]
+        \\  kuri-browser render <url> [--dump summary|html|text|links|forms] [--selector <css>]
         \\
         \\EXAMPLES
         \\  zig build run -- --help
@@ -24,6 +24,7 @@ pub fn usageText() []const u8 {
         \\  zig build run -- roadmap
         \\  zig build run -- render https://news.ycombinator.com
         \\  zig build run -- render https://example.com --dump html
+        \\  zig build run -- render https://quotes.toscrape.com/login --dump forms
         \\  zig build run -- render https://news.ycombinator.com --selector ".titleline a" --dump text
         \\
     ;
@@ -88,6 +89,7 @@ pub fn renderPageWithFormat(allocator: std.mem.Allocator, page: model.Page, form
         .html => allocator.dupe(u8, page.html),
         .text => allocator.dupe(u8, page.text),
         .links => renderLinksOnlyText(allocator, page.links),
+        .forms => renderFormsText(allocator, page.forms),
     };
 }
 
@@ -107,7 +109,8 @@ fn renderSummaryPageText(allocator: std.mem.Allocator, page: model.Page) ![]cons
     try out.print(allocator, "redirects: {d}\n", .{page.redirect_chain.len});
     try out.print(allocator, "cookies: {d}\n", .{page.cookie_count});
     try out.print(allocator, "nodes: {d}\n", .{page.dom.nodeCount()});
-    try out.print(allocator, "links: {d}\n\n", .{page.links.len});
+    try out.print(allocator, "links: {d}\n", .{page.links.len});
+    try out.print(allocator, "forms: {d}\n\n", .{page.forms.len});
 
     try out.appendSlice(allocator, "--- text ---\n");
     const preview = previewText(page.text, 2500);
@@ -149,6 +152,7 @@ fn renderSelectorView(allocator: std.mem.Allocator, page: model.Page, format: mo
         .html => renderSelectedHtml(allocator, page, matches),
         .text => renderSelectedText(allocator, page, matches),
         .links => renderSelectedLinks(allocator, page, matches),
+        .forms => std.fmt.allocPrint(allocator, "Selector-scoped form rendering is not supported for: {s}\n", .{selector}),
     };
 }
 
@@ -215,6 +219,35 @@ fn renderLinksOnlyText(allocator: std.mem.Allocator, links: []const model.Link) 
     return try out.toOwnedSlice(allocator);
 }
 
+fn renderFormsText(allocator: std.mem.Allocator, forms: []const model.Form) ![]const u8 {
+    if (forms.len == 0) return allocator.dupe(u8, "No forms found.\n");
+
+    var out: std.ArrayList(u8) = .empty;
+    for (forms, 0..) |form, i| {
+        try out.print(allocator, "[form {d}]\n", .{i + 1});
+        try out.print(allocator, "method: {s}\n", .{form.method});
+        try out.print(allocator, "action: {s}\n", .{form.action});
+        try out.print(allocator, "enctype: {s}\n", .{form.enctype});
+        if (form.id.len > 0) try out.print(allocator, "id: {s}\n", .{form.id});
+        if (form.class_name.len > 0) try out.print(allocator, "class: {s}\n", .{form.class_name});
+        try out.print(allocator, "fields: {d}\n", .{form.fields.len});
+
+        for (form.fields, 0..) |field, field_index| {
+            const field_name = if (field.name.len == 0) "(unnamed)" else field.name;
+            const field_value = if (field.value.len == 0) "(empty)" else field.value;
+            try out.print(allocator, "  [{d}] {s} name={s} value={s}\n", .{
+                field_index + 1,
+                field.kind,
+                field_name,
+                field_value,
+            });
+        }
+
+        if (i + 1 < forms.len) try out.appendSlice(allocator, "\n");
+    }
+    return try out.toOwnedSlice(allocator);
+}
+
 fn previewText(text: []const u8, max_len: usize) []const u8 {
     if (text.len <= max_len) return text;
     return text[0..max_len];
@@ -222,6 +255,6 @@ fn previewText(text: []const u8, max_len: usize) []const u8 {
 
 test "usage mentions render command" {
     try std.testing.expect(std.mem.indexOf(u8, usageText(), "render <url>") != null);
-    try std.testing.expect(std.mem.indexOf(u8, usageText(), "--dump summary|html|text|links") != null);
+    try std.testing.expect(std.mem.indexOf(u8, usageText(), "--dump summary|html|text|links|forms") != null);
     try std.testing.expect(std.mem.indexOf(u8, usageText(), "--selector <css>") != null);
 }
