@@ -28,12 +28,23 @@ pub const FetchResult = struct {
     content_type: []const u8,
     redirect_chain: []const []const u8,
     cookie_count: usize,
+
+    pub fn deinit(self: *FetchResult, allocator: std.mem.Allocator) void {
+        allocator.free(self.requested_url);
+        allocator.free(self.url);
+        allocator.free(self.body);
+        allocator.free(self.content_type);
+        for (self.redirect_chain) |redirect_url| allocator.free(redirect_url);
+        allocator.free(self.redirect_chain);
+    }
 };
 
 pub const RequestConfig = struct {
     method: std.http.Method = .GET,
     body: ?[]const u8 = null,
     content_type: ?[]const u8 = null,
+    accept: []const u8 = "text/html,application/xhtml+xml,*/*",
+    referer: ?[]const u8 = null,
 };
 
 pub const Session = struct {
@@ -104,19 +115,21 @@ pub const Session = struct {
 
             var base_headers = [_]std.http.Header{
                 .{ .name = "User-Agent", .value = self.user_agent },
-                .{ .name = "Accept", .value = "text/html,application/xhtml+xml,*/*" },
+                .{ .name = "Accept", .value = config.accept },
                 .{ .name = "Accept-Encoding", .value = "gzip, deflate" },
-            };
-            var cookie_headers = [_]std.http.Header{
-                .{ .name = "User-Agent", .value = self.user_agent },
-                .{ .name = "Accept", .value = "text/html,application/xhtml+xml,*/*" },
-                .{ .name = "Accept-Encoding", .value = "gzip, deflate" },
+                .{ .name = "Referer", .value = "" },
                 .{ .name = "Cookie", .value = "" },
             };
-            const extra_headers = if (cookie_header) |header| blk: {
-                cookie_headers[3].value = header;
-                break :blk cookie_headers[0..];
-            } else base_headers[0..];
+            var header_count: usize = 3;
+            if (config.referer) |value| {
+                base_headers[header_count].value = value;
+                header_count += 1;
+            }
+            if (cookie_header) |header| {
+                base_headers[header_count].value = header;
+                header_count += 1;
+            }
+            const extra_headers = base_headers[0..header_count];
 
             var req = try self.client.request(current_method, uri, .{
                 .redirect_behavior = .unhandled,
@@ -247,7 +260,10 @@ pub const Session = struct {
             cookie_path,
             "-b",
             cookie_path,
+            "-H",
+            try std.fmt.allocPrint(self.allocator, "Accept: {s}", .{config.accept}),
         });
+        try owned_strings.append(self.allocator, argv.items[argv.items.len - 1]);
 
         if (config.method != .GET or config.body != null) {
             try argv.append(self.allocator, "-X");
@@ -264,6 +280,10 @@ pub const Session = struct {
             const cookie_arg = try std.fmt.allocPrint(self.allocator, "Cookie: {s}", .{value});
             try owned_strings.append(self.allocator, cookie_arg);
             try argv.appendSlice(self.allocator, &.{ "-H", cookie_arg });
+        }
+
+        if (config.referer) |value| {
+            try argv.appendSlice(self.allocator, &.{ "-e", value });
         }
 
         if (config.body) |body| {

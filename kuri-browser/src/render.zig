@@ -3,8 +3,9 @@ const dom = @import("dom.zig");
 const fetch = @import("fetch.zig");
 const model = @import("model.zig");
 
-const default_pipeline = "fetch -> cookies -> redirects -> parsed-dom -> text/forms";
-const submit_pipeline = "fetch -> cookies -> redirects -> submit -> parsed-dom -> text/forms";
+const default_pipeline = "fetch -> cookies -> redirects -> parsed-dom -> subresources -> text/forms";
+const submit_pipeline = "fetch -> cookies -> redirects -> submit -> parsed-dom -> subresources -> text/forms";
+const max_loaded_resources = 24;
 
 pub const PageArtifacts = struct {
     page: model.Page,
@@ -27,7 +28,7 @@ pub fn renderUrlArtifacts(allocator: std.mem.Allocator, url: []const u8, capture
     defer session.deinit();
     const result = try session.navigate(url);
     return .{
-        .page = try pageFromFetchResultWithPipeline(allocator, result, default_pipeline),
+        .page = try pageFromFetchResultWithPipeline(allocator, &session, result, default_pipeline),
         .har_json = if (capture_har) try session.harJson() else null,
     };
 }
@@ -80,7 +81,18 @@ pub fn extractForms(allocator: std.mem.Allocator, document: *const dom.Document,
     return try forms.toOwnedSlice(allocator);
 }
 
-fn pageFromFetchResultWithPipeline(allocator: std.mem.Allocator, result: fetch.FetchResult, pipeline: []const u8) !model.Page {
+pub fn extractResources(allocator: std.mem.Allocator, document: *const dom.Document, page_url: []const u8) ![]model.Resource {
+    var resources: std.ArrayList(model.Resource) = .empty;
+    try collectResources(allocator, document, document.root(), page_url, &resources);
+    return try resources.toOwnedSlice(allocator);
+}
+
+fn pageFromFetchResultWithPipeline(
+    allocator: std.mem.Allocator,
+    session: *fetch.Session,
+    result: fetch.FetchResult,
+    pipeline: []const u8,
+) !model.Page {
     const html = result.body;
     const document = try dom.Document.parse(allocator, html);
     const title = try extractTitle(allocator, &document);
@@ -89,6 +101,8 @@ fn pageFromFetchResultWithPipeline(allocator: std.mem.Allocator, result: fetch.F
     const text = try document.textContent(allocator, text_root);
     const links = try extractLinks(allocator, &document, document.root());
     const forms = try extractForms(allocator, &document, result.url);
+    const resources = try extractResources(allocator, &document, result.url);
+    try loadResources(allocator, session, resources, result.url);
 
     return .{
         .requested_url = result.requested_url,
@@ -99,6 +113,7 @@ fn pageFromFetchResultWithPipeline(allocator: std.mem.Allocator, result: fetch.F
         .text = text,
         .links = links,
         .forms = forms,
+        .resources = resources,
         .redirect_chain = result.redirect_chain,
         .cookie_count = result.cookie_count,
         .status_code = result.status_code,
@@ -116,7 +131,7 @@ fn submitFormWithSession(
     overrides: []const model.FieldInput,
 ) !model.Page {
     const initial_result = try session.navigate(url);
-    const initial_page = try pageFromFetchResultWithPipeline(allocator, initial_result, default_pipeline);
+    const initial_page = try pageFromFetchResultWithPipeline(allocator, session, initial_result, default_pipeline);
 
     if (form_index == 0 or form_index > initial_page.forms.len) return error.FormNotFound;
     const form = initial_page.forms[form_index - 1];
@@ -126,8 +141,9 @@ fn submitFormWithSession(
         .method = submission.method,
         .body = submission.body,
         .content_type = submission.content_type,
+        .referer = initial_page.url,
     });
-    return pageFromFetchResultWithPipeline(allocator, submit_result, submit_pipeline);
+    return pageFromFetchResultWithPipeline(allocator, session, submit_result, submit_pipeline);
 }
 
 fn extractTitle(allocator: std.mem.Allocator, document: *const dom.Document) ![]const u8 {
@@ -229,6 +245,170 @@ fn collectFormFields(allocator: std.mem.Allocator, document: *const dom.Document
     while (child) |child_id| : (child = document.getNode(child_id).next_sibling) {
         try collectFormFields(allocator, document, child_id, fields);
     }
+}
+
+fn collectResources(
+    allocator: std.mem.Allocator,
+    document: *const dom.Document,
+    node_id: dom.NodeId,
+    page_url: []const u8,
+    resources: *std.ArrayList(model.Resource),
+) !void {
+    const node = document.getNode(node_id);
+    if (node.kind == .element) {
+        try maybeAppendResource(allocator, document, node_id, page_url, resources);
+    }
+
+    var child = node.first_child;
+    while (child) |child_id| : (child = document.getNode(child_id).next_sibling) {
+        try collectResources(allocator, document, child_id, page_url, resources);
+    }
+}
+
+fn maybeAppendResource(
+    allocator: std.mem.Allocator,
+    document: *const dom.Document,
+    node_id: dom.NodeId,
+    page_url: []const u8,
+    resources: *std.ArrayList(model.Resource),
+) !void {
+    const node = document.getNode(node_id);
+    if (std.ascii.eqlIgnoreCase(node.name, "script")) {
+        if (document.getAttribute(node_id, "src")) |raw_url| {
+            try appendResource(allocator, resources, "script", page_url, raw_url);
+        }
+        return;
+    }
+
+    if (std.ascii.eqlIgnoreCase(node.name, "img")) {
+        if (document.getAttribute(node_id, "src")) |raw_url| {
+            try appendResource(allocator, resources, "image", page_url, raw_url);
+            return;
+        }
+        if (document.getAttribute(node_id, "srcset")) |raw_srcset| {
+            if (firstSrcsetUrl(raw_srcset)) |raw_url| {
+                try appendResource(allocator, resources, "image", page_url, raw_url);
+            }
+        }
+        return;
+    }
+
+    if (std.ascii.eqlIgnoreCase(node.name, "source")) {
+        if (document.getAttribute(node_id, "src")) |raw_url| {
+            try appendResource(allocator, resources, "source", page_url, raw_url);
+            return;
+        }
+        if (document.getAttribute(node_id, "srcset")) |raw_srcset| {
+            if (firstSrcsetUrl(raw_srcset)) |raw_url| {
+                try appendResource(allocator, resources, "source", page_url, raw_url);
+            }
+        }
+        return;
+    }
+
+    if (std.ascii.eqlIgnoreCase(node.name, "iframe")) {
+        if (document.getAttribute(node_id, "src")) |raw_url| {
+            try appendResource(allocator, resources, "frame", page_url, raw_url);
+        }
+        return;
+    }
+
+    if (std.ascii.eqlIgnoreCase(node.name, "link")) {
+        const rel = document.getAttribute(node_id, "rel") orelse "";
+        const kind = classifyLinkResource(rel) orelse return;
+        if (document.getAttribute(node_id, "href")) |raw_url| {
+            try appendResource(allocator, resources, kind, page_url, raw_url);
+        }
+    }
+}
+
+fn appendResource(
+    allocator: std.mem.Allocator,
+    resources: *std.ArrayList(model.Resource),
+    kind: []const u8,
+    page_url: []const u8,
+    raw_url: []const u8,
+) !void {
+    const normalized = std.mem.trim(u8, raw_url, " \t\r\n");
+    if (normalized.len == 0 or shouldIgnoreResourceUrl(normalized)) return;
+
+    const resolved_url = try resolveUrl(allocator, page_url, normalized);
+    if (resourceExists(resources.items, resolved_url)) return;
+
+    try resources.append(allocator, .{
+        .kind = kind,
+        .url = resolved_url,
+    });
+}
+
+fn loadResources(
+    allocator: std.mem.Allocator,
+    session: *fetch.Session,
+    resources: []model.Resource,
+    page_url: []const u8,
+) !void {
+    for (resources, 0..) |*resource, index| {
+        if (index >= max_loaded_resources) {
+            resource.error_message = try allocator.dupe(u8, "skipped: resource fetch cap");
+            continue;
+        }
+
+        var result = session.request(resource.url, .{
+            .accept = "*/*",
+            .referer = page_url,
+        }) catch |err| {
+            resource.error_message = try allocator.dupe(u8, @errorName(err));
+            continue;
+        };
+        defer result.deinit(allocator);
+
+        resource.loaded = true;
+        resource.status_code = result.status_code;
+        resource.content_type = try allocator.dupe(u8, result.content_type);
+        resource.body_size = result.body.len;
+    }
+}
+
+fn classifyLinkResource(rel_value: []const u8) ?[]const u8 {
+    if (relContains(rel_value, "stylesheet")) return "stylesheet";
+    if (relContains(rel_value, "icon")) return "icon";
+    if (relContains(rel_value, "preload") or relContains(rel_value, "modulepreload")) return "preload";
+    if (relContains(rel_value, "manifest")) return "manifest";
+    return null;
+}
+
+fn relContains(rel_value: []const u8, needle: []const u8) bool {
+    var it = std.mem.tokenizeAny(u8, rel_value, " \t\r\n");
+    while (it.next()) |token| {
+        if (std.ascii.eqlIgnoreCase(token, needle)) return true;
+    }
+    return false;
+}
+
+fn firstSrcsetUrl(srcset: []const u8) ?[]const u8 {
+    var candidates = std.mem.splitScalar(u8, srcset, ',');
+    const first_candidate = std.mem.trim(u8, candidates.first(), " \t\r\n");
+    if (first_candidate.len == 0) return null;
+
+    var parts = std.mem.tokenizeAny(u8, first_candidate, " \t\r\n");
+    return parts.next();
+}
+
+fn shouldIgnoreResourceUrl(raw_url: []const u8) bool {
+    return std.mem.startsWith(u8, raw_url, "#") or
+        std.ascii.startsWithIgnoreCase(raw_url, "data:") or
+        std.ascii.startsWithIgnoreCase(raw_url, "javascript:") or
+        std.ascii.startsWithIgnoreCase(raw_url, "mailto:") or
+        std.ascii.startsWithIgnoreCase(raw_url, "tel:") or
+        std.ascii.startsWithIgnoreCase(raw_url, "about:") or
+        std.ascii.startsWithIgnoreCase(raw_url, "blob:");
+}
+
+fn resourceExists(resources: []const model.Resource, url: []const u8) bool {
+    for (resources) |resource| {
+        if (std.mem.eql(u8, resource.url, url)) return true;
+    }
+    return false;
 }
 
 fn formFieldFromNode(allocator: std.mem.Allocator, document: *const dom.Document, node_id: dom.NodeId) !model.FormField {
@@ -455,6 +635,33 @@ test "extractForms captures form metadata and fields" {
     try std.testing.expectEqualStrings("note", forms[0].fields[2].name);
     try std.testing.expectEqualStrings("hello", forms[0].fields[2].value);
     try std.testing.expectEqualStrings("admin", forms[0].fields[3].value);
+}
+
+test "extractResources captures common static assets" {
+    var arena_impl = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_impl.deinit();
+    const arena = arena_impl.allocator();
+
+    const html =
+        "<html><head>" ++
+        "<link rel=\"stylesheet\" href=\"/app.css\">" ++
+        "<link rel=\"icon\" href=\"/favicon.ico\">" ++
+        "<script src=\"/app.js\"></script>" ++
+        "</head><body>" ++
+        "<img src=\"/hero.png\">" ++
+        "<iframe src=\"/frame\"></iframe>" ++
+        "<img src=\"data:image/png;base64,abc\">" ++
+        "</body></html>";
+
+    const document = try dom.Document.parse(arena, html);
+    const resources = try extractResources(arena, &document, "https://example.com/start");
+    try std.testing.expectEqual(@as(usize, 5), resources.len);
+    try std.testing.expectEqualStrings("stylesheet", resources[0].kind);
+    try std.testing.expectEqualStrings("https://example.com/app.css", resources[0].url);
+    try std.testing.expectEqualStrings("icon", resources[1].kind);
+    try std.testing.expectEqualStrings("script", resources[2].kind);
+    try std.testing.expectEqualStrings("image", resources[3].kind);
+    try std.testing.expectEqualStrings("frame", resources[4].kind);
 }
 
 test "buildFormSubmission merges overrides and encodes post bodies" {

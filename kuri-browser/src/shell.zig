@@ -16,8 +16,8 @@ pub fn usageText() []const u8 {
         \\  kuri-browser --version
         \\  kuri-browser status
         \\  kuri-browser roadmap
-        \\  kuri-browser render <url> [--dump summary|html|text|links|forms] [--selector <css>] [--har <file>]
-        \\  kuri-browser submit <url> [--form-index <n>] [--field name=value ...] [--dump summary|html|text|links|forms] [--selector <css>] [--har <file>]
+        \\  kuri-browser render <url> [--dump summary|html|text|links|forms|resources] [--selector <css>] [--har <file>]
+        \\  kuri-browser submit <url> [--form-index <n>] [--field name=value ...] [--dump summary|html|text|links|forms|resources] [--selector <css>] [--har <file>]
         \\
         \\EXAMPLES
         \\  zig build run -- --help
@@ -27,6 +27,7 @@ pub fn usageText() []const u8 {
         \\  zig build run -- render https://example.com --dump html
         \\  zig build run -- render https://example.com --har example.har
         \\  zig build run -- render https://quotes.toscrape.com/login --dump forms
+        \\  zig build run -- render https://www.wikipedia.org/ --dump resources --har wiki.har
         \\  zig build run -- submit https://quotes.toscrape.com/login --field username=admin --field password=admin --dump text --har login.har
         \\  zig build run -- render https://news.ycombinator.com --selector ".titleline a" --dump text
         \\
@@ -93,6 +94,7 @@ pub fn renderPageWithFormat(allocator: std.mem.Allocator, page: model.Page, form
         .text => allocator.dupe(u8, page.text),
         .links => renderLinksOnlyText(allocator, page.links),
         .forms => renderFormsText(allocator, page.forms),
+        .resources => renderResourcesText(allocator, page.resources),
     };
 }
 
@@ -113,7 +115,8 @@ fn renderSummaryPageText(allocator: std.mem.Allocator, page: model.Page) ![]cons
     try out.print(allocator, "cookies: {d}\n", .{page.cookie_count});
     try out.print(allocator, "nodes: {d}\n", .{page.dom.nodeCount()});
     try out.print(allocator, "links: {d}\n", .{page.links.len});
-    try out.print(allocator, "forms: {d}\n\n", .{page.forms.len});
+    try out.print(allocator, "forms: {d}\n", .{page.forms.len});
+    try out.print(allocator, "resources: {d} total, {d} loaded\n\n", .{ page.resources.len, loadedResourceCount(page.resources) });
 
     try out.appendSlice(allocator, "--- text ---\n");
     const preview = previewText(page.text, 2500);
@@ -141,6 +144,26 @@ fn renderSummaryPageText(allocator: std.mem.Allocator, page: model.Page) ![]cons
         }
     }
 
+    if (page.resources.len > 0) {
+        try out.appendSlice(allocator, "\n--- resources ---\n");
+        const limit = @min(page.resources.len, 10);
+        for (page.resources[0..limit], 0..) |resource, i| {
+            try out.print(allocator, "[{d}] {s} status={d} type={s}\n    {s}\n", .{
+                i + 1,
+                resource.kind,
+                resource.status_code,
+                if (resource.content_type.len > 0) resource.content_type else "(unknown)",
+                resource.url,
+            });
+            if (resource.error_message.len > 0) {
+                try out.print(allocator, "    error: {s}\n", .{resource.error_message});
+            }
+        }
+        if (limit < page.resources.len) {
+            try out.print(allocator, "\n... {d} more resources\n", .{page.resources.len - limit});
+        }
+    }
+
     return try out.toOwnedSlice(allocator);
 }
 
@@ -156,6 +179,7 @@ fn renderSelectorView(allocator: std.mem.Allocator, page: model.Page, format: mo
         .text => renderSelectedText(allocator, page, matches),
         .links => renderSelectedLinks(allocator, page, matches),
         .forms => std.fmt.allocPrint(allocator, "Selector-scoped form rendering is not supported for: {s}\n", .{selector}),
+        .resources => std.fmt.allocPrint(allocator, "Selector-scoped resource rendering is not supported for: {s}\n", .{selector}),
     };
 }
 
@@ -251,6 +275,34 @@ fn renderFormsText(allocator: std.mem.Allocator, forms: []const model.Form) ![]c
     return try out.toOwnedSlice(allocator);
 }
 
+fn renderResourcesText(allocator: std.mem.Allocator, resources: []const model.Resource) ![]const u8 {
+    if (resources.len == 0) return allocator.dupe(u8, "No resources found.\n");
+
+    var out: std.ArrayList(u8) = .empty;
+    for (resources, 0..) |resource, i| {
+        try out.print(allocator, "[resource {d}]\n", .{i + 1});
+        try out.print(allocator, "kind: {s}\n", .{resource.kind});
+        try out.print(allocator, "url: {s}\n", .{resource.url});
+        try out.print(allocator, "loaded: {s}\n", .{if (resource.loaded) "yes" else "no"});
+        try out.print(allocator, "status: {d}\n", .{resource.status_code});
+        try out.print(allocator, "content-type: {s}\n", .{if (resource.content_type.len > 0) resource.content_type else "(unknown)"});
+        try out.print(allocator, "body-size: {d}\n", .{resource.body_size});
+        if (resource.error_message.len > 0) {
+            try out.print(allocator, "error: {s}\n", .{resource.error_message});
+        }
+        if (i + 1 < resources.len) try out.appendSlice(allocator, "\n");
+    }
+    return try out.toOwnedSlice(allocator);
+}
+
+fn loadedResourceCount(resources: []const model.Resource) usize {
+    var count: usize = 0;
+    for (resources) |resource| {
+        if (resource.loaded) count += 1;
+    }
+    return count;
+}
+
 fn previewText(text: []const u8, max_len: usize) []const u8 {
     if (text.len <= max_len) return text;
     return text[0..max_len];
@@ -259,7 +311,7 @@ fn previewText(text: []const u8, max_len: usize) []const u8 {
 test "usage mentions render command" {
     try std.testing.expect(std.mem.indexOf(u8, usageText(), "render <url>") != null);
     try std.testing.expect(std.mem.indexOf(u8, usageText(), "submit <url>") != null);
-    try std.testing.expect(std.mem.indexOf(u8, usageText(), "--dump summary|html|text|links|forms") != null);
+    try std.testing.expect(std.mem.indexOf(u8, usageText(), "--dump summary|html|text|links|forms|resources") != null);
     try std.testing.expect(std.mem.indexOf(u8, usageText(), "--selector <css>") != null);
     try std.testing.expect(std.mem.indexOf(u8, usageText(), "--har <file>") != null);
 }

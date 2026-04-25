@@ -20,6 +20,16 @@ pub const Link = struct {
     href: []const u8,
 };
 
+pub const Resource = struct {
+    kind: []const u8,
+    url: []const u8,
+    status_code: u16 = 0,
+    content_type: []const u8 = "",
+    body_size: usize = 0,
+    loaded: bool = false,
+    error_message: []const u8 = "",
+};
+
 pub const FormField = struct {
     name: []const u8,
     kind: []const u8,
@@ -46,6 +56,7 @@ pub const DumpFormat = enum {
     text,
     links,
     forms,
+    resources,
 
     pub fn parse(value: []const u8) ?DumpFormat {
         if (std.mem.eql(u8, value, "summary")) return .summary;
@@ -53,6 +64,7 @@ pub const DumpFormat = enum {
         if (std.mem.eql(u8, value, "text")) return .text;
         if (std.mem.eql(u8, value, "links")) return .links;
         if (std.mem.eql(u8, value, "forms")) return .forms;
+        if (std.mem.eql(u8, value, "resources")) return .resources;
         return null;
     }
 
@@ -63,6 +75,7 @@ pub const DumpFormat = enum {
             .text => "text",
             .links => "links",
             .forms => "forms",
+            .resources => "resources",
         };
     }
 };
@@ -76,6 +89,7 @@ pub const Page = struct {
     text: []const u8,
     links: []Link,
     forms: []Form,
+    resources: []Resource,
     redirect_chain: []const []const u8,
     cookie_count: usize,
     status_code: u16,
@@ -96,7 +110,9 @@ test "dump formats parse and label" {
     try std.testing.expectEqual(DumpFormat.text, DumpFormat.parse("text").?);
     try std.testing.expectEqual(DumpFormat.links, DumpFormat.parse("links").?);
     try std.testing.expectEqual(DumpFormat.forms, DumpFormat.parse("forms").?);
+    try std.testing.expectEqual(DumpFormat.resources, DumpFormat.parse("resources").?);
     try std.testing.expectEqual(@as(?DumpFormat, null), DumpFormat.parse("wat"));
     try std.testing.expectEqualStrings("links", DumpFormat.links.label());
     try std.testing.expectEqualStrings("forms", DumpFormat.forms.label());
+    try std.testing.expectEqualStrings("resources", DumpFormat.resources.label());
 }
