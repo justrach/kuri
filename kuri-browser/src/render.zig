@@ -1,28 +1,17 @@
 const std = @import("std");
 const fetch = @import("fetch.zig");
+const model = @import("model.zig");
 
-pub const Link = struct {
-    text: []const u8,
-    href: []const u8,
-};
-
-pub const RenderedPage = struct {
-    url: []const u8,
-    title: []const u8,
-    text: []const u8,
-    links: []Link,
-    status_code: u16,
-    content_type: []const u8,
-};
-
-pub fn renderUrl(allocator: std.mem.Allocator, url: []const u8) !RenderedPage {
+pub fn renderUrl(allocator: std.mem.Allocator, url: []const u8) !model.Page {
     const result = try fetch.fetchHtml(allocator, url, "kuri-browser/0.0.0");
-    const html = result.body;
+    return pageFromFetchResult(allocator, result);
+}
 
+fn pageFromFetchResult(allocator: std.mem.Allocator, result: fetch.FetchResult) !model.Page {
+    const html = result.body;
     const title = try extractTitle(allocator, html);
     const text = try extractReadableText(allocator, html);
     const links = try extractLinks(allocator, html);
-
     return .{
         .url = result.url,
         .title = title,
@@ -30,44 +19,9 @@ pub fn renderUrl(allocator: std.mem.Allocator, url: []const u8) !RenderedPage {
         .links = links,
         .status_code = result.status_code,
         .content_type = result.content_type,
+        .fallback_mode = .native_static,
+        .pipeline = "fetch -> static-html -> text",
     };
-}
-
-pub fn renderText(allocator: std.mem.Allocator, page: RenderedPage) ![]const u8 {
-    var out: std.ArrayList(u8) = .empty;
-
-    try out.appendSlice(allocator, "kuri-browser render\n\n");
-    try out.print(allocator, "url: {s}\n", .{page.url});
-    try out.print(allocator, "status: {d}\n", .{page.status_code});
-    try out.print(allocator, "content-type: {s}\n", .{page.content_type});
-    try out.print(allocator, "title: {s}\n", .{page.title});
-    try out.print(allocator, "links: {d}\n\n", .{page.links.len});
-
-    try out.appendSlice(allocator, "--- text ---\n");
-    const preview = previewText(page.text, 2500);
-    try out.appendSlice(allocator, preview);
-    if (preview.len < page.text.len) {
-        try out.appendSlice(allocator, "\n\n[truncated]\n");
-    }
-
-    if (page.links.len > 0) {
-        try out.appendSlice(allocator, "\n--- links ---\n");
-        const limit = @min(page.links.len, 12);
-        for (page.links[0..limit], 0..) |link, i| {
-            const label = if (link.text.len == 0) "(no text)" else link.text;
-            try out.print(allocator, "[{d}] {s}\n    {s}\n", .{ i + 1, label, link.href });
-        }
-        if (limit < page.links.len) {
-            try out.print(allocator, "\n... {d} more links\n", .{page.links.len - limit});
-        }
-    }
-
-    return try out.toOwnedSlice(allocator);
-}
-
-fn previewText(text: []const u8, max_len: usize) []const u8 {
-    if (text.len <= max_len) return text;
-    return text[0..max_len];
 }
 
 fn extractTitle(allocator: std.mem.Allocator, html: []const u8) ![]const u8 {
@@ -114,8 +68,8 @@ fn extractReadableText(allocator: std.mem.Allocator, html: []const u8) ![]const 
     return trimAndCollapseWhitespace(allocator, decoded);
 }
 
-fn extractLinks(allocator: std.mem.Allocator, html: []const u8) ![]Link {
-    var links: std.ArrayList(Link) = .empty;
+fn extractLinks(allocator: std.mem.Allocator, html: []const u8) ![]model.Link {
+    var links: std.ArrayList(model.Link) = .empty;
     var i: usize = 0;
 
     while (i < html.len) {
@@ -133,7 +87,8 @@ fn extractLinks(allocator: std.mem.Allocator, html: []const u8) ![]Link {
 
         const raw_text = html[open_end + 1 .. close_idx];
         const decoded_href = try decodeEntities(allocator, href);
-        const decoded_text = try decodeEntities(allocator, raw_text);
+        const text_fragment = try stripTags(allocator, raw_text);
+        const decoded_text = try decodeEntities(allocator, text_fragment);
         const clean_text = try trimAndCollapseWhitespace(allocator, decoded_text);
         const clean_href = try trimAndCollapseWhitespace(allocator, decoded_href);
 
@@ -180,12 +135,36 @@ fn decodeEntities(allocator: std.mem.Allocator, input: []const u8) ![]const u8 {
                 i += 6;
                 continue;
             }
+            if (std.mem.startsWith(u8, input[i..], "&#")) {
+                if (try appendNumericEntity(allocator, &out, input[i..])) |consumed| {
+                    i += consumed;
+                    continue;
+                }
+            }
         }
 
         try out.append(allocator, input[i]);
         i += 1;
     }
     return try out.toOwnedSlice(allocator);
+}
+
+fn appendNumericEntity(allocator: std.mem.Allocator, out: *std.ArrayList(u8), input: []const u8) !?usize {
+    const semi = std.mem.indexOfScalar(u8, input, ';') orelse return null;
+    if (semi < 4) return null;
+
+    const body = input[2..semi];
+    const is_hex = body.len > 1 and (body[0] == 'x' or body[0] == 'X');
+    const digits = if (is_hex) body[1..] else body;
+    if (digits.len == 0) return null;
+
+    const base: u8 = if (is_hex) 16 else 10;
+    const value = std.fmt.parseInt(u21, digits, base) catch return null;
+
+    var buf: [4]u8 = undefined;
+    const encoded = try std.unicode.utf8Encode(value, &buf);
+    try out.appendSlice(allocator, buf[0..encoded]);
+    return semi + 1;
 }
 
 fn trimAndCollapseWhitespace(allocator: std.mem.Allocator, input: []const u8) ![]const u8 {
@@ -268,6 +247,21 @@ fn appendNewlineIfNeeded(allocator: std.mem.Allocator, out: *std.ArrayList(u8)) 
     }
 }
 
+fn stripTags(allocator: std.mem.Allocator, input: []const u8) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    var i: usize = 0;
+    while (i < input.len) {
+        if (input[i] == '<') {
+            const close_idx = std.mem.indexOfScalarPos(u8, input, i + 1, '>') orelse break;
+            i = close_idx + 1;
+            continue;
+        }
+        try out.append(allocator, input[i]);
+        i += 1;
+    }
+    return try out.toOwnedSlice(allocator);
+}
+
 test "extractTitle finds title text" {
     const title = try extractTitle(std.testing.allocator, "<html><head><title>Hello World</title></head></html>");
     defer std.testing.allocator.free(title);
@@ -280,4 +274,12 @@ test "extractLinks captures href and text" {
     try std.testing.expectEqual(@as(usize, 1), links.len);
     try std.testing.expectEqualStrings("Example", links[0].text);
     try std.testing.expectEqualStrings("https://example.com", links[0].href);
+}
+
+test "extractLinks strips nested tags and decodes numeric entities" {
+    const links = try extractLinks(std.testing.allocator, "<a href=\"/item?id=1\"><span>main &#x2F; child</span></a>");
+    defer std.testing.allocator.free(links);
+    try std.testing.expectEqual(@as(usize, 1), links.len);
+    try std.testing.expectEqualStrings("main / child", links[0].text);
+    try std.testing.expectEqualStrings("/item?id=1", links[0].href);
 }

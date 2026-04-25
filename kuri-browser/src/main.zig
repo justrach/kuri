@@ -1,5 +1,6 @@
 const std = @import("std");
 const runtime = @import("runtime.zig");
+const shell = @import("shell.zig");
 
 const version = "0.0.0";
 
@@ -35,18 +36,18 @@ pub fn main(init: std.process.Init.Minimal) !void {
             } else {
                 std.debug.print("error: missing command\n", .{});
             }
-            std.debug.print("Run 'kuri-browser --help' for usage.\n", .{});
+            std.debug.print("{s}", .{shell.usageText()});
             std.process.exit(1);
         },
         error.MissingUrl => {
             std.debug.print("error: render requires a URL\n", .{});
-            std.debug.print("Run 'kuri-browser --help' for usage.\n", .{});
+            std.debug.print("{s}", .{shell.usageText()});
             std.process.exit(1);
         },
     };
 
     switch (cmd) {
-        .help => printUsage(),
+        .help => std.debug.print("{s}", .{shell.usageText()}),
         .version => std.debug.print("kuri-browser {s}\n", .{version}),
         .status => {
             const text = try runtime.statusText(arena);
@@ -76,29 +77,6 @@ fn parseCommand(args: []const []const u8) !Command {
     }
 
     return error.UnknownCommand;
-}
-
-fn printUsage() void {
-    std.debug.print(
-        \\kuri-browser
-        \\
-        \\Standalone experimental browser-runtime workspace.
-        \\This build is intentionally separate from Kuri's main build.
-        \\
-        \\USAGE
-        \\  kuri-browser --help
-        \\  kuri-browser --version
-        \\  kuri-browser status
-        \\  kuri-browser roadmap
-        \\  kuri-browser render <url>
-        \\
-        \\EXAMPLES
-        \\  zig build run -- --help
-        \\  zig build run -- status
-        \\  zig build run -- roadmap
-        \\  zig build run -- render https://news.ycombinator.com
-        \\
-    , .{});
 }
 
 test "parseCommand defaults to help" {

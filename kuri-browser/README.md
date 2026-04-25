@@ -4,6 +4,17 @@ Experimental standalone browser-runtime workspace for Kuri.
 
 This folder is intentionally not wired into the root `build.zig`. It exists as a separate Zig build so we can prototype an Obscura-style fetch + DOM + JS runtime without disturbing Kuri's current Chrome/CDP path.
 
+## Current Layout
+
+- `src/model.zig`: shared `Page`, `Link`, and fallback-mode types
+- `src/core.zig`: runtime shape plus page-loading orchestration
+- `src/fetch.zig`: network acquisition, validation, redirects, and `curl` fallback
+- `src/render.zig`: static HTML extraction into the shared page model
+- `src/shell.zig`: CLI-facing usage, status, roadmap, and text rendering
+- `src/runtime.zig`: thin facade used by `src/main.zig`
+
+This is intentionally closer to the repo boundaries in `nanoapi` and `turboAPI`: stable shared types in the middle, thin shell edges, and transport/rendering logic kept separate.
+
 ## Build
 
 ```sh
@@ -19,6 +30,7 @@ zig build run -- render https://example.com
 - keep Kuri's existing managed-Chrome/CDP server untouched
 - prototype a Zig-native browser runtime in isolation
 - start with real HTTP fetch plus a minimal HTML-to-text renderer
+- keep a stable `Page` model so future DOM/JS layers have a fixed handoff point
 - keep JS, layout, and CDP compatibility out of scope for the first slice
 
 ## Current Commands
