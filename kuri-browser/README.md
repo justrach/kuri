@@ -2,7 +2,7 @@
 
 Experimental standalone browser-runtime workspace for Kuri.
 
-This folder is intentionally not wired into the root `build.zig`. It exists as a separate Zig build so we can prototype an Obscura-style fetch + DOM + JS runtime without disturbing Kuri's current Chrome/CDP path.
+This folder is intentionally not wired into the root `build.zig`. It exists as a separate Zig build so we can prototype a standalone fetch + DOM + JS runtime without disturbing Kuri's current Chrome/CDP path.
 
 ## Current Layout
 
