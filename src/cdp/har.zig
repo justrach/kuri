@@ -137,7 +137,7 @@ pub const HarRecorder = struct {
     pub fn toJson(self: *HarRecorder) ![]const u8 {
         var buf: std.ArrayList(u8) = .empty;
 
-        try buf.appendSlice(self.allocator, "{\"log\":{\"version\":\"1.2\",\"creator\":{\"name\":\"browdie\",\"version\":\"0.3.2\"},\"entries\":[");
+        try buf.appendSlice(self.allocator, "{\"log\":{\"version\":\"1.2\",\"creator\":{\"name\":\"browdie\",\"version\":\"0.3.3\"},\"entries\":[");
 
         for (self.entries.items, 0..) |entry, i| {
             if (i > 0) try buf.appendSlice(self.allocator, ",");
@@ -400,7 +400,7 @@ test "HarRecorder toJson empty" {
     const json = try rec.toJson();
     defer std.testing.allocator.free(json);
 
-    try std.testing.expectEqualStrings("{\"log\":{\"version\":\"1.2\",\"creator\":{\"name\":\"browdie\",\"version\":\"0.3.2\"},\"entries\":[]}}", json);
+    try std.testing.expectEqualStrings("{\"log\":{\"version\":\"1.2\",\"creator\":{\"name\":\"browdie\",\"version\":\"0.3.3\"},\"entries\":[]}}", json);
 }
 
 test "HarRecorder handleCdpEvent processes request and response" {

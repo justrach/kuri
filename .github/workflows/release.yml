@@ -202,7 +202,7 @@ jobs:
           cat > channel/README.md <<'EOF'
           # Kuri Release Channel
 
-          Self-managed release channel for `justrach/kuri`. This branch intentionally does not use GitHub Releases.
+          Self-managed release channel for `justrach/kuri`. GitHub Releases mirror the tagged assets, but the installer and stable manifest are still served from this branch.
 
           ## Stable
 
@@ -221,3 +221,62 @@ jobs:
           git add README.md stable
           git commit -m "release: publish stable ${VERSION}" || exit 0
           git push origin HEAD:release-channel
+
+  publish-github-release:
+    needs: [build-linux, build-macos-arm, build-macos-x86]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+          path: dist
+      - name: Build release notes and checksums
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME}"
+          SHA_FILE="dist/kuri-${VERSION}-sha256sums.txt"
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib
+          import os
+          import re
+
+          version = os.environ["GITHUB_REF_NAME"].removeprefix("v")
+          changelog = Path("CHANGELOG.md").read_text()
+          pattern = re.compile(rf"^## \[{re.escape(version)}\] — .*$", re.MULTILINE)
+          match = pattern.search(changelog)
+          if not match:
+              raise SystemExit(f"missing changelog section for {version}")
+          start = match.start()
+          next_match = re.search(r"^## \[", changelog[match.end():], re.MULTILINE)
+          end = len(changelog) if not next_match else match.end() + next_match.start()
+          section = changelog[start:end].strip()
+          notes = "## " + os.environ["GITHUB_REF_NAME"] + "\\n\\n" + section.split("\\n", 1)[1].strip() + "\\n\\nmacOS assets in this release are signed and notarized.\\n"
+          Path("dist/release-notes.md").write_text(notes)
+
+          with Path(os.environ["SHA_FILE"]).open("w") as out:
+              for path in sorted(Path("dist").glob("kuri-*.tar.gz")):
+                  out.write(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}\\n")
+          PY
+        env:
+          SHA_FILE: dist/kuri-${{ github.ref_name }}-sha256sums.txt
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME}"
+          TITLE="${VERSION}"
+          NOTES="dist/release-notes.md"
+          ASSETS=(dist/*.tar.gz "dist/kuri-${VERSION}-sha256sums.txt")
+
+          if gh release view "$VERSION" >/dev/null 2>&1; then
+            gh release upload "$VERSION" "${ASSETS[@]}" --clobber
+            gh release edit "$VERSION" --title "$TITLE" --notes-file "$NOTES" --latest
+          else
+            gh release create "$VERSION" "${ASSETS[@]}" --title "$TITLE" --notes-file "$NOTES" --latest
+          fi

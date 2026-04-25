@@ -5,7 +5,7 @@
 <h1 align="center">Kuri 🌰</h1>
 
 <p align="center">
-  <a href="https://raw.githubusercontent.com/justrach/kuri/release-channel/stable/latest.json"><img src="https://img.shields.io/badge/stable-v0.3.2-brightgreen?style=flat-square" alt="Stable release"></a>
+  <a href="https://raw.githubusercontent.com/justrach/kuri/release-channel/stable/latest.json"><img src="https://img.shields.io/badge/stable-v0.3.3-brightgreen?style=flat-square" alt="Stable release"></a>
   <a href="https://github.com/justrach/kuri/blob/main/LICENSE"><img src="https://img.shields.io/github/license/justrach/kuri?style=flat-square" alt="License"></a>
   <img src="https://img.shields.io/badge/zig-0.16.0-f7a41d?style=flat-square" alt="Zig">
   <img src="https://img.shields.io/badge/node__modules-0_files-brightgreen?style=flat-square" alt="node_modules">
@@ -118,7 +118,7 @@ Kuri's stable binaries live on the `release-channel` branch and are served direc
 
 ### Manual
 
-Download the tarball for your platform from the [stable release manifest](https://raw.githubusercontent.com/justrach/kuri/release-channel/stable/latest.json) and unpack it to your `$PATH`.
+Download the tarball for your platform from the [stable release manifest](https://raw.githubusercontent.com/justrach/kuri/release-channel/stable/latest.json) or from the [GitHub Releases page](https://github.com/justrach/kuri/releases) and unpack it to your `$PATH`.
 
 Stable install URL:
 

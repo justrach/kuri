@@ -2,6 +2,18 @@
 
 All notable changes to kuri are documented here.
 
+## [0.3.3] — 2026-04-25
+
+### Fixes
+- **Auth profile reliability** — macOS keychain-backed auth profiles now resolve `security` correctly, and profile metadata round-trips escaped JSON safely
+- **Session persistence safety** — bridge export/import now uses real JSON serialization/parsing instead of fragile string scanning
+- **Redirect and localhost hardening** — URL validation now normalizes localhost aliases and re-validates redirect hops in both HTTP fetch paths
+- **CDP stability** — stale buffered events no longer satisfy later `waitForEvent()` calls, and unsupported external CDP endpoint shapes are rejected up front
+- **Packaging correctness** — HAR status/duration output is fixed, Chrome binary discovery checks `PATH`, and the npm installer rejects unsupported platforms instead of treating Windows as Linux
+
+### Release
+- **Notarized macOS artifacts in GitHub Releases** — tagged releases now mirror the signed/notarized macOS tarballs alongside the self-managed release channel
+
 ## [0.3.2] — 2026-04-24
 
 ### Release channel

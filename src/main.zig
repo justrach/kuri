@@ -12,7 +12,7 @@ pub fn main() !void {
     const cfg = config.load();
     var runtime_cfg = cfg;
 
-    std.log.info("kuri v0.3.2", .{});
+    std.log.info("kuri v0.3.3", .{});
     std.log.info("listening on {s}:{d}", .{ cfg.host, cfg.port });
 
     // Chrome lifecycle management
