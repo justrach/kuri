@@ -23,6 +23,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     root_mod.addImport("jsengine", jsengine_mod);
+    root_mod.addImport("quickjs", quickjs_dep.module("quickjs"));
 
     const exe = b.addExecutable(.{
         .name = "kuri-browser",
@@ -48,6 +49,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     main_test_mod.addImport("jsengine", jsengine_mod);
+    main_test_mod.addImport("quickjs", quickjs_dep.module("quickjs"));
     const main_tests = b.addTest(.{
         .root_module = main_test_mod,
     });
@@ -61,6 +63,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     runtime_test_mod.addImport("jsengine", jsengine_mod);
+    runtime_test_mod.addImport("quickjs", quickjs_dep.module("quickjs"));
     const runtime_tests = b.addTest(.{
         .root_module = runtime_test_mod,
     });

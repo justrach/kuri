@@ -127,6 +127,12 @@ fn renderSummaryPageText(allocator: std.mem.Allocator, page: model.Page) ![]cons
             page.js.external_scripts,
             page.js.failed_scripts,
         });
+        if (page.js.fetch_requests > 0 or page.js.xhr_requests > 0) {
+            try out.print(allocator, "js-network: {d} fetch, {d} xhr\n\n", .{
+                page.js.fetch_requests,
+                page.js.xhr_requests,
+            });
+        }
     } else {
         try out.appendSlice(allocator, "js: disabled\n\n");
     }
@@ -338,6 +344,8 @@ fn renderJsText(allocator: std.mem.Allocator, js: model.JsExecution) ![]const u8
     try out.print(allocator, "inline-scripts: {d}\n", .{js.inline_scripts});
     try out.print(allocator, "external-scripts: {d}\n", .{js.external_scripts});
     try out.print(allocator, "failed-scripts: {d}\n", .{js.failed_scripts});
+    try out.print(allocator, "fetch-requests: {d}\n", .{js.fetch_requests});
+    try out.print(allocator, "xhr-requests: {d}\n", .{js.xhr_requests});
     if (js.document_title.len > 0) {
         try out.print(allocator, "document-title: {s}\n", .{js.document_title});
     }
