@@ -11,13 +11,23 @@ cd kuri-browser
 zig build
 zig build run -- --help
 zig build run -- status
+zig build run -- render https://example.com
 ```
 
 ## Current Scope
 
 - keep Kuri's existing managed-Chrome/CDP server untouched
 - prototype a Zig-native browser runtime in isolation
-- start with runtime shape and milestones before adding real networking, DOM, and JS integration
+- start with real HTTP fetch plus a minimal HTML-to-text renderer
+- keep JS, layout, and CDP compatibility out of scope for the first slice
+
+## Current Commands
+
+```sh
+zig build run -- status
+zig build run -- roadmap
+zig build run -- render https://news.ycombinator.com
+```
 
 ## Target Direction
 

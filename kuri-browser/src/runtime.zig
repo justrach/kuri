@@ -1,4 +1,5 @@
 const std = @import("std");
+const render = @import("render.zig");
 
 pub const RuntimeStage = enum {
     scaffold,
@@ -82,6 +83,11 @@ pub fn roadmapText(allocator: std.mem.Allocator) ![]const u8 {
         try list.appendSlice(allocator, line);
     }
     return try list.toOwnedSlice(allocator);
+}
+
+pub fn renderUrlText(allocator: std.mem.Allocator, url: []const u8) ![]const u8 {
+    const page = try render.renderUrl(allocator, url);
+    return render.renderText(allocator, page);
 }
 
 fn stageLabel(stage: RuntimeStage) []const u8 {
