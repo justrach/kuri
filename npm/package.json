@@ -6,9 +6,12 @@
   "homepage": "https://github.com/justrach/kuri",
   "repository": { "type": "git", "url": "https://github.com/justrach/kuri.git" },
   "license": "MIT",
+  "os": ["darwin", "linux"],
+  "cpu": ["x64", "arm64"],
   "bin": { "kuri-agent": "bin/kuri-agent.js" },
   "scripts": {
-    "postinstall": "node bin/install.js"
+    "postinstall": "node bin/install.js",
+    "test:installer": "node -e \"require('./bin/install.js').runSelfTest()\""
   },
   "engines": { "node": ">=18" }
 }

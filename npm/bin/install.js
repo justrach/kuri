@@ -7,17 +7,38 @@ const path = require("path");
 const crypto = require("crypto");
 const { execFileSync } = require("child_process");
 const os = require("os");
+const assert = require("assert/strict");
 
 const REPO = "justrach/kuri";
 const VERSION = require("../package.json").version;
 const CHANNEL_BASE = process.env.KURI_RELEASE_BASE || `https://raw.githubusercontent.com/${REPO}/release-channel/stable`;
 const BIN_DIR = path.join(__dirname);
 const BIN_PATH = path.join(BIN_DIR, "kuri-agent-bin");
+const SUPPORTED_ARCHES = {
+  arm64: "aarch64",
+  x64: "x86_64",
+};
+const SUPPORTED_PLATFORMS = {
+  darwin: "macos",
+  linux: "linux",
+};
+
+function resolveTarget(nodePlatform = process.platform, nodeArch = process.arch) {
+  const arch = SUPPORTED_ARCHES[nodeArch];
+  if (!arch) {
+    throw new Error(`unsupported architecture: ${nodeArch}. kuri-agent publishes binaries for x64 and arm64 only`);
+  }
+
+  const opsys = SUPPORTED_PLATFORMS[nodePlatform];
+  if (!opsys) {
+    throw new Error(`unsupported platform: ${nodePlatform}. kuri-agent publishes binaries for darwin and linux only`);
+  }
+
+  return `${arch}-${opsys}`;
+}
 
 function platform() {
-  const arch = process.arch === "arm64" ? "aarch64" : "x86_64";
-  const opsys = process.platform === "darwin" ? "macos" : "linux";
-  return `${arch}-${opsys}`;
+  return resolveTarget(process.platform, process.arch);
 }
 
 function downloadFile(url, dest) {
@@ -89,4 +110,24 @@ async function main() {
   console.log(`kuri-agent: installed to ${BIN_PATH}`);
 }
 
-main().catch((e) => { console.error("kuri-agent install failed:", e.message); process.exit(1); });
+function runSelfTest() {
+  assert.equal(resolveTarget("darwin", "arm64"), "aarch64-macos");
+  assert.equal(resolveTarget("darwin", "x64"), "x86_64-macos");
+  assert.equal(resolveTarget("linux", "arm64"), "aarch64-linux");
+  assert.equal(resolveTarget("linux", "x64"), "x86_64-linux");
+  assert.throws(() => resolveTarget("win32", "x64"), /unsupported platform: win32/);
+  assert.throws(() => resolveTarget("linux", "ia32"), /unsupported architecture: ia32/);
+}
+
+module.exports = {
+  platform,
+  resolveTarget,
+  runSelfTest,
+};
+
+if (require.main === module) {
+  main().catch((e) => {
+    console.error("kuri-agent install failed:", e.message);
+    process.exit(1);
+  });
+}

@@ -25,7 +25,7 @@ pub const WebSocketClient = struct {
         InvalidFrame,
     };
 
-    /// Connect to a WebSocket endpoint. url must be like "ws://host:port/path".
+    /// Connect to a loopback WebSocket endpoint. url must be like "ws://host:port/path".
     pub fn connect(allocator: std.mem.Allocator, url: []const u8, read_buf: []u8, write_buf: []u8) !WebSocketClient {
         const parsed = try parseWsUrl(url);
 
@@ -103,6 +103,8 @@ pub const WebSocketClient = struct {
     };
 
     pub fn parseWsUrl(url: []const u8) !WsUrl {
+        if (std.mem.startsWith(u8, url, "wss://")) return error.UnsupportedWsScheme;
+
         // Strip "ws://"
         const after_scheme = if (std.mem.startsWith(u8, url, "ws://"))
             url[5..]
@@ -114,14 +116,44 @@ pub const WebSocketClient = struct {
         const host_port = after_scheme[0..path_start];
         const path = if (path_start < after_scheme.len) after_scheme[path_start..] else "/";
 
-        // Split host:port
-        if (std.mem.indexOfScalar(u8, host_port, ':')) |colon| {
-            const host = host_port[0..colon];
-            const port = std.fmt.parseInt(u16, host_port[colon + 1 ..], 10) catch return error.InvalidCharacter;
-            return .{ .host = host, .port = port, .path = path };
-        } else {
-            return .{ .host = host_port, .port = 80, .path = path };
+        const host_port_parsed = parseHostPort(host_port) orelse return error.InvalidCharacter;
+        if (!isSupportedLoopbackHost(host_port_parsed.host)) return error.UnsupportedWsHost;
+
+        return .{
+            .host = host_port_parsed.host,
+            .port = host_port_parsed.port,
+            .path = path,
+        };
+    }
+
+    fn parseHostPort(host_port: []const u8) ?struct { host: []const u8, port: u16 } {
+        if (host_port.len == 0) return null;
+
+        var host = host_port;
+        var port: u16 = 80;
+
+        if (host_port[0] == '[') {
+            const bracket_end = std.mem.indexOfScalar(u8, host_port, ']') orelse return null;
+            host = host_port[1..bracket_end];
+            const suffix = host_port[bracket_end + 1 ..];
+            if (suffix.len > 0) {
+                if (suffix[0] != ':' or suffix.len == 1) return null;
+                port = std.fmt.parseInt(u16, suffix[1..], 10) catch return null;
+            }
+        } else if (std.mem.lastIndexOfScalar(u8, host_port, ':')) |colon| {
+            host = host_port[0..colon];
+            if (std.mem.indexOfScalar(u8, host, ':') != null) return null;
+            const port_text = host_port[colon + 1 ..];
+            if (port_text.len == 0) return null;
+            port = std.fmt.parseInt(u16, port_text, 10) catch return null;
         }
+
+        if (host.len == 0) return null;
+        return .{ .host = host, .port = port };
+    }
+
+    fn isSupportedLoopbackHost(host: []const u8) bool {
+        return std.mem.eql(u8, host, "localhost") or std.mem.eql(u8, host, "127.0.0.1");
     }
 
     /// Parse an IPv4 dotted-decimal string into a network-byte-order u32.
@@ -164,8 +196,7 @@ pub const WebSocketClient = struct {
 
         // Build HTTP upgrade request
         var req_buf: [2048]u8 = undefined;
-        const req = std.fmt.bufPrint(&req_buf,
-            "GET {s} HTTP/1.1\r\n" ++
+        const req = std.fmt.bufPrint(&req_buf, "GET {s} HTTP/1.1\r\n" ++
             "Host: {s}:{d}\r\n" ++
             "Upgrade: websocket\r\n" ++
             "Connection: Upgrade\r\n" ++
@@ -401,8 +432,8 @@ test "parseWsUrl basic" {
 }
 
 test "parseWsUrl default port" {
-    const parsed = try WebSocketClient.parseWsUrl("ws://example.com/path");
-    try std.testing.expectEqualStrings("example.com", parsed.host);
+    const parsed = try WebSocketClient.parseWsUrl("ws://localhost/path");
+    try std.testing.expectEqualStrings("localhost", parsed.host);
     try std.testing.expectEqual(@as(u16, 80), parsed.port);
     try std.testing.expectEqualStrings("/path", parsed.path);
 }
@@ -421,6 +452,18 @@ test "parseWsUrl valid URL" {
 
 test "parseWsUrl rejects non-ws scheme" {
     try std.testing.expectError(error.InvalidCharacter, WebSocketClient.parseWsUrl("http://localhost:9222/path"));
+}
+
+test "parseWsUrl rejects secure websocket scheme" {
+    try std.testing.expectError(error.UnsupportedWsScheme, WebSocketClient.parseWsUrl("wss://localhost:9222/path"));
+}
+
+test "parseWsUrl rejects remote host" {
+    try std.testing.expectError(error.UnsupportedWsHost, WebSocketClient.parseWsUrl("ws://example.com:9222/path"));
+}
+
+test "parseWsUrl rejects ipv6 host" {
+    try std.testing.expectError(error.UnsupportedWsHost, WebSocketClient.parseWsUrl("ws://[::1]:9222/path"));
 }
 
 test "parseIp4 stores bytes in network order" {

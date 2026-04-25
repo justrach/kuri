@@ -48,6 +48,18 @@ pub const EventBuffer = struct {
         return false;
     }
 
+    /// Consume the oldest buffered event matching a CDP method name exactly.
+    pub fn consumeEvent(self: *EventBuffer, method: []const u8) bool {
+        for (self.items.items, 0..) |item, i| {
+            if (!eventMatchesMethod(item.data, method)) continue;
+
+            const matched = self.items.orderedRemove(i);
+            matched.owner.free(matched.data);
+            return true;
+        }
+        return false;
+    }
+
     /// Drain all events, freeing memory.
     pub fn drain(self: *EventBuffer) void {
         for (self.items.items) |item| {
@@ -214,8 +226,8 @@ pub const CdpClient = struct {
         self.mu.lock();
         defer self.mu.unlock();
 
-        // Check buffered events first
-        if (self.event_buf.hasEvent(method)) return true;
+        // Consume a buffered match so the same event can't satisfy later waits.
+        if (self.event_buf.consumeEvent(method)) return true;
 
         var ws = &(self.ws orelse return false);
         var attempts: u32 = 0;
@@ -302,6 +314,34 @@ test "EventBuffer push and hasEvent" {
     try std.testing.expectEqual(@as(usize, 1), buf.len());
     try std.testing.expect(buf.hasEvent("Page.loadEventFired"));
     try std.testing.expect(!buf.hasEvent("Network.responseReceived"));
+}
+
+test "EventBuffer consumeEvent removes matched event" {
+    var buf = EventBuffer.init(std.testing.allocator);
+    defer buf.deinit();
+
+    const e1 = try std.testing.allocator.dupe(u8, "{\"method\":\"Page.loadEventFired\",\"params\":{}}");
+    const e2 = try std.testing.allocator.dupe(u8, "{\"method\":\"Network.responseReceived\",\"params\":{}}");
+    buf.push(std.testing.allocator, e1);
+    buf.push(std.testing.allocator, e2);
+
+    try std.testing.expect(buf.consumeEvent("Page.loadEventFired"));
+    try std.testing.expectEqual(@as(usize, 1), buf.len());
+    try std.testing.expect(!buf.hasEvent("Page.loadEventFired"));
+    try std.testing.expect(buf.hasEvent("Network.responseReceived"));
+    try std.testing.expect(!buf.consumeEvent("Page.loadEventFired"));
+}
+
+test "waitForEvent consumes buffered match" {
+    var client = CdpClient.init(std.testing.allocator, "ws://localhost:9222");
+    defer client.deinit();
+
+    const event = try std.testing.allocator.dupe(u8, "{\"method\":\"Page.loadEventFired\",\"params\":{}}");
+    client.event_buf.push(std.testing.allocator, event);
+
+    try std.testing.expect(client.waitForEvent(std.testing.allocator, "Page.loadEventFired", 1));
+    try std.testing.expectEqual(@as(usize, 0), client.event_buf.len());
+    try std.testing.expect(!client.waitForEvent(std.testing.allocator, "Page.loadEventFired", 1));
 }
 
 test "EventBuffer drain frees all" {

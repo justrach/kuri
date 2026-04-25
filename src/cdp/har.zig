@@ -208,7 +208,7 @@ pub const HarRecorder = struct {
             const pending = PendingRequest{
                 .url = owned_url,
                 .method = owned_method,
-                .timestamp = compat.timestampSeconds(),
+                .timestamp = compat.milliTimestamp(),
                 .headers_json = owned_headers,
                 .post_data = owned_post,
             };
@@ -240,7 +240,7 @@ pub const HarRecorder = struct {
             else
                 200;
             const mime = extractField(search_json, "mimeType") orelse "application/octet-stream";
-            const status_text = if (status >= 200 and status < 300) "OK" else if (status >= 300 and status < 400) "Redirect" else if (status >= 400) "Error" else "Unknown";
+            const status_text = extractField(search_json, "statusText") orelse if (status >= 200 and status < 300) "OK" else if (status >= 300 and status < 400) "Redirect" else if (status >= 400) "Error" else "Unknown";
 
             self.addEntry(.{
                 .url = pending.url,
@@ -249,7 +249,7 @@ pub const HarRecorder = struct {
                 .status_text = status_text,
                 .mime_type = mime,
                 .timestamp = pending.timestamp,
-                .duration_ms = compat.timestampSeconds() - pending.timestamp,
+                .duration_ms = compat.milliTimestamp() - pending.timestamp,
                 .request_size = 0,
                 .response_size = 0,
                 .request_headers = pending.headers_json,
@@ -274,7 +274,7 @@ pub const HarRecorder = struct {
         return null;
     }
 
-    /// Extract a simple string field value from JSON: finds "field":"value" pattern.
+    /// Extract a simple string or scalar field value from JSON.
     fn extractField(json: []const u8, field: []const u8) ?[]const u8 {
         var search_buf: [256]u8 = undefined;
         const prefix = std.fmt.bufPrint(&search_buf, "\"{s}\"", .{field}) catch return null;
@@ -285,9 +285,23 @@ pub const HarRecorder = struct {
         // Skip colon and whitespace
         var i = after_field;
         while (i < json.len and (json[i] == ':' or json[i] == ' ' or json[i] == '\t')) : (i += 1) {}
-        if (i >= json.len or json[i] != '"') return null;
-        const val_start = i + 1;
-        const val_end = std.mem.indexOfScalarPos(u8, json, val_start, '"') orelse return null;
+        if (i >= json.len) return null;
+
+        if (json[i] == '"') {
+            const val_start = i + 1;
+            const val_end = std.mem.indexOfScalarPos(u8, json, val_start, '"') orelse return null;
+            return json[val_start..val_end];
+        }
+
+        const val_start = i;
+        var val_end = i;
+        while (val_end < json.len) : (val_end += 1) {
+            switch (json[val_end]) {
+                ',', '}', ']', ' ', '\t', '\r', '\n' => break,
+                else => {},
+            }
+        }
+        if (val_end == val_start) return null;
         return json[val_start..val_end];
     }
 
@@ -406,14 +420,18 @@ test "HarRecorder handleCdpEvent processes request and response" {
     try std.testing.expectEqual(@as(usize, 2), rec.pending_requests.count());
 
     // Send responseReceived with nested "response" object
-    rec.handleCdpEvent("{\"method\":\"Network.responseReceived\",\"params\":{\"requestId\":\"req2\",\"response\":{\"status\":200,\"mimeType\":\"application/json\"}}}");
+    rec.handleCdpEvent("{\"method\":\"Network.responseReceived\",\"params\":{\"requestId\":\"req2\",\"response\":{\"status\":200,\"statusText\":\"OK\",\"mimeType\":\"application/json\"}}}");
     try std.testing.expectEqual(@as(usize, 1), rec.entryCount());
     try std.testing.expectEqual(@as(usize, 1), rec.pending_requests.count());
+    try std.testing.expectEqual(@as(u16, 200), rec.entries.items[0].status);
+    try std.testing.expectEqualStrings("OK", rec.entries.items[0].status_text);
 
     // Complete the first request too
-    rec.handleCdpEvent("{\"method\":\"Network.responseReceived\",\"params\":{\"requestId\":\"req1\",\"response\":{\"status\":304,\"mimeType\":\"text/html\"}}}");
+    rec.handleCdpEvent("{\"method\":\"Network.responseReceived\",\"params\":{\"requestId\":\"req1\",\"response\":{\"status\":304,\"statusText\":\"Not Modified\",\"mimeType\":\"text/html\"}}}");
     try std.testing.expectEqual(@as(usize, 2), rec.entryCount());
     try std.testing.expectEqual(@as(usize, 0), rec.pending_requests.count());
+    try std.testing.expectEqual(@as(u16, 304), rec.entries.items[1].status);
+    try std.testing.expectEqualStrings("Not Modified", rec.entries.items[1].status_text);
 }
 
 test "HarRecorder start clears stale pending requests before enabling network" {
@@ -458,6 +476,18 @@ test "HarRecorder extractField helper" {
     try std.testing.expect(missing == null);
 }
 
+test "HarRecorder extractField parses numeric values" {
+    const json = "{\"status\":304,\"encodedDataLength\":512}";
+
+    const status = HarRecorder.extractField(json, "status");
+    try std.testing.expect(status != null);
+    try std.testing.expectEqualStrings("304", status.?);
+
+    const length = HarRecorder.extractField(json, "encodedDataLength");
+    try std.testing.expect(length != null);
+    try std.testing.expectEqualStrings("512", length.?);
+}
+
 test "HarRecorder parses nested CDP request fields" {
     var rec = HarRecorder.init(std.testing.allocator);
     defer rec.deinit();
@@ -475,4 +505,29 @@ test "HarRecorder parses nested CDP request fields" {
     try std.testing.expectEqualStrings("GET", entry.method);
     try std.testing.expectEqual(@as(u16, 200), entry.status);
     try std.testing.expectEqualStrings("text/css", entry.mime_type);
+}
+
+test "HarRecorder records non-200 status and millisecond duration" {
+    var rec = HarRecorder.init(std.testing.allocator);
+    defer rec.deinit();
+
+    const owned_id = try std.testing.allocator.dupe(u8, "req-ms");
+    const owned_url = try std.testing.allocator.dupe(u8, "https://example.com/cache.css");
+    const owned_method = try std.testing.allocator.dupe(u8, "GET");
+    try rec.pending_requests.put(owned_id, .{
+        .url = owned_url,
+        .method = owned_method,
+        .timestamp = compat.milliTimestamp() - 50,
+        .headers_json = "",
+        .post_data = "",
+    });
+
+    rec.handleCdpEvent("{\"method\":\"Network.responseReceived\",\"params\":{\"requestId\":\"req-ms\",\"response\":{\"status\":304,\"statusText\":\"Not Modified\",\"mimeType\":\"text/css\"}}}");
+
+    try std.testing.expectEqual(@as(usize, 1), rec.entryCount());
+
+    const entry = rec.entries.items[0];
+    try std.testing.expectEqual(@as(u16, 304), entry.status);
+    try std.testing.expectEqualStrings("Not Modified", entry.status_text);
+    try std.testing.expect(entry.duration_ms >= 50);
 }

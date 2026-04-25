@@ -18,9 +18,11 @@ pub fn validateUrl(url: []const u8) ValidationError!void {
         return ValidationError.InvalidScheme;
     }
 
-    const host = extractHost(url) orelse return ValidationError.InvalidUrl;
+    const raw_host = extractHost(url) orelse return ValidationError.InvalidUrl;
+    var normalized_host_buf: [256]u8 = undefined;
+    const host = normalizeHost(raw_host, &normalized_host_buf) orelse return ValidationError.InvalidUrl;
 
-    if (std.mem.eql(u8, host, "localhost") or std.mem.eql(u8, host, "127.0.0.1") or std.mem.eql(u8, host, "::1")) {
+    if (isLocalhostAlias(host) or std.mem.eql(u8, host, "127.0.0.1") or std.mem.eql(u8, host, "::1")) {
         return ValidationError.LocalhostBlocked;
     }
 
@@ -96,26 +98,42 @@ fn posixPathIsSymlink(path_z: [*:0]const u8) bool {
 }
 
 fn extractHost(url: []const u8) ?[]const u8 {
-    const scheme_end = std.mem.indexOf(u8, url, "://") orelse return null;
-    const after_scheme = url[scheme_end + 3 ..];
+    const uri = std.Uri.parse(url) catch return null;
+    const host = uri.host orelse return null;
 
-    const after_auth = if (std.mem.indexOfScalar(u8, after_scheme, '@')) |idx| after_scheme[idx + 1 ..] else after_scheme;
+    return switch (host) {
+        .raw => |raw| stripIpv6Brackets(raw),
+        .percent_encoded => |encoded| stripIpv6Brackets(encoded),
+    };
+}
 
-    // Handle IPv6 [::1] notation
-    if (after_auth.len > 0 and after_auth[0] == '[') {
-        if (std.mem.indexOfScalar(u8, after_auth, ']')) |bracket_end| {
-            return after_auth[1..bracket_end];
-        }
-        return null;
+fn stripIpv6Brackets(host: []const u8) []const u8 {
+    if (host.len >= 2 and host[0] == '[' and host[host.len - 1] == ']') {
+        return host[1 .. host.len - 1];
+    }
+    return host;
+}
+
+fn normalizeHost(host: []const u8, buf: []u8) ?[]const u8 {
+    var trimmed = host;
+    while (trimmed.len > 0 and trimmed[trimmed.len - 1] == '.') {
+        trimmed = trimmed[0 .. trimmed.len - 1];
     }
 
-    var end = after_auth.len;
-    if (std.mem.indexOfScalar(u8, after_auth, ':')) |idx| end = @min(end, idx);
-    if (std.mem.indexOfScalar(u8, after_auth, '/')) |idx| end = @min(end, idx);
-    if (std.mem.indexOfScalar(u8, after_auth, '?')) |idx| end = @min(end, idx);
+    if (trimmed.len == 0 or trimmed.len > buf.len) return null;
 
-    if (end == 0) return null;
-    return after_auth[0..end];
+    for (trimmed, 0..) |c, i| {
+        buf[i] = std.ascii.toLower(c);
+    }
+
+    return buf[0..trimmed.len];
+}
+
+fn isLocalhostAlias(host: []const u8) bool {
+    return std.mem.eql(u8, host, "localhost") or
+        std.mem.eql(u8, host, "localhost.localdomain") or
+        std.mem.endsWith(u8, host, ".localhost") or
+        std.mem.endsWith(u8, host, ".localhost.localdomain");
 }
 
 fn isPrivateIpv4(host: []const u8) bool {
@@ -213,6 +231,14 @@ test "validateUrl blocks localhost" {
     try std.testing.expectError(ValidationError.LocalhostBlocked, validateUrl("http://localhost"));
     try std.testing.expectError(ValidationError.LocalhostBlocked, validateUrl("http://127.0.0.1"));
     try std.testing.expectError(ValidationError.LocalhostBlocked, validateUrl("http://[::1]"));
+}
+
+test "validateUrl blocks normalized localhost aliases" {
+    try std.testing.expectError(ValidationError.LocalhostBlocked, validateUrl("http://LOCALHOST/"));
+    try std.testing.expectError(ValidationError.LocalhostBlocked, validateUrl("http://localhost./"));
+    try std.testing.expectError(ValidationError.LocalhostBlocked, validateUrl("http://app.localhost/"));
+    try std.testing.expectError(ValidationError.LocalhostBlocked, validateUrl("http://LOCALHOST.localdomain./"));
+    try std.testing.expectError(ValidationError.LocalhostBlocked, validateUrl("http://LOCALHOST#fragment"));
 }
 
 test "validateUrl blocks private IPs" {

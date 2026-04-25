@@ -13,6 +13,13 @@ pub const TabEntry = struct {
     last_accessed: i64,
 };
 
+const PersistedTab = struct {
+    id: []const u8,
+    url: []const u8 = "",
+    title: []const u8 = "",
+    ws_url: []const u8 = "",
+};
+
 pub const RefCache = struct {
     refs: std.StringHashMap(u32),
     node_count: usize,
@@ -337,60 +344,44 @@ pub const Bridge = struct {
         self.mu.lockShared();
         defer self.mu.unlockShared();
 
-        var json_buf: std.ArrayList(u8) = .empty;
-        try json_buf.appendSlice(allocator, "[");
+        const persisted_tabs = try allocator.alloc(PersistedTab, self.tabs.count());
+        defer allocator.free(persisted_tabs);
+
         var it = self.tabs.valueIterator();
-        var first = true;
-        while (it.next()) |tab| {
-            if (!first) try json_buf.appendSlice(allocator, ",");
-            first = false;
-            try json_buf.print(allocator, "{{\"id\":\"{s}\",\"url\":\"{s}\",\"title\":\"{s}\",\"ws_url\":\"{s}\"}}", .{ tab.id, tab.url, tab.title, tab.ws_url });
+        var i: usize = 0;
+        while (it.next()) |tab| : (i += 1) {
+            persisted_tabs[i] = .{
+                .id = tab.id,
+                .url = tab.url,
+                .title = tab.title,
+                .ws_url = tab.ws_url,
+            };
         }
-        try json_buf.appendSlice(allocator, "]");
-        return json_buf.toOwnedSlice(allocator);
+
+        return std.json.Stringify.valueAlloc(allocator, persisted_tabs, .{});
     }
 
     pub fn importState(self: *Bridge, json: []const u8, allocator: std.mem.Allocator) !usize {
-        _ = allocator;
-        var count: usize = 0;
-        var pos: usize = 0;
+        var parse_arena = std.heap.ArenaAllocator.init(allocator);
+        defer parse_arena.deinit();
 
-        while (pos < json.len) {
-            const obj_start = std.mem.indexOfScalarPos(u8, json, pos, '{') orelse break;
-            const obj_end = std.mem.indexOfScalarPos(u8, json, obj_start, '}') orelse break;
-            const obj = json[obj_start .. obj_end + 1];
+        const persisted_tabs = try std.json.parseFromSliceLeaky([]PersistedTab, parse_arena.allocator(), json, .{
+            .ignore_unknown_fields = true,
+        });
+        const now = compat.timestampSeconds();
 
-            const id = extractField(obj, "\"id\"") orelse {
-                pos = obj_end + 1;
-                continue;
-            };
-            const url = extractField(obj, "\"url\"") orelse "";
-            const title = extractField(obj, "\"title\"") orelse "";
-            const ws_url = extractField(obj, "\"ws_url\"") orelse "";
-
+        for (persisted_tabs) |tab| {
             try self.putTab(.{
-                .id = id,
-                .url = url,
-                .title = title,
-                .ws_url = ws_url,
-                .created_at = compat.timestampSeconds(),
-                .last_accessed = compat.timestampSeconds(),
+                .id = tab.id,
+                .url = tab.url,
+                .title = tab.title,
+                .ws_url = tab.ws_url,
+                .created_at = now,
+                .last_accessed = now,
             });
-            count += 1;
-            pos = obj_end + 1;
         }
-        return count;
-    }
 
-    fn extractField(json: []const u8, field: []const u8) ?[]const u8 {
-        const field_pos = std.mem.indexOf(u8, json, field) orelse return null;
-        const colon = std.mem.indexOfScalarPos(u8, json, field_pos + field.len, ':') orelse return null;
-        var i = colon + 1;
-        while (i < json.len and (json[i] == ' ' or json[i] == '"')) : (i += 1) {}
-        if (i >= json.len) return null;
-        const val_start = i;
-        const val_end = std.mem.indexOfScalarPos(u8, json, val_start, '"') orelse return null;
-        return json[val_start..val_end];
+        return persisted_tabs.len;
     }
 
     /// Get or create a HAR recorder for a tab.
@@ -535,6 +526,57 @@ test "importState round-trip" {
     const tab = bridge.getTab("a1");
     try std.testing.expect(tab != null);
     try std.testing.expectEqualStrings("https://a.com", tab.?.url);
+}
+
+test "session persistence preserves escaped JSON values" {
+    var source = Bridge.init(std.testing.allocator);
+    defer source.deinit();
+
+    try source.putTab(.{
+        .id = "tab-escaped",
+        .url = "data:text/html,{\"message\":\"hello\\\\world\"}",
+        .title = "Brace } and quote \" and slash \\\\",
+        .ws_url = "ws://localhost:9222/devtools/page/tab-escaped?label=\"quoted\"",
+        .created_at = 1000,
+        .last_accessed = 1000,
+    });
+
+    const json = try source.exportState(std.testing.allocator);
+    defer std.testing.allocator.free(json);
+
+    var target = Bridge.init(std.testing.allocator);
+    defer target.deinit();
+
+    const count = try target.importState(json, std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 1), count);
+
+    const tab = target.getTab("tab-escaped").?;
+    try std.testing.expectEqualStrings("data:text/html,{\"message\":\"hello\\\\world\"}", tab.url);
+    try std.testing.expectEqualStrings("Brace } and quote \" and slash \\\\", tab.title);
+    try std.testing.expectEqualStrings("ws://localhost:9222/devtools/page/tab-escaped?label=\"quoted\"", tab.ws_url);
+}
+
+test "importState rejects malformed ws_url values" {
+    var bridge = Bridge.init(std.testing.allocator);
+    defer bridge.deinit();
+
+    const input =
+        \\[
+        \\  {
+        \\    "id": "tab-1",
+        \\    "url": "https://example.com",
+        \\    "title": "Example",
+        \\    "ws_url": {"nested": "ws://unexpected"}
+        \\  }
+        \\]
+    ;
+
+    if (bridge.importState(input, std.testing.allocator)) |_| {
+        return error.TestExpectedImportFailure;
+    } else |_| {}
+
+    try std.testing.expectEqual(@as(usize, 0), bridge.tabCount());
+    try std.testing.expect(bridge.getTab("tab-1") == null);
 }
 
 test "bridge tab CRUD" {

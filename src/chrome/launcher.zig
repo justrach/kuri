@@ -266,41 +266,35 @@ pub const Launcher = struct {
 
     /// Find the first Chrome binary that exists on this system.
     fn findChromeBinary() ?[]const u8 {
-        for (chrome_paths) |path| {
-            // For absolute paths, check file existence
-            if (path[0] == '/') {
-                if (!compat.cwdAccess(path)) continue;
-                return path;
-            }
-            // For bare names, assume PATH lookup will work
-            return path;
-        }
-        return null;
+        return findExecutableCandidate(chrome_paths, compat.getenv("PATH"));
     }
 
     fn resolveExternal(self: *Launcher, raw_url: []const u8) !void {
-        if (std.mem.startsWith(u8, raw_url, "ws://") or std.mem.startsWith(u8, raw_url, "wss://")) {
+        if (std.mem.startsWith(u8, raw_url, "wss://") or std.mem.startsWith(u8, raw_url, "https://")) {
+            return error.UnsupportedCdpScheme;
+        }
+
+        if (std.mem.startsWith(u8, raw_url, "ws://")) {
             const parsed = parseSocketUrl(raw_url) orelse return error.InvalidCdpUrl;
+            try validateSupportedExternalHost(parsed.host);
             self.cdp_port = parsed.port;
             try self.storeWsUrl(raw_url);
 
-            const status = httpProbe(raw_url, parsed.host, parsed.port, "/json/version");
+            const status = httpProbe(parsed.host, parsed.port, "/json/version");
             if (!status.alive) return error.ConnectionRefused;
             return;
         }
 
         if (std.mem.startsWith(u8, raw_url, "http://")) {
             const parsed = parseHttpUrl(raw_url) orelse return error.InvalidCdpUrl;
+            try validateSupportedExternalHost(parsed.host);
             self.cdp_port = parsed.port;
-            const status = httpProbe(raw_url, parsed.host, parsed.port, parsed.path);
+            const status = httpProbe(parsed.host, parsed.port, parsed.path);
             if (!status.alive) return error.ConnectionRefused;
             const ws_url = status.ws_url orelse return error.MissingDebuggerUrl;
+            try validateSupportedExternalWsUrl(ws_url);
             try self.storeWsUrl(ws_url);
             return;
-        }
-
-        if (std.mem.startsWith(u8, raw_url, "https://")) {
-            return error.UnsupportedCdpScheme;
         }
 
         return error.InvalidCdpUrl;
@@ -390,19 +384,21 @@ pub fn isPortInUse(port: u16) bool {
 /// Probe Chrome's /json/version endpoint via raw TCP HTTP GET.
 /// Returns alive status and optional webSocketDebuggerUrl.
 fn httpProbeJsonVersion(port: u16) Launcher.ChromeStatus {
-    return httpProbe("/json/version", "127.0.0.1", port, "/json/version");
+    return httpProbe("127.0.0.1", port, "/json/version");
 }
 
-fn httpProbe(raw_url: []const u8, host: []const u8, port: u16, path: []const u8) Launcher.ChromeStatus {
+fn httpProbe(host: []const u8, port: u16, path: []const u8) Launcher.ChromeStatus {
     const connect_host = normalizeHost(host);
-    _ = connect_host;
+    if (!std.mem.eql(u8, connect_host, "127.0.0.1")) {
+        return .{ .alive = false, .ws_url = null };
+    }
     var stream = compat.tcpConnectToIp4(port) catch
         return .{ .alive = false, .ws_url = null };
 
     defer stream.close();
 
     var req_buf: [512]u8 = undefined;
-    const request = std.fmt.bufPrint(&req_buf, "GET {s} HTTP/1.1\r\nHost: {s}:{d}\r\nConnection: close\r\n\r\n", .{ path, host, port }) catch
+    const request = std.fmt.bufPrint(&req_buf, "GET {s} HTTP/1.1\r\nHost: {s}:{d}\r\nConnection: close\r\n\r\n", .{ path, connect_host, port }) catch
         return .{ .alive = false, .ws_url = null };
     _ = stream.write(request) catch
         return .{ .alive = false, .ws_url = null };
@@ -423,14 +419,23 @@ fn httpProbe(raw_url: []const u8, host: []const u8, port: u16, path: []const u8)
     }
 
     // Try to extract webSocketDebuggerUrl
-    const ws_url = extractWsUrl(body);
-    _ = raw_url;
-    return .{ .alive = true, .ws_url = ws_url };
+    return .{ .alive = true, .ws_url = extractWsUrl(body) };
 }
 
 fn normalizeHost(host: []const u8) []const u8 {
     if (std.mem.eql(u8, host, "localhost")) return "127.0.0.1";
     return host;
+}
+
+fn validateSupportedExternalHost(host: []const u8) !void {
+    if (std.mem.eql(u8, normalizeHost(host), "127.0.0.1")) return;
+    return error.UnsupportedCdpHost;
+}
+
+fn validateSupportedExternalWsUrl(ws_url: []const u8) !void {
+    if (std.mem.startsWith(u8, ws_url, "wss://")) return error.UnsupportedCdpScheme;
+    const parsed = parseSocketUrl(ws_url) orelse return error.InvalidCdpUrl;
+    try validateSupportedExternalHost(parsed.host);
 }
 
 fn parseSocketUrl(url: []const u8) ?Launcher.ParsedUrl {
@@ -457,9 +462,20 @@ fn parseHostPortPath(remainder: []const u8, default_port: u16, default_path: []c
 
     var host = host_port;
     var port = default_port;
-    if (std.mem.indexOfScalar(u8, host_port, ':')) |colon| {
+    if (host_port[0] == '[') {
+        const bracket_end = std.mem.indexOfScalar(u8, host_port, ']') orelse return null;
+        host = host_port[1..bracket_end];
+        const suffix = host_port[bracket_end + 1 ..];
+        if (suffix.len > 0) {
+            if (suffix[0] != ':' or suffix.len == 1) return null;
+            port = std.fmt.parseInt(u16, suffix[1..], 10) catch return null;
+        }
+    } else if (std.mem.lastIndexOfScalar(u8, host_port, ':')) |colon| {
         host = host_port[0..colon];
-        port = std.fmt.parseInt(u16, host_port[colon + 1 ..], 10) catch return null;
+        if (std.mem.indexOfScalar(u8, host, ':') != null) return null;
+        const port_text = host_port[colon + 1 ..];
+        if (port_text.len == 0) return null;
+        port = std.fmt.parseInt(u16, port_text, 10) catch return null;
     }
     if (host.len == 0) return null;
 
@@ -469,6 +485,59 @@ fn parseHostPortPath(remainder: []const u8, default_port: u16, default_path: []c
         .port = port,
         .path = path,
     };
+}
+
+fn findExecutableCandidate(candidates: []const []const u8, path_env: ?[]const u8) ?[]const u8 {
+    for (candidates) |candidate| {
+        if (std.fs.path.isAbsolute(candidate)) {
+            if (!isExecutablePath(candidate)) continue;
+            return candidate;
+        }
+        if (!pathContainsExecutable(path_env, candidate)) continue;
+        return candidate;
+    }
+    return null;
+}
+
+fn pathContainsExecutable(path_env: ?[]const u8, name: []const u8) bool {
+    const env = path_env orelse return false;
+    var it = std.mem.splitScalar(u8, env, std.fs.path.delimiter);
+    var buf: [4096]u8 = undefined;
+
+    while (it.next()) |dir| {
+        const full_path = joinPath(&buf, dir, name) orelse continue;
+        if (isExecutablePath(full_path)) return true;
+    }
+
+    return false;
+}
+
+fn joinPath(buf: []u8, raw_dir: []const u8, name: []const u8) ?[]const u8 {
+    const dir = if (raw_dir.len == 0) "." else raw_dir;
+    const needs_sep = dir[dir.len - 1] != '/';
+    const sep_len: usize = if (needs_sep) 1 else 0;
+    const total_len = dir.len + sep_len + name.len;
+    if (total_len > buf.len) return null;
+
+    var cursor: usize = 0;
+    @memcpy(buf[cursor .. cursor + dir.len], dir);
+    cursor += dir.len;
+    if (needs_sep) {
+        buf[cursor] = '/';
+        cursor += 1;
+    }
+    @memcpy(buf[cursor .. cursor + name.len], name);
+    cursor += name.len;
+    return buf[0..cursor];
+}
+
+fn isExecutablePath(path: []const u8) bool {
+    if (path.len == 0 or path.len >= 4096) return false;
+
+    var path_buf: [4096]u8 = undefined;
+    @memcpy(path_buf[0..path.len], path);
+    path_buf[path.len] = 0;
+    return std.c.access(path_buf[0..path.len :0], std.c.X_OK) == 0;
 }
 
 /// Extract the webSocketDebuggerUrl value from a JSON response body.
@@ -531,6 +600,13 @@ test "parseHttpUrl extracts host port and path" {
 test "parseSocketUrl extracts websocket port" {
     const parsed = parseSocketUrl("ws://127.0.0.1:9444/devtools/browser/abc").?;
     try std.testing.expectEqualStrings("127.0.0.1", parsed.host);
+    try std.testing.expectEqual(@as(u16, 9444), parsed.port);
+    try std.testing.expectEqualStrings("/devtools/browser/abc", parsed.path);
+}
+
+test "parseSocketUrl parses bracketed ipv6 syntax" {
+    const parsed = parseSocketUrl("ws://[::1]:9444/devtools/browser/abc").?;
+    try std.testing.expectEqualStrings("::1", parsed.host);
     try std.testing.expectEqual(@as(u16, 9444), parsed.port);
     try std.testing.expectEqualStrings("/devtools/browser/abc", parsed.path);
 }
@@ -607,6 +683,142 @@ test "healthCheck returns not alive for unbound port" {
     const status = launcher.healthCheck();
     try std.testing.expect(!status.alive);
     try std.testing.expect(status.ws_url == null);
+}
+
+test "resolveExternal rejects secure websocket endpoints" {
+    var launcher = Launcher.init(std.testing.allocator, config.Config{
+        .host = "127.0.0.1",
+        .port = 8080,
+        .cdp_url = "wss://127.0.0.1:9222/devtools/browser/abc",
+        .auth_secret = null,
+        .state_dir = ".browdie",
+        .stale_tab_interval_s = 30,
+        .request_timeout_ms = 30_000,
+        .navigate_timeout_ms = 30_000,
+        .extensions = null,
+        .headless = true,
+        .proxy = null,
+    });
+    try std.testing.expectError(
+        error.UnsupportedCdpScheme,
+        launcher.resolveExternal("wss://127.0.0.1:9222/devtools/browser/abc"),
+    );
+}
+
+test "resolveExternal rejects remote websocket endpoints" {
+    var launcher = Launcher.init(std.testing.allocator, config.Config{
+        .host = "127.0.0.1",
+        .port = 8080,
+        .cdp_url = "ws://example.com:9222/devtools/browser/abc",
+        .auth_secret = null,
+        .state_dir = ".browdie",
+        .stale_tab_interval_s = 30,
+        .request_timeout_ms = 30_000,
+        .navigate_timeout_ms = 30_000,
+        .extensions = null,
+        .headless = true,
+        .proxy = null,
+    });
+    try std.testing.expectError(
+        error.UnsupportedCdpHost,
+        launcher.resolveExternal("ws://example.com:9222/devtools/browser/abc"),
+    );
+}
+
+test "resolveExternal rejects remote http endpoints" {
+    var launcher = Launcher.init(std.testing.allocator, config.Config{
+        .host = "127.0.0.1",
+        .port = 8080,
+        .cdp_url = "http://example.com:9222/json/version",
+        .auth_secret = null,
+        .state_dir = ".browdie",
+        .stale_tab_interval_s = 30,
+        .request_timeout_ms = 30_000,
+        .navigate_timeout_ms = 30_000,
+        .extensions = null,
+        .headless = true,
+        .proxy = null,
+    });
+    try std.testing.expectError(
+        error.UnsupportedCdpHost,
+        launcher.resolveExternal("http://example.com:9222/json/version"),
+    );
+}
+
+test "resolveExternal rejects ipv6 websocket endpoints" {
+    var launcher = Launcher.init(std.testing.allocator, config.Config{
+        .host = "127.0.0.1",
+        .port = 8080,
+        .cdp_url = "ws://[::1]:9222/devtools/browser/abc",
+        .auth_secret = null,
+        .state_dir = ".browdie",
+        .stale_tab_interval_s = 30,
+        .request_timeout_ms = 30_000,
+        .navigate_timeout_ms = 30_000,
+        .extensions = null,
+        .headless = true,
+        .proxy = null,
+    });
+    try std.testing.expectError(
+        error.UnsupportedCdpHost,
+        launcher.resolveExternal("ws://[::1]:9222/devtools/browser/abc"),
+    );
+}
+
+test "findExecutableCandidate skips missing bare names and keeps searching PATH" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const io = std.testing.io;
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "google-chrome",
+        .data = "#!/bin/sh\n",
+    });
+
+    const alloc = std.testing.allocator;
+    const tmp_path = try std.fs.path.join(alloc, &.{ ".zig-cache", "tmp", tmp.sub_path[0..] });
+    defer alloc.free(tmp_path);
+    const exe_path = try std.fs.path.join(alloc, &.{ tmp_path, "google-chrome" });
+    defer alloc.free(exe_path);
+
+    var exe_path_buf: [4096]u8 = undefined;
+    @memcpy(exe_path_buf[0..exe_path.len], exe_path);
+    exe_path_buf[exe_path.len] = 0;
+    try std.testing.expect(std.c.chmod(exe_path_buf[0..exe_path.len :0], 0o755) == 0);
+
+    const found = findExecutableCandidate(&.{ "chrome", "google-chrome" }, tmp_path);
+    try std.testing.expect(found != null);
+    try std.testing.expectEqualStrings("google-chrome", found.?);
+}
+
+test "findExecutableCandidate ignores non-executable PATH entries" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const io = std.testing.io;
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "chrome",
+        .data = "#!/bin/sh\n",
+    });
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "chromium",
+        .data = "#!/bin/sh\n",
+    });
+
+    const alloc = std.testing.allocator;
+    const tmp_path = try std.fs.path.join(alloc, &.{ ".zig-cache", "tmp", tmp.sub_path[0..] });
+    defer alloc.free(tmp_path);
+    const executable_path = try std.fs.path.join(alloc, &.{ tmp_path, "chromium" });
+    defer alloc.free(executable_path);
+
+    var executable_buf: [4096]u8 = undefined;
+    @memcpy(executable_buf[0..executable_path.len], executable_path);
+    executable_buf[executable_path.len] = 0;
+    try std.testing.expect(std.c.chmod(executable_buf[0..executable_path.len :0], 0o755) == 0);
+
+    const found = findExecutableCandidate(&.{ "chrome", "chromium" }, tmp_path);
+    try std.testing.expect(found != null);
+    try std.testing.expectEqualStrings("chromium", found.?);
 }
 
 test "buildExtensionFlags single extension" {
