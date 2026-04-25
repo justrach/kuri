@@ -24,16 +24,19 @@ fn pageFromFetchResult(allocator: std.mem.Allocator, result: fetch.FetchResult) 
     const links = try extractLinks(allocator, &document, document.root());
 
     return .{
+        .requested_url = result.requested_url,
         .url = result.url,
         .html = html,
         .dom = document,
         .title = title,
         .text = text,
         .links = links,
+        .redirect_chain = result.redirect_chain,
+        .cookie_count = result.cookie_count,
         .status_code = result.status_code,
         .content_type = result.content_type,
         .fallback_mode = .native_static,
-        .pipeline = "fetch -> parsed-dom -> text",
+        .pipeline = "fetch -> cookies -> redirects -> parsed-dom -> text",
     };
 }
 

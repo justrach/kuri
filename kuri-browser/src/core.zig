@@ -37,10 +37,10 @@ pub const BrowserRuntime = struct {
         return .{
             .mode = "standalone experiment",
             .shell = "CLI shell with text-first views",
-            .transport = "std.http fetcher with redirect policy and curl fallback",
+            .transport = "stateful fetcher with redirects, cookies, and curl fallback",
             .dom = "parsed HTML tree with basic selector queries",
             .js = "deferred until the core page model is stable",
-            .automation_surface = "deferred until JS and selectors exist",
+            .automation_surface = "DOM queries only until JS and action primitives land",
             .fallback_strategy = "native_static -> native_js_later -> external_browser",
         };
     }

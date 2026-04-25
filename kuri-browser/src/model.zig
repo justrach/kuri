@@ -45,12 +45,15 @@ pub const DumpFormat = enum {
 };
 
 pub const Page = struct {
+    requested_url: []const u8,
     url: []const u8,
     html: []const u8,
     dom: dom.Document,
     title: []const u8,
     text: []const u8,
     links: []Link,
+    redirect_chain: []const []const u8,
+    cookie_count: usize,
     status_code: u16,
     content_type: []const u8,
     fallback_mode: FallbackMode,

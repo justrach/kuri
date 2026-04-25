@@ -96,11 +96,16 @@ fn renderSummaryPageText(allocator: std.mem.Allocator, page: model.Page) ![]cons
 
     try out.appendSlice(allocator, "kuri-browser render\n\n");
     try out.print(allocator, "url: {s}\n", .{page.url});
+    if (!std.mem.eql(u8, page.requested_url, page.url)) {
+        try out.print(allocator, "requested-url: {s}\n", .{page.requested_url});
+    }
     try out.print(allocator, "status: {d}\n", .{page.status_code});
     try out.print(allocator, "content-type: {s}\n", .{page.content_type});
     try out.print(allocator, "title: {s}\n", .{page.title});
     try out.print(allocator, "pipeline: {s}\n", .{page.pipeline});
     try out.print(allocator, "fallback: {s}\n", .{page.fallback_mode.label()});
+    try out.print(allocator, "redirects: {d}\n", .{page.redirect_chain.len});
+    try out.print(allocator, "cookies: {d}\n", .{page.cookie_count});
     try out.print(allocator, "nodes: {d}\n", .{page.dom.nodeCount()});
     try out.print(allocator, "links: {d}\n\n", .{page.links.len});
 
@@ -120,6 +125,13 @@ fn renderSummaryPageText(allocator: std.mem.Allocator, page: model.Page) ![]cons
         }
         if (limit < page.links.len) {
             try out.print(allocator, "\n... {d} more links\n", .{page.links.len - limit});
+        }
+    }
+
+    if (page.redirect_chain.len > 0) {
+        try out.appendSlice(allocator, "\n--- redirects ---\n");
+        for (page.redirect_chain, 0..) |redirect_url, i| {
+            try out.print(allocator, "[{d}] {s}\n", .{ i + 1, redirect_url });
         }
     }
 

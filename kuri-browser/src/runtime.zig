@@ -27,5 +27,5 @@ test "shape reports scaffold defaults" {
     const runtime = BrowserRuntime.init(std.testing.allocator);
     const shape = runtime.shape();
     try std.testing.expectEqualStrings("standalone experiment", shape.mode);
-    try std.testing.expectEqualStrings("std.http fetcher with redirect policy and curl fallback", shape.transport);
+    try std.testing.expectEqualStrings("stateful fetcher with redirects, cookies, and curl fallback", shape.transport);
 }
