@@ -1,0 +1,12 @@
+.{
+    .name = .kuri_browser,
+    .version = "0.0.0",
+    .fingerprint = 0x6465a3ac30ba5041,
+    .minimum_zig_version = "0.16.0",
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "README.md",
+        "src",
+    },
+}
