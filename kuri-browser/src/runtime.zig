@@ -15,11 +15,13 @@ pub fn roadmapText(allocator: std.mem.Allocator) ![]const u8 {
     return shell.renderRoadmapText(allocator);
 }
 
-pub fn renderUrlText(allocator: std.mem.Allocator, url: []const u8) ![]const u8 {
+pub fn renderUrlText(allocator: std.mem.Allocator, url: []const u8, format: model.DumpFormat, selector: ?[]const u8) ![]const u8 {
     const runtime = BrowserRuntime.init(allocator);
     const page = try runtime.loadPage(url);
-    return shell.renderPageText(allocator, page);
+    return shell.renderPageWithFormat(allocator, page, format, selector);
 }
+
+const model = @import("model.zig");
 
 test "shape reports scaffold defaults" {
     const runtime = BrowserRuntime.init(std.testing.allocator);

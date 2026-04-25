@@ -8,8 +8,9 @@ This folder is intentionally not wired into the root `build.zig`. It exists as a
 
 - `src/model.zig`: shared `Page`, `Link`, and fallback-mode types
 - `src/core.zig`: runtime shape plus page-loading orchestration
+- `src/dom.zig`: parsed DOM tree plus basic selector queries
 - `src/fetch.zig`: network acquisition, validation, redirects, and `curl` fallback
-- `src/render.zig`: static HTML extraction into the shared page model
+- `src/render.zig`: parsed-page extraction into the shared page model
 - `src/shell.zig`: CLI-facing usage, status, roadmap, and text rendering
 - `src/runtime.zig`: thin facade used by `src/main.zig`
 
@@ -29,7 +30,7 @@ zig build run -- render https://example.com
 
 - keep Kuri's existing managed-Chrome/CDP server untouched
 - prototype a Zig-native browser runtime in isolation
-- start with real HTTP fetch plus a minimal HTML-to-text renderer
+- start with real HTTP fetch plus a parsed DOM tree and selector queries
 - keep a stable `Page` model so future DOM/JS layers have a fixed handoff point
 - keep JS, layout, and CDP compatibility out of scope for the first slice
 
@@ -39,6 +40,9 @@ zig build run -- render https://example.com
 zig build run -- status
 zig build run -- roadmap
 zig build run -- render https://news.ycombinator.com
+zig build run -- render https://example.com --dump html
+zig build run -- render https://news.ycombinator.com --dump links
+zig build run -- render https://news.ycombinator.com --selector ".titleline a" --dump text
 ```
 
 ## Target Direction
