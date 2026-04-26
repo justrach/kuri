@@ -69,7 +69,7 @@ pub fn paintUrl(allocator: std.mem.Allocator, url: []const u8, options: Options)
 fn paintSerializationOptions(options: js_runtime.Options) js_runtime.Options {
     return .{
         .enabled = true,
-        .eval_expression = "document.documentElement ? document.documentElement.outerHTML : ''",
+        .eval_expression = options.eval_expression,
         .wait_selector = options.wait_selector,
         .wait_expression = options.wait_expression,
         .wait_iterations = options.wait_iterations,
@@ -77,9 +77,11 @@ fn paintSerializationOptions(options: js_runtime.Options) js_runtime.Options {
 }
 
 fn serializedPaintHtml(page: model.Page) ?[]const u8 {
-    const html = std.mem.trim(u8, page.js.eval_result, " \t\r\n");
-    if (!looksLikeSerializedHtml(html)) return null;
-    return html;
+    const serialized = std.mem.trim(u8, page.js.serialized_html, " \t\r\n");
+    if (looksLikeSerializedHtml(serialized)) return serialized;
+    const eval_result = std.mem.trim(u8, page.js.eval_result, " \t\r\n");
+    if (looksLikeSerializedHtml(eval_result)) return eval_result;
+    return null;
 }
 
 fn looksLikeSerializedHtml(html: []const u8) bool {
@@ -428,8 +430,14 @@ fn drawFlowNode(
         std.ascii.eqlIgnoreCase(node.name, "body") or
         std.ascii.eqlIgnoreCase(node.name, "div") or
         std.ascii.eqlIgnoreCase(node.name, "main") or
+        std.ascii.eqlIgnoreCase(node.name, "header") or
+        std.ascii.eqlIgnoreCase(node.name, "footer") or
+        std.ascii.eqlIgnoreCase(node.name, "nav") or
         std.ascii.eqlIgnoreCase(node.name, "section") or
-        std.ascii.eqlIgnoreCase(node.name, "article"))
+        std.ascii.eqlIgnoreCase(node.name, "article") or
+        std.ascii.eqlIgnoreCase(node.name, "ul") or
+        std.ascii.eqlIgnoreCase(node.name, "ol") or
+        std.ascii.eqlIgnoreCase(node.name, "form"))
     {
         const child_opacity = if (std.ascii.eqlIgnoreCase(node.name, "div")) style.div_opacity else opacity;
         try drawFlowChildren(allocator, writer, document, node_id, style, x, y, child_opacity);

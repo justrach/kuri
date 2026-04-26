@@ -104,6 +104,7 @@ pub fn evaluatePage(
         }
     }
 
+    report.serialized_html = engine.evalAlloc(allocator, "document.documentElement ? document.documentElement.outerHTML : ''") orelse "";
     return report;
 }
 
@@ -124,6 +125,7 @@ pub fn evaluateExpressionInHtml(
     _ = try evaluateExpression(allocator, &engine, expression, &report);
     report.output = jsengine.outputAlloc(&engine, allocator) orelse "";
     report.document_title = engine.evalAlloc(allocator, "document.title") orelse "";
+    report.serialized_html = engine.evalAlloc(allocator, "document.documentElement ? document.documentElement.outerHTML : ''") orelse "";
     return report;
 }
 
@@ -1437,6 +1439,7 @@ test "evaluatePage drains timer and microtask shims" {
 
     try std.testing.expectEqualStrings("1|1|1|timeout", result.eval_result);
     try std.testing.expectEqualStrings("timeout", result.document_title);
+    try std.testing.expect(std.mem.indexOf(u8, result.serialized_html, "<html") != null);
 }
 
 test "evaluatePage reports wait selector satisfaction" {

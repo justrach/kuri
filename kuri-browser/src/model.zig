@@ -41,6 +41,7 @@ pub const JsExecution = struct {
     xhr_requests: usize = 0,
     output: []const u8 = "",
     eval_result: []const u8 = "",
+    serialized_html: []const u8 = "",
     document_title: []const u8 = "",
     wait_expression: []const u8 = "",
     wait_satisfied: bool = false,

@@ -221,6 +221,7 @@ const dom_location_template =
     \\    removeEventListener: function() {{}},
     \\    dispatchEvent: function() {{ return true; }},
     \\    getComputedStyle: function() {{ return {{}}; }},
+    \\    matchMedia: function(query) {{ return {{ media: String(query || ''), matches: false, onchange: null, addListener: function() {{}}, removeListener: function() {{}}, addEventListener: function() {{}}, removeEventListener: function() {{}}, dispatchEvent: function() {{ return true; }} }}; }},
     \\    requestAnimationFrame: function(fn) {{ if (typeof fn === 'function') fn(0); return 0; }},
     \\    cancelAnimationFrame: function() {{}}
     \\  }};
@@ -258,7 +259,10 @@ const dom_shim_js =
     \\  Element.prototype.getElementsByTagName = function() { return []; };
     \\  Element.prototype.getElementsByClassName = function() { return []; };
     \\  Element.prototype.appendChild = function(c) { return c; };
+    \\  Element.prototype.append = function() {};
+    \\  Element.prototype.prepend = function() {};
     \\  Element.prototype.removeChild = function(c) { return c; };
+    \\  Element.prototype.remove = function() {};
     \\  Element.prototype.addEventListener = function() {};
     \\  Element.prototype.removeEventListener = function() {};
     \\  Element.prototype.dispatchEvent = function() { return true; };
@@ -451,6 +455,71 @@ const dom_runtime_enhancement_js =
     \\  var windowRef = globalThis;
     \\
     \\  function lower(value) { return String(value || '').toLowerCase(); }
+    \\  function splitUrlParts(raw) {
+    \\    raw = String(raw || '');
+    \\    var match = /^([A-Za-z][A-Za-z0-9+.-]*:)?(?:\/\/([^\/?#]*))?([^?#]*)(\?[^#]*)?(#.*)?$/.exec(raw) || [];
+    \\    var protocol = match[1] || '';
+    \\    var host = match[2] || '';
+    \\    var pathname = match[3] || '/';
+    \\    var search = match[4] || '';
+    \\    var hash = match[5] || '';
+    \\    if (!pathname) pathname = '/';
+    \\    return { protocol: protocol, host: host, pathname: pathname, search: search, hash: hash };
+    \\  }
+    \\  function originFromHref(href) {
+    \\    var parts = splitUrlParts(href);
+    \\    return (parts.protocol && parts.host) ? parts.protocol + '//' + parts.host : '';
+    \\  }
+    \\  function normalizePath(pathname) {
+    \\    var absolute = String(pathname || '/').charAt(0) === '/';
+    \\    var parts = String(pathname || '/').split('/');
+    \\    var out = [];
+    \\    for (var i = 0; i < parts.length; i += 1) {
+    \\      var part = parts[i];
+    \\      if (!part || part === '.') continue;
+    \\      if (part === '..') {
+    \\        if (out.length) out.pop();
+    \\      } else {
+    \\        out.push(part);
+    \\      }
+    \\    }
+    \\    return (absolute ? '/' : '') + out.join('/') || '/';
+    \\  }
+    \\  function resolveUrlInput(input, base) {
+    \\    var raw = String(input || '');
+    \\    var baseHref = String(base || (windowRef.location && windowRef.location.href) || '');
+    \\    if (/^[A-Za-z][A-Za-z0-9+.-]*:/.test(raw)) return raw;
+    \\    var baseNoHash = baseHref.split('#')[0];
+    \\    var baseNoQuery = baseNoHash.split('?')[0];
+    \\    var origin = originFromHref(baseHref);
+    \\    if (raw.charAt(0) === '/') return origin + raw;
+    \\    if (raw.charAt(0) === '#') return baseNoHash + raw;
+    \\    if (raw.charAt(0) === '?') return baseNoQuery + raw;
+    \\    var slash = baseNoQuery.lastIndexOf('/');
+    \\    var dir = slash >= 0 ? baseNoQuery.slice(0, slash + 1) : baseNoQuery + '/';
+    \\    return dir + raw;
+    \\  }
+    \\  function URLShim(input, base) {
+    \\    if (!(this instanceof URLShim)) return new URLShim(input, base);
+    \\    var href = resolveUrlInput(input, base);
+    \\    var parts = splitUrlParts(href);
+    \\    this.protocol = parts.protocol;
+    \\    this.host = parts.host;
+    \\    this.hostname = parts.host.split(':')[0] || '';
+    \\    this.port = parts.host.indexOf(':') >= 0 ? parts.host.split(':').slice(1).join(':') : '';
+    \\    this.pathname = normalizePath(parts.pathname || '/');
+    \\    this.search = parts.search;
+    \\    this.hash = parts.hash;
+    \\    this.origin = this.protocol && this.host ? this.protocol + '//' + this.host : '';
+    \\    this.href = this.origin + this.pathname + this.search + this.hash;
+    \\  }
+    \\  URLShim.prototype.toString = function() { return this.href; };
+    \\  URLShim.prototype.toJSON = function() { return this.href; };
+    \\  if (typeof globalThis.URL === 'undefined') {
+    \\    globalThis.URL = URLShim;
+    \\    windowRef.URL = URLShim;
+    \\  }
+    \\  if (globalThis.window && !globalThis.window.URL) globalThis.window.URL = globalThis.URL;
     \\
     \\  Object.keys(existingWindow).forEach(function(key) {
     \\    if (windowRef[key] === undefined) windowRef[key] = existingWindow[key];
@@ -655,6 +724,26 @@ const dom_runtime_enhancement_js =
     \\      child.parentNode = null;
     \\    }
     \\    return child;
+    \\  };
+    \\
+    \\  Node.prototype.append = function() {
+    \\    for (var i = 0; i < arguments.length; i += 1) {
+    \\      var child = arguments[i];
+    \\      if (typeof child === 'string') child = (this.ownerDocument || documentRef).createTextNode(child);
+    \\      this.appendChild(child);
+    \\    }
+    \\  };
+    \\
+    \\  Node.prototype.prepend = function() {
+    \\    for (var i = arguments.length - 1; i >= 0; i -= 1) {
+    \\      var child = arguments[i];
+    \\      if (typeof child === 'string') child = (this.ownerDocument || documentRef).createTextNode(child);
+    \\      this.insertBefore(child, this.firstChild);
+    \\    }
+    \\  };
+    \\
+    \\  Node.prototype.remove = function() {
+    \\    if (this.parentNode) this.parentNode.removeChild(this);
     \\  };
     \\
     \\  Node.prototype.insertBefore = function(child, reference) {
@@ -1364,6 +1453,7 @@ const dom_runtime_enhancement_js =
     \\  windowRef.MouseEvent = MouseEvent;
     \\  windowRef.MutationObserver = windowRef.MutationObserver || function() { this.observe = function() {}; this.disconnect = function() {}; this.takeRecords = function() { return []; }; };
     \\  windowRef.getComputedStyle = function(node) { return node && node.style ? node.style : new StyleDeclaration(); };
+    \\  windowRef.matchMedia = windowRef.matchMedia || function(query) { return { media: String(query || ''), matches: false, onchange: null, addListener: function() {}, removeListener: function() {}, addEventListener: function() {}, removeEventListener: function() {}, dispatchEvent: function() { return true; } }; };
     \\  windowRef.requestAnimationFrame = windowRef.requestAnimationFrame || function(fn) { if (typeof fn === 'function') fn(0); return 0; };
     \\  windowRef.cancelAnimationFrame = windowRef.cancelAnimationFrame || function() {};
     \\  globalThis.window = windowRef;
@@ -1580,6 +1670,24 @@ test "DOM stubs: id and className properties reflect selector attributes" {
     try std.testing.expectEqualStrings("1", output.?);
 }
 
+test "DOM stubs: append and remove mutate child lists" {
+    const html =
+        "<html><body><script>" ++
+        "var root = document.createElement('div');" ++
+        "var node = document.createElement('div');" ++
+        "document.body.append(root);" ++
+        "root.append(node);" ++
+        "node.append('hello');" ++
+        "var before = root.textContent;" ++
+        "node.remove();" ++
+        "document.write(before + '|' + root.textContent);" ++
+        "</script></body></html>";
+    const output = try evalHtmlScripts(html, std.testing.allocator);
+    defer if (output) |o| std.testing.allocator.free(o);
+    try std.testing.expect(output != null);
+    try std.testing.expectEqualStrings("hello|", output.?);
+}
+
 test "DOM stubs: document.querySelector by id selector" {
     const html = "<span id=\"x\">found</span><script>var el = document.querySelector('#x'); document.write(el ? el.textContent : 'null');</script>";
     const output = try evalHtmlScripts(html, std.testing.allocator);
@@ -1635,6 +1743,22 @@ test "DOM stubs: window.location.search and hash" {
     defer if (output) |o| std.testing.allocator.free(o);
     try std.testing.expect(output != null);
     try std.testing.expectEqualStrings("?q=1&r=2|#sec", output.?);
+}
+
+test "DOM stubs: URL constructor resolves relative paths" {
+    const html = "<script>var u = new URL('../next?q=1#s', window.location.href); document.write(u.pathname + '|' + u.search + '|' + u.hash);</script>";
+    const output = try evalHtmlScriptsWithUrl(html, "https://example.com/a/b/c", std.testing.allocator);
+    defer if (output) |o| std.testing.allocator.free(o);
+    try std.testing.expect(output != null);
+    try std.testing.expectEqualStrings("/a/next|?q=1|#s", output.?);
+}
+
+test "DOM stubs: matchMedia exposes media query list shape" {
+    const html = "<script>var m = window.matchMedia('(prefers-color-scheme: dark)'); document.write(String(m.matches) + '|' + m.media);</script>";
+    const output = try evalHtmlScripts(html, std.testing.allocator);
+    defer if (output) |o| std.testing.allocator.free(o);
+    try std.testing.expect(output != null);
+    try std.testing.expectEqualStrings("false|(prefers-color-scheme: dark)", output.?);
 }
 
 test "DOM stubs: console.log does not crash" {

@@ -104,10 +104,10 @@ The wrapper mode removes Chrome's standalone-SVG page display artifact and measu
 Measured against real Chrome on the JS-rendered `https://quotes.toscrape.com/js/` with `--paint-js` at `1280x720`:
 
 - Chrome actual screenshot: **71,989 bytes**
-- Native SVG paint artifact: **8,959 bytes**
-- Native SVG rasterized through a no-margin HTML wrapper: **49,501 bytes**
-- Exact matching pixels through wrapper: **88.61%**
-- Mean absolute RGB delta through wrapper: **12.76/255**
+- Native SVG paint artifact: **9,422 bytes**
+- Native SVG rasterized through a no-margin HTML wrapper: **52,339 bytes**
+- Exact matching pixels through wrapper: **88.76%**
+- Mean absolute RGB delta through wrapper: **12.54/255**
 
 Measured against real Chrome on `https://news.ycombinator.com` at `1280x720`:
 
@@ -116,6 +116,16 @@ Measured against real Chrome on `https://news.ycombinator.com` at `1280x720`:
 - Native SVG rasterized through a no-margin HTML wrapper: **146,370 bytes**
 - Exact matching pixels through wrapper: **88.06%**
 - Mean absolute RGB delta through wrapper: **10.58/255**
+
+## Heavier JS Smoke Tests
+
+Last run: **2026-04-26** from the local `kuri-browser` branch.
+
+- `https://quotes.toscrape.com/js/`: passes JS render, serialized DOM text, native paint, and `--step click:e2` navigation to page 2.
+- `https://todomvc.com/examples/react/dist/`: React bundle now executes without script failures; render/snapshot expose the JS-created textbox, and native paint shows the TodoMVC shell. Typing does not yet drive React state because actions do not keep a live JS engine across steps.
+- `https://vite.dev`: renders substantial static/serialized content, but ESM module scripts still fail because module import execution is not implemented.
+- `https://svelte.dev`: renders substantial content; DOM shims reduced inline failures, but one SvelteKit hydration path still fails.
+- `https://react.dev`: timed out past 20s in the local live probe and should be treated as not supported yet.
 
 Measured on cache-busted `https://example.com` in the local live bench before pixel comparison:
 

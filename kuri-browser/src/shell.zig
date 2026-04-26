@@ -380,6 +380,9 @@ fn renderJsText(allocator: std.mem.Allocator, js: model.JsExecution) ![]const u8
     if (js.eval_result.len > 0) {
         try out.print(allocator, "eval-result: {s}\n", .{js.eval_result});
     }
+    if (js.serialized_html.len > 0) {
+        try out.print(allocator, "serialized-html-bytes: {d}\n", .{js.serialized_html.len});
+    }
     if (js.error_message.len > 0) {
         try out.print(allocator, "error: {s}\n", .{js.error_message});
     }

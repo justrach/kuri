@@ -122,13 +122,13 @@ fn pageFromFetchResultWithPipeline(
     js_options: js_runtime.Options,
 ) !model.Page {
     const html = result.body;
-    const document = try dom.Document.parse(allocator, html);
+    var document = try dom.Document.parse(allocator, html);
     var title = try extractTitle(allocator, &document);
 
     const text_root = (try document.querySelector(allocator, "body")) orelse document.root();
-    const text = try document.textContent(allocator, text_root);
-    const links = try extractLinks(allocator, &document, document.root());
-    const forms = try extractForms(allocator, &document, result.url);
+    var text = try document.textContent(allocator, text_root);
+    var links = try extractLinks(allocator, &document, document.root());
+    var forms = try extractForms(allocator, &document, result.url);
     const resources = try extractResources(allocator, &document, result.url);
     try loadResources(allocator, session, resources, result.url);
     const js = try js_runtime.evaluatePage(allocator, session, &document, html, result.url, resources, js_options);
@@ -137,10 +137,23 @@ fn pageFromFetchResultWithPipeline(
         title = js.document_title;
     }
 
+    var page_html = html;
+    if (serializedDomHtml(js)) |serialized_html| {
+        var serialized_document = try dom.Document.parse(allocator, serialized_html);
+        errdefer serialized_document.deinit();
+        document.deinit();
+        document = serialized_document;
+        page_html = serialized_html;
+        const serialized_text_root = (try document.querySelector(allocator, "body")) orelse document.root();
+        text = try document.textContent(allocator, serialized_text_root);
+        links = try extractLinks(allocator, &document, document.root());
+        forms = try extractForms(allocator, &document, result.url);
+    }
+
     return .{
         .requested_url = result.requested_url,
         .url = result.url,
-        .html = html,
+        .html = page_html,
         .dom = document,
         .title = title,
         .text = text,
@@ -155,6 +168,28 @@ fn pageFromFetchResultWithPipeline(
         .fallback_mode = .native_static,
         .pipeline = if (js_options.active()) try std.fmt.allocPrint(allocator, "{s} -> quickjs", .{pipeline}) else pipeline,
     };
+}
+
+fn serializedDomHtml(js: model.JsExecution) ?[]const u8 {
+    const html = std.mem.trim(u8, js.serialized_html, " \t\r\n");
+    if (!looksLikeSerializedHtml(html)) return null;
+    return html;
+}
+
+fn looksLikeSerializedHtml(html: []const u8) bool {
+    return std.mem.startsWith(u8, html, "<") and
+        (containsAsciiIgnoreCase(html, "<html") or containsAsciiIgnoreCase(html, "<body"));
+}
+
+fn containsAsciiIgnoreCase(haystack: []const u8, needle: []const u8) bool {
+    if (needle.len == 0) return true;
+    if (needle.len > haystack.len) return false;
+
+    var i: usize = 0;
+    while (i + needle.len <= haystack.len) : (i += 1) {
+        if (std.ascii.eqlIgnoreCase(haystack[i .. i + needle.len], needle)) return true;
+    }
+    return false;
 }
 
 fn submitFormWithSession(
@@ -654,6 +689,11 @@ test "extractLinks strips nested tags and decodes numeric entities" {
     try std.testing.expectEqual(@as(usize, 1), links.len);
     try std.testing.expectEqualStrings("main / child", links[0].text);
     try std.testing.expectEqualStrings("/item?id=1", links[0].href);
+}
+
+test "serializedDomHtml accepts quickjs outerHTML" {
+    try std.testing.expect(serializedDomHtml(.{ .enabled = true, .serialized_html = "<html><body><p>Ready</p></body></html>" }) != null);
+    try std.testing.expect(serializedDomHtml(.{ .enabled = true, .serialized_html = "not html" }) == null);
 }
 
 test "extractForms captures form metadata and fields" {
