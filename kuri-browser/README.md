@@ -15,7 +15,7 @@ This folder is intentionally not wired into the root `build.zig`. It exists as a
 - `src/screenshot.zig`: screenshot fallback through Kuri's existing CDP server
 - `src/bench.zig`: replacement-readiness benchmark
 - `src/parity.zig`: weighted parity score against Kuri's current browser surface
-- `src/cdp_server.zig`: minimal Chrome-style HTTP discovery endpoints
+- `src/cdp_server.zig`: minimal Chrome-style HTTP discovery plus WebSocket JSON-RPC routing
 - `src/shell.zig`: CLI-facing usage, status, roadmap, and text rendering
 - `src/runtime.zig`: thin facade used by `src/main.zig`
 
@@ -37,8 +37,8 @@ zig build run -- render https://example.com
 - prototype a Zig-native browser runtime in isolation
 - use real HTTP fetch, redirects, cookies, parsed DOM, selector queries, and QuickJS-backed page evaluation
 - keep a stable `Page` model so future DOM/JS layers have a fixed handoff point
-- provide a small CDP-discovery shim while the native runtime evolves
-- keep native layout, paint, PDF, and full CDP WebSocket compatibility out of scope until the runtime is stable
+- provide a small CDP discovery and WebSocket JSON-RPC shim while the native runtime evolves
+- keep native layout, paint, PDF, broad CDP domain coverage, and full Playwright/Puppeteer compatibility out of scope until the runtime is stable
 
 This is not wired into the root `zig build`, and it is not a production replacement for Kuri's managed Chrome path yet.
 
@@ -57,6 +57,20 @@ zig build run -- render https://todomvc.com/examples/react/dist/ --js --wait-eva
 zig build run -- render https://example.com --har example.har
 zig build run -- serve-cdp --port 9333
 ```
+
+### CDP Shim
+
+`serve-cdp` is an experimental compatibility shim, not a full browser protocol implementation.
+
+```sh
+zig build run -- serve-cdp --port 9333
+curl http://127.0.0.1:9333/json/version
+curl http://127.0.0.1:9333/json/list
+```
+
+The advertised `webSocketDebuggerUrl` upgrades to WebSocket and routes a small JSON-RPC surface: `Browser.getVersion`, basic `Target` lifecycle, `Runtime.evaluate`, `Page.navigate`, `Page.getFrameTree`, `DOM.getDocument`, and no-op enable/input methods. Runtime values are V8-shaped CDP remote objects backed by the existing QuickJS page runtime; no V8 dependency is added.
+
+This is enough for local protocol smoke tests and parity tracking. It is not enough to replace Chrome for Playwright/Puppeteer yet because sessions, isolated worlds, robust target/frame events, locator actionability, screenshots, tracing, downloads, and native layout/paint are still incomplete.
 
 ### Screenshot Fallback
 
@@ -98,7 +112,7 @@ zig build run -- bench --offline
 zig build run -- bench --kuri-base http://127.0.0.1:8080
 ```
 
-The current live bench is useful for tracking progress, but the answer is still "not ready to replace headless Chrome" until CDP WebSocket JSON-RPC, browser domains, native layout/paint, and Playwright/Puppeteer lifecycle support exist.
+The current live bench is useful for tracking progress, but the answer is still "not ready to replace headless Chrome" until broader CDP browser domains, native layout/paint, and Playwright/Puppeteer lifecycle support exist.
 
 ## Target Direction
 
@@ -106,4 +120,4 @@ The current live bench is useful for tracking progress, but the answer is still 
 2. DOM tree construction and selector queries
 3. Embedded JS runtime for page execution
 4. Agent-facing snapshot/evaluate APIs
-5. Optional partial CDP compatibility once the core runtime is stable
+5. Broader CDP and Playwright/Puppeteer compatibility once the core runtime is stable

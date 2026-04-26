@@ -73,7 +73,10 @@ zig build run -- render https://news.ycombinator.com --selector ".titleline a" -
 zig build run -- render https://todomvc.com/examples/react/dist/ --js --wait-eval "document.querySelectorAll('.todo-list li').length >= 1"
 zig build run -- bench --offline
 zig build run -- parity --offline
+zig build run -- serve-cdp --port 9333
 ```
+
+`serve-cdp` exposes Chrome-style HTTP discovery plus a minimal WebSocket JSON-RPC router. It can answer basic Browser/Target/Page/Runtime/DOM methods, and `Runtime.evaluate` returns V8-shaped CDP remote objects backed by QuickJS. This is useful for protocol smoke tests, but it is not broad Playwright/Puppeteer compatibility and cannot replace Chrome yet.
 
 For screenshots, `kuri-browser` currently delegates to the main Kuri/CDP renderer:
 
@@ -189,4 +192,4 @@ curl -s 'https://target.com/api/v4/data' \
 5. **HAR for API discovery** — start HAR before navigating, then use `/har/replay?filter=api` to find the site's API endpoints.
 6. **Cookies transfer** — use `/cookies` to get browser session cookies, then make direct `curl` calls.
 7. **Refs persist per snapshot only** — take a new snapshot after any navigation or meaningful DOM change.
-8. **Native browser experiment is separate** — `kuri-browser` is useful for parity work and benchmarks, but screenshots still use the Kuri/CDP fallback and native layout/paint is not implemented.
+8. **Native browser experiment is separate** — `kuri-browser` is useful for parity work and benchmarks. Its `serve-cdp` router is minimal, screenshots still use the Kuri/CDP fallback, and native layout/paint is not implemented.

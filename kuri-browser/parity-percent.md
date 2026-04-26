@@ -1,6 +1,6 @@
 # Kuri Browser Parity Percent
 
-Target in this file is **Kuri's real Chrome/CDP server**, not Obscura.
+Target in this file is **Kuri's real Chrome/CDP server**.
 
 This score is meant to answer a narrower question:
 
@@ -11,7 +11,8 @@ This score is meant to answer a narrower question:
 
 - Estimated feature parity: **66%**
 - Automated validation coverage: **63%** of the target surface
-- Live-validated parity: **depends on the current Kuri run**
+- Offline replacement-readiness bench: **66%**, not ready
+- Last live replacement-readiness bench: **71%**, not ready, measured against local Kuri on 2026-04-26
 
 The `66%` figure is weighted, not a raw item count.
 
@@ -41,7 +42,7 @@ zig build run -- bench --offline
 
 That bench covers JS/runtime completeness, wait semantics, CDP surface area, Playwright/Puppeteer compatibility, and whether this can replace headless Chrome yet.
 
-Run the minimal CDP discovery server:
+Run the minimal CDP server:
 
 ```sh
 zig build run -- serve-cdp --port 9333
@@ -49,7 +50,7 @@ curl http://127.0.0.1:9333/json/version
 curl http://127.0.0.1:9333/json/list
 ```
 
-This currently exposes Chrome-style HTTP discovery only. The advertised `webSocketDebuggerUrl` is a placeholder until the WebSocket protocol router lands.
+This exposes Chrome-style HTTP discovery plus a minimal WebSocket JSON-RPC router on the advertised `webSocketDebuggerUrl`. It can answer a small Browser/Target/Page/Runtime/Network/DOM/Input surface, including `Runtime.evaluate` with V8-shaped remote objects backed by QuickJS. It does not embed V8, and it is not broad Playwright/Puppeteer compatibility yet.
 
 Capture screenshots through the existing Kuri/CDP renderer fallback:
 
@@ -70,15 +71,15 @@ Measured on `https://example.com` through the local Kuri/CDP fallback:
 
 Current bench result from this branch:
 
-- Offline deterministic readiness: **51%**, not ready
-- Offline + live probes readiness: **58%**, not ready
+- Offline deterministic readiness: **66%**, not ready
+- Offline + live probes readiness: **71%**, not ready
 - JS/runtime completeness: **100%**
 - Wait semantics: **100%**
-- CDP automation surface: **41-46%** depending on live Kuri availability
-- Playwright/Puppeteer compatibility: **11%**
+- CDP automation surface: **77-79%** depending on live Kuri availability
+- Playwright/Puppeteer compatibility: **39%**
 - Replace-headless-Chrome readiness: **41-52%** depending on live probes
 
-The live run passed Hacker News selector extraction, `quotes.toscrape.com/js/`, TodoMVC wait/eval, HAR capture, the CDP screenshot fallback, and the local Kuri health probe.
+The live run passed Hacker News selector extraction, `quotes.toscrape.com/js/`, TodoMVC wait/eval, HAR capture, the CDP screenshot fallback, the local Kuri health probe, and the minimal local CDP WebSocket dispatch smoke test.
 
 The live suite currently probes:
 
@@ -108,7 +109,7 @@ The live suite currently probes:
 | Wait semantics + async lifecycle | 8 | partial | bench | `--wait-selector` and `--wait-eval` cover bounded JS polling; load-state parity is still missing |
 | Agent snapshots, refs, and actions | 8 | partial | live | Snapshot refs plus basic click/type flows exist; broader action parity is still missing |
 | Visual rendering + screenshots | 6 | partial | bench | Screenshot can delegate to Kuri/CDP fallback; native layout/paint/PDF are still missing |
-| CDP / automation compatibility | 4 | partial | bench | `serve-cdp` exposes Chrome-style HTTP discovery; WebSocket protocol routing is missing |
+| CDP / automation compatibility | 4 | partial | bench | `serve-cdp` exposes HTTP discovery plus a minimal WebSocket JSON-RPC router; broad CDP domains and Playwright/Puppeteer parity are still missing |
 
 ## Missing First
 
@@ -116,4 +117,4 @@ The live suite currently probes:
 2. Broader ref-driven actions plus keyboard/select/checkbox parity.
 3. More complete DOM events and mutation semantics.
 4. Native rendered output or screenshot support without the CDP fallback.
-5. Any CDP-compatibility layer after the native runtime is stable.
+5. Broader CDP browser protocol domains beyond the minimal WebSocket router.

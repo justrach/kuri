@@ -348,7 +348,10 @@ zig build run -- render https://news.ycombinator.com --selector ".titleline a" -
 zig build run -- render https://todomvc.com/examples/react/dist/ --js --wait-eval "document.querySelectorAll('.todo-list li').length >= 1"
 zig build run -- parity --offline
 zig build run -- bench --offline
+zig build run -- serve-cdp --port 9333
 ```
+
+`kuri-browser serve-cdp` exposes Chrome-style HTTP discovery plus a minimal WebSocket JSON-RPC router for protocol smoke tests. Runtime eval returns V8-shaped CDP remote objects backed by QuickJS; this does not add a V8 dependency and is not full Playwright/Puppeteer compatibility yet.
 
 Screenshots in `kuri-browser` currently delegate to the main Kuri/CDP renderer. Start `./zig-out/bin/kuri` first, then:
 

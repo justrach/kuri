@@ -111,7 +111,7 @@ pub fn reportText(allocator: std.mem.Allocator, options: Options) ![]const u8 {
     }
 
     try out.writer.writeAll("\nMissing First\n");
-    try out.writer.writeAll("- CDP WebSocket protocol router and browser protocol domains\n");
+    try out.writer.writeAll("- Broader CDP browser protocol domains beyond the minimal WebSocket router\n");
     try out.writer.writeAll("- Playwright/Puppeteer protocol domains, target/session lifecycle, and locator auto-wait behavior\n");
     try out.writer.writeAll("- Layout, paint, screenshot/PDF, viewport, and input fidelity\n");
     try out.writer.writeAll("- More complete web-platform APIs and event-loop timing semantics\n");
@@ -292,15 +292,27 @@ fn addAutomationSurfaceChecks(allocator: std.mem.Allocator, checks: *std.ArrayLi
         "serve-cdp exposes /health, /json/version, /json/list, /json/new, and /json/protocol.",
         elapsedSince(discovery_started),
     );
+    const websocket_started = milliTimestamp();
+    const version_response = cdp_server.dispatchCdpMessageForTest(allocator, "{\"id\":1,\"method\":\"Browser.getVersion\"}") catch |err| {
+        try appendCheck(allocator, checks, .cdp_surface, "CDP WebSocket protocol router", 10, .fail, try errDetail(allocator, "Browser.getVersion dispatch failed", err), elapsedSince(websocket_started));
+        return;
+    };
+    const eval_response = cdp_server.dispatchCdpMessageForTest(allocator, "{\"id\":2,\"method\":\"Runtime.evaluate\",\"params\":{\"expression\":\"1 + 2\"}}") catch |err| {
+        try appendCheck(allocator, checks, .cdp_surface, "CDP WebSocket protocol router", 10, .fail, try errDetail(allocator, "Runtime.evaluate dispatch failed", err), elapsedSince(websocket_started));
+        return;
+    };
+    const websocket_ok = std.mem.indexOf(u8, version_response, "V8-shaped") != null and
+        std.mem.indexOf(u8, eval_response, "\"type\":\"number\"") != null and
+        std.mem.indexOf(u8, eval_response, "\"value\":3") != null;
     try appendCheck(
         allocator,
         checks,
         .cdp_surface,
         "CDP WebSocket protocol router",
         10,
-        .fail,
-        "serve-cdp advertises DevTools URLs, but WebSocket upgrade and JSON-RPC routing are not implemented yet.",
-        0,
+        passFail(websocket_ok),
+        "serve-cdp upgrades WebSocket connections and routes JSON-RPC for minimal Browser/Target/Page/Runtime/Network/DOM/Input methods.",
+        elapsedSince(websocket_started),
     );
     try appendCheck(
         allocator,
@@ -308,8 +320,8 @@ fn addAutomationSurfaceChecks(allocator: std.mem.Allocator, checks: *std.ArrayLi
         .cdp_surface,
         "Runtime/Page/Network/Input domain coverage",
         12,
-        .fail,
-        "Current API is native and CLI-shaped; it does not implement CDP domains.",
+        .partial,
+        "Minimal CDP domains exist, including Runtime.evaluate with V8-shaped remote objects; broad browser-domain parity is still missing.",
         0,
     );
 }
@@ -321,8 +333,8 @@ fn addPlaywrightChecks(allocator: std.mem.Allocator, checks: *std.ArrayList(Chec
         .playwright_puppeteer,
         "browserWSEndpoint connection",
         12,
-        .fail,
-        "Playwright/Puppeteer cannot attach yet because serve-cdp does not implement WebSocket upgrade or CDP JSON-RPC routing.",
+        .partial,
+        "A browserWSEndpoint can now upgrade and answer basic JSON-RPC, but full Playwright/Puppeteer attach semantics are not validated yet.",
         0,
     );
     try appendCheck(
@@ -331,8 +343,8 @@ fn addPlaywrightChecks(allocator: std.mem.Allocator, checks: *std.ArrayList(Chec
         .playwright_puppeteer,
         "target/context/page lifecycle",
         10,
-        .fail,
-        "No Browser, Target, Page, or Runtime protocol lifecycle is implemented.",
+        .partial,
+        "Minimal Target/Page/Runtime lifecycle methods exist; isolated worlds, sessions, workers, frames, and robust event ordering are still incomplete.",
         0,
     );
     try appendCheck(

@@ -107,6 +107,34 @@ pub fn evaluatePage(
     return report;
 }
 
+pub fn evaluateExpressionInHtml(
+    allocator: std.mem.Allocator,
+    html: []const u8,
+    page_url: []const u8,
+    expression: []const u8,
+) !model.JsExecution {
+    var report: model.JsExecution = .{ .enabled = true };
+    var engine = jsengine.JsEngine.init() catch {
+        report.error_message = try allocator.dupe(u8, "JsInitFailed");
+        return report;
+    };
+    defer engine.deinit();
+
+    jsengine.prepareDomEngine(&engine, html, page_url, allocator);
+    _ = try evaluateExpression(allocator, &engine, expression, &report);
+    report.output = jsengine.outputAlloc(&engine, allocator) orelse "";
+    report.document_title = engine.evalAlloc(allocator, "document.title") orelse "";
+    return report;
+}
+
+pub fn evaluateExpressionOnPage(
+    allocator: std.mem.Allocator,
+    page: *const model.Page,
+    expression: []const u8,
+) !model.JsExecution {
+    return evaluateExpressionInHtml(allocator, page.html, page.url, expression);
+}
+
 const WaitResult = struct {
     satisfied: bool,
     polls: usize,
@@ -1448,4 +1476,18 @@ test "evaluatePage reports wait selector satisfaction" {
     try std.testing.expect(result.wait_satisfied);
     try std.testing.expect(result.wait_polls > 0);
     try std.testing.expectEqualStrings("true", result.eval_result);
+}
+
+test "evaluateExpressionInHtml exposes DOM-shaped eval" {
+    var arena_impl = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_impl.deinit();
+    const arena = arena_impl.allocator();
+
+    const result = try evaluateExpressionInHtml(
+        arena,
+        "<html><head><title>CDP Test</title></head><body><h1 id=\"title\">Ready</h1></body></html>",
+        "https://example.com/",
+        "document.title + '|' + document.querySelector('#title').textContent",
+    );
+    try std.testing.expectEqualStrings("CDP Test|Ready", result.eval_result);
 }

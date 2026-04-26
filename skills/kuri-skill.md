@@ -50,7 +50,10 @@ zig build run -- render https://news.ycombinator.com --selector ".titleline a" -
 zig build run -- render https://todomvc.com/examples/react/dist/ --js --wait-eval "document.querySelectorAll('.todo-list li').length >= 1"
 zig build run -- bench --offline
 zig build run -- parity --offline
+zig build run -- serve-cdp --port 9333
 ```
+
+`serve-cdp` exposes Chrome-style HTTP discovery plus a minimal WebSocket JSON-RPC router. It can answer basic Browser/Target/Page/Runtime/DOM methods, and `Runtime.evaluate` returns V8-shaped CDP remote objects backed by QuickJS. It is useful for protocol smoke tests, but it is not Playwright/Puppeteer-compatible enough to replace Chrome yet.
 
 Screenshots currently use the existing Kuri/CDP renderer as a fallback, so start the normal Kuri server first:
 
@@ -75,6 +78,7 @@ zig build run -- screenshot https://example.com --out example.jpg --compress --k
 - Read snapshot `state` before acting on controls. Examples: `checked=false`, `disabled`, `readonly`, `expanded=false`, `selected`.
 - Treat refs as snapshot-local. Refresh them after navigation or major DOM updates.
 - Use HAR only when you need network or API discovery.
+- Treat `kuri-browser serve-cdp` as an experimental minimal CDP shim, not a production automation endpoint.
 - Treat `kuri-browser` screenshots as fallback-rendered by Kuri/CDP, not proof of native layout or paint.
 
 ## Optional wrapper
