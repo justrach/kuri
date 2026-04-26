@@ -80,9 +80,10 @@ This is enough for local protocol smoke tests and parity tracking. It is not eno
 
 ```sh
 zig build run -- paint https://example.com --out example.svg
+zig build run -- paint https://quotes.toscrape.com/js/ --js --out quotes.svg
 ```
 
-This does not call Kuri/CDP or Chrome. It is useful for fast, token-light visual context from page title, text, links, form controls, images, and code blocks. It is not CSS layout, raster screenshot, PDF, canvas, video, or pixel-equivalent rendering.
+This does not call Kuri/CDP or Chrome. With `--js`, it executes the page in the QuickJS DOM shim, serializes `document.documentElement.outerHTML`, reparses that mutated DOM, and paints the serialized page. It is useful for fast, token-light visual context from page title, text, links, form controls, images, and code blocks. It is not CSS layout, raster screenshot, PDF, canvas, video, or pixel-equivalent rendering.
 
 Check pixel parity against real Chrome before treating this as a renderer replacement:
 
@@ -90,6 +91,7 @@ Check pixel parity against real Chrome before treating this as a renderer replac
 zig build
 python3 tools/paint_parity.py https://example.com --keep-artifacts
 python3 tools/paint_parity.py https://example.com --direct-svg --keep-artifacts
+python3 tools/paint_parity.py https://quotes.toscrape.com/js/ --paint-js --keep-artifacts
 ```
 
 Current local Chrome comparison on `https://example.com` at `1280x720`:
@@ -110,6 +112,14 @@ Current local Hacker News comparison on `https://news.ycombinator.com` at `1280x
 - Native SVG rasterized through wrapper: `146,370` bytes
 - Exact matching pixels through wrapper: `88.06%`
 - Mean absolute RGB delta through wrapper: `10.58/255`
+
+Current local JS-rendered page comparison on `https://quotes.toscrape.com/js/` with `--paint-js` at `1280x720`:
+
+- Chrome actual screenshot: `71,989` bytes
+- Native SVG paint artifact: `8,959` bytes
+- Native SVG rasterized through wrapper: `49,501` bytes
+- Exact matching pixels through wrapper: `88.61%`
+- Mean absolute RGB delta through wrapper: `12.76/255`
 
 ### Screenshot Fallback
 

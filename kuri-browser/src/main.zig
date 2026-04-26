@@ -66,6 +66,9 @@ const ScreenshotCommand = struct {
 const PaintCommand = struct {
     url: []const u8,
     out_path: ?[]const u8 = null,
+    js_enabled: bool = false,
+    wait_selector: ?[]const u8 = null,
+    wait_expression: ?[]const u8 = null,
 };
 
 const RenderCommand = struct {
@@ -293,6 +296,11 @@ pub fn main(init: std.process.Init.Minimal) !void {
         .paint => |paint_cmd| {
             const result = native_paint.paintUrl(arena, paint_cmd.url, .{
                 .out_path = paint_cmd.out_path,
+                .js = .{
+                    .enabled = paint_cmd.js_enabled,
+                    .wait_selector = paint_cmd.wait_selector,
+                    .wait_expression = paint_cmd.wait_expression,
+                },
             }) catch |err| {
                 std.debug.print("error: native paint failed: {s}\n", .{@errorName(err)});
                 std.process.exit(1);
@@ -494,6 +502,25 @@ fn parsePaintCommand(args: []const []const u8) !PaintCommand {
         if (std.mem.eql(u8, arg, "--out")) {
             if (i + 1 >= args.len) return error.MissingOutValue;
             cmd.out_path = args[i + 1];
+            i += 2;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--js")) {
+            cmd.js_enabled = true;
+            i += 1;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--wait-selector")) {
+            if (i + 1 >= args.len) return error.MissingWaitSelectorValue;
+            cmd.js_enabled = true;
+            cmd.wait_selector = args[i + 1];
+            i += 2;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--wait-eval")) {
+            if (i + 1 >= args.len) return error.MissingWaitEvalValue;
+            cmd.js_enabled = true;
+            cmd.wait_expression = args[i + 1];
             i += 2;
             continue;
         }
@@ -755,6 +782,12 @@ test "parseCommand handles standard flags" {
     try std.testing.expectEqualStrings("https://example.com", paint_cmd.paint.url);
     try std.testing.expectEqualStrings("example.svg", paint_cmd.paint.out_path.?);
 
+    const paint_js_cmd = try parseCommand(arena, &.{ "kuri-browser", "paint", "https://quotes.toscrape.com/js/", "--js", "--wait-selector", ".quote", "--wait-eval", "document.querySelectorAll('.quote').length > 0", "--out", "quotes.svg" });
+    try std.testing.expect(paint_js_cmd.paint.js_enabled);
+    try std.testing.expectEqualStrings(".quote", paint_js_cmd.paint.wait_selector.?);
+    try std.testing.expectEqualStrings("document.querySelectorAll('.quote').length > 0", paint_js_cmd.paint.wait_expression.?);
+    try std.testing.expectEqualStrings("quotes.svg", paint_js_cmd.paint.out_path.?);
+
     const render_cmd = try parseCommand(arena, &.{ "kuri-browser", "render", "https://example.com" });
     try std.testing.expectEqual(CommandTag.render, std.meta.activeTag(render_cmd));
     try std.testing.expectEqualStrings("https://example.com", render_cmd.render.url);
@@ -831,6 +864,8 @@ test "parseCommand rejects unknown input" {
     try std.testing.expectError(error.MissingOutValue, parseCommand(arena, &.{ "kuri-browser", "screenshot", "https://example.com", "--out" }));
     try std.testing.expectError(error.MissingUrl, parseCommand(arena, &.{ "kuri-browser", "paint" }));
     try std.testing.expectError(error.MissingOutValue, parseCommand(arena, &.{ "kuri-browser", "paint", "https://example.com", "--out" }));
+    try std.testing.expectError(error.MissingWaitSelectorValue, parseCommand(arena, &.{ "kuri-browser", "paint", "https://example.com", "--wait-selector" }));
+    try std.testing.expectError(error.MissingWaitEvalValue, parseCommand(arena, &.{ "kuri-browser", "paint", "https://example.com", "--wait-eval" }));
     try std.testing.expectError(error.MissingKuriBaseValue, parseCommand(arena, &.{ "kuri-browser", "screenshot", "https://example.com", "--kuri-base" }));
     try std.testing.expectError(error.InvalidScreenshotFormat, parseCommand(arena, &.{ "kuri-browser", "screenshot", "https://example.com", "--format", "webp" }));
     try std.testing.expectError(error.InvalidQuality, parseCommand(arena, &.{ "kuri-browser", "screenshot", "https://example.com", "--quality", "101" }));

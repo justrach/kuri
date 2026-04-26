@@ -35,6 +35,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--out-dir")
     parser.add_argument("--keep-artifacts", action="store_true")
     parser.add_argument("--direct-svg", action="store_true", help="rasterize the SVG file directly instead of through a no-margin HTML wrapper")
+    parser.add_argument("--paint-js", action="store_true", help="enable kuri-browser JS execution before native paint")
+    parser.add_argument("--paint-wait-selector", help="wait for a selector in the native paint JS runtime")
+    parser.add_argument("--paint-wait-eval", help="wait for a JS expression in the native paint JS runtime")
     parser.add_argument("--require-exact", type=float, default=None, help="fail if exact pixel match percent is below this threshold")
     return parser.parse_args()
 
@@ -243,7 +246,14 @@ def main() -> int:
     native_png = out_dir / "native-paint-rasterized.png"
 
     try:
-        run_checked([str(kuri_browser), "paint", args.url, "--out", str(native_svg)], args.timeout, native_svg)
+        paint_cmd = [str(kuri_browser), "paint", args.url, "--out", str(native_svg)]
+        if args.paint_js:
+            paint_cmd.append("--js")
+        if args.paint_wait_selector:
+            paint_cmd.extend(["--wait-selector", args.paint_wait_selector])
+        if args.paint_wait_eval:
+            paint_cmd.extend(["--wait-eval", args.paint_wait_eval])
+        run_checked(paint_cmd, args.timeout, native_svg)
         chrome_screenshot(chrome, args.url, actual_png, out_dir / "chrome-actual-profile", width, height, args.timeout)
         native_url = native_svg.resolve().as_uri()
         raster_mode = "direct-svg"
@@ -258,6 +268,7 @@ def main() -> int:
         print(f"url: {args.url}")
         print(f"viewport: {width}x{height}")
         print(f"native-raster-mode: {raster_mode}")
+        print(f"native-js: {'yes' if args.paint_js or args.paint_wait_selector or args.paint_wait_eval else 'no'}")
         print(f"artifacts: {out_dir}")
         print(f"actual-png-bytes: {actual_png.stat().st_size}")
         print(f"native-svg-bytes: {native_svg.stat().st_size}")

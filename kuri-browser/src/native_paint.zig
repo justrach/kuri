@@ -1,5 +1,6 @@
 const std = @import("std");
 const dom = @import("dom.zig");
+const js_runtime = @import("js_runtime.zig");
 const model = @import("model.zig");
 const render = @import("render.zig");
 
@@ -7,6 +8,7 @@ pub const Options = struct {
     out_path: ?[]const u8 = null,
     width: u32 = 1280,
     height: u32 = 720,
+    js: js_runtime.Options = .{},
 };
 
 pub const Result = struct {
@@ -51,8 +53,79 @@ const PageStyle = struct {
 };
 
 pub fn paintUrl(allocator: std.mem.Allocator, url: []const u8, options: Options) !Result {
-    const artifacts = try render.renderUrlArtifacts(allocator, url, .{});
+    const js_active = options.js.active();
+    const artifacts = try render.renderUrlArtifacts(allocator, url, .{
+        .js = if (js_active) paintSerializationOptions(options.js) else .{},
+    });
+    if (js_active) {
+        if (serializedPaintHtml(artifacts.page)) |html| {
+            const js_page = try pageFromSerializedDom(allocator, artifacts.page, html);
+            return paintPageToFile(allocator, js_page, options);
+        }
+    }
     return paintPageToFile(allocator, artifacts.page, options);
+}
+
+fn paintSerializationOptions(options: js_runtime.Options) js_runtime.Options {
+    return .{
+        .enabled = true,
+        .eval_expression = "document.documentElement ? document.documentElement.outerHTML : ''",
+        .wait_selector = options.wait_selector,
+        .wait_expression = options.wait_expression,
+        .wait_iterations = options.wait_iterations,
+    };
+}
+
+fn serializedPaintHtml(page: model.Page) ?[]const u8 {
+    const html = std.mem.trim(u8, page.js.eval_result, " \t\r\n");
+    if (!looksLikeSerializedHtml(html)) return null;
+    return html;
+}
+
+fn looksLikeSerializedHtml(html: []const u8) bool {
+    return std.mem.startsWith(u8, html, "<") and
+        (containsAsciiIgnoreCase(html, "<html") or containsAsciiIgnoreCase(html, "<body"));
+}
+
+fn pageFromSerializedDom(allocator: std.mem.Allocator, page: model.Page, html: []const u8) !model.Page {
+    var document = try dom.Document.parse(allocator, html);
+    errdefer document.deinit();
+
+    const text_root = (try document.querySelector(allocator, "body")) orelse document.root();
+    const text = try document.textContent(allocator, text_root);
+    const links = try render.extractLinks(allocator, &document, document.root());
+    const forms = try render.extractForms(allocator, &document, page.url);
+    const resources = try render.extractResources(allocator, &document, page.url);
+
+    return .{
+        .requested_url = page.requested_url,
+        .url = page.url,
+        .html = html,
+        .dom = document,
+        .title = if (page.js.document_title.len > 0) page.js.document_title else page.title,
+        .text = text,
+        .links = links,
+        .forms = forms,
+        .resources = resources,
+        .js = page.js,
+        .redirect_chain = page.redirect_chain,
+        .cookie_count = page.cookie_count,
+        .status_code = page.status_code,
+        .content_type = page.content_type,
+        .fallback_mode = .native_js_later,
+        .pipeline = try std.fmt.allocPrint(allocator, "{s} -> serialized-dom-paint", .{page.pipeline}),
+    };
+}
+
+fn containsAsciiIgnoreCase(haystack: []const u8, needle: []const u8) bool {
+    if (needle.len == 0) return true;
+    if (needle.len > haystack.len) return false;
+
+    var i: usize = 0;
+    while (i + needle.len <= haystack.len) : (i += 1) {
+        if (std.ascii.eqlIgnoreCase(haystack[i .. i + needle.len], needle)) return true;
+    }
+    return false;
 }
 
 pub fn paintPageToFile(allocator: std.mem.Allocator, page: model.Page, options: Options) !Result {
@@ -471,8 +544,9 @@ fn collectPaintBlocksRecursive(
 
 fn shouldPaintElement(name: []const u8) bool {
     const tags = [_][]const u8{
-        "h1",     "h2",    "h3",         "h4",  "p",    "li",  "a", "button", "input", "textarea",
-        "select", "label", "blockquote", "pre", "code", "img",
+        "h1",     "h2",    "h3",         "h4",  "p",    "li",  "a",    "button", "input",  "textarea",
+        "select", "label", "blockquote", "pre", "code", "img", "span", "small",  "strong", "em",
+        "b",      "i",
     };
     for (tags) |tag| {
         if (std.ascii.eqlIgnoreCase(name, tag)) return true;
