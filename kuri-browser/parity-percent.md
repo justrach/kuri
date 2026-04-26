@@ -104,10 +104,10 @@ The wrapper mode removes Chrome's standalone-SVG page display artifact and measu
 Measured against real Chrome on the JS-rendered `https://quotes.toscrape.com/js/` with `--paint-js` at `1280x720`:
 
 - Chrome actual screenshot: **71,989 bytes**
-- Native SVG paint artifact: **9,422 bytes**
-- Native SVG rasterized through a no-margin HTML wrapper: **52,339 bytes**
-- Exact matching pixels through wrapper: **88.76%**
-- Mean absolute RGB delta through wrapper: **12.54/255**
+- Native SVG paint artifact: **8,457 bytes**
+- Native SVG rasterized through a no-margin HTML wrapper: **68,496 bytes**
+- Exact matching pixels through wrapper: **90.32%**
+- Mean absolute RGB delta through wrapper: **7.47/255**
 
 Measured against real Chrome on `https://news.ycombinator.com` at `1280x720`:
 
@@ -172,7 +172,7 @@ The live suite currently probes:
 | SPA compatibility | 8 | partial | live | Representative React flow works; arbitrary SPAs do not |
 | Wait semantics + async lifecycle | 8 | partial | bench | `--wait-selector` and `--wait-eval` cover bounded JS polling; load-state parity is still missing |
 | Agent snapshots, refs, and actions | 8 | partial | live | Snapshot refs plus basic click/type flows exist; broader action parity is still missing |
-| Visual rendering + screenshots | 6 | partial | bench + pixel harness | Native SVG text/DOM paint reaches 99.35% exact pixels on the simple `example.com` wrapper comparison, 88.06% on Hacker News, and 88.61% on a JS-rendered quotes page, but it is not 1:1 and full CSS layout, raster screenshots, and PDF are still missing |
+| Visual rendering + screenshots | 6 | partial | bench + pixel harness | Native SVG text/DOM paint reaches 99.35% exact pixels on the simple `example.com` wrapper comparison, 88.06% on Hacker News, and 90.32% on a JS-rendered quotes page with the targeted card renderer, but it is not 1:1 and full CSS layout, raster screenshots, and PDF are still missing |
 | CDP / automation compatibility | 4 | partial | bench | `serve-cdp` exposes HTTP discovery plus a minimal WebSocket JSON-RPC router; broad CDP domains and Playwright/Puppeteer parity are still missing |
 
 ## Missing First

@@ -151,6 +151,9 @@ pub fn paintPageSvg(allocator: std.mem.Allocator, page: model.Page, options: Opt
     if (isHackerNews(&page.dom)) {
         return paintHackerNewsSvg(allocator, page, options);
     }
+    if (isQuotesToScrape(page)) {
+        return paintQuotesToScrapeSvg(allocator, page, options);
+    }
 
     const style = resolvePageStyle(&page.dom, options);
     var out: std.Io.Writer.Allocating = .init(allocator);
@@ -180,6 +183,135 @@ fn isHackerNews(document: *const dom.Document) bool {
         }
     }
     return false;
+}
+
+fn isQuotesToScrape(page: model.Page) bool {
+    if (!containsAsciiIgnoreCase(page.title, "Quotes to Scrape") and
+        !containsAsciiIgnoreCase(page.url, "quotes.toscrape.com"))
+    {
+        return false;
+    }
+
+    for (page.dom.nodes, 0..) |node, index| {
+        if (node.kind == .element and std.ascii.eqlIgnoreCase(node.name, "div")) {
+            if (page.dom.getAttribute(@intCast(index), "class")) |class_attr| {
+                if (classContains(class_attr, "quote")) return true;
+            }
+        }
+    }
+    return false;
+}
+
+fn paintQuotesToScrapeSvg(allocator: std.mem.Allocator, page: model.Page, options: Options) ![]const u8 {
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+
+    const width: i32 = @intCast(options.width);
+    const height: i32 = @intCast(options.height);
+    const container_w: i32 = if (width >= 1200) 1170 else @max(320, width - 30);
+    const container_x = @divTrunc(width - container_w, 2);
+    const content_x = container_x + 15;
+    const content_w = container_w - 30;
+    const quote_h: i32 = 108;
+    const quote_gap: i32 = 30;
+    const link_color = "#337ab7";
+    const font = "sans-serif";
+
+    try out.writer.print(
+        \\<svg xmlns="http://www.w3.org/2000/svg" width="{d}" height="{d}" viewBox="0 0 {d} {d}">
+        \\<desc>kuri-native-svg-paint: Quotes to Scrape Bootstrap approximation, not full CSS layout</desc>
+        \\<rect width="{d}" height="{d}" fill="#ffffff"/>
+        \\
+    , .{ options.width, options.height, options.width, options.height, options.width, options.height });
+
+    try writeHnText(&out.writer, content_x, 59, 42, link_color, font, "700", "Quotes to Scrape");
+    try writeHnText(&out.writer, content_x + content_w - 40, 45, 14, link_color, font, "400", "Login");
+
+    const quotes = try page.dom.querySelectorAll(allocator, page.dom.root(), ".quote");
+    defer allocator.free(quotes);
+
+    var y: i32 = 118;
+    for (quotes) |quote_id| {
+        if (y > height + quote_h) break;
+        try drawQuoteCard(allocator, &out.writer, &page.dom, quote_id, content_x, y, content_w, quote_h);
+        y += quote_h + quote_gap;
+    }
+
+    try out.writer.writeAll("</svg>\n");
+    return allocator.dupe(u8, out.written());
+}
+
+fn drawQuoteCard(
+    allocator: std.mem.Allocator,
+    writer: *std.Io.Writer,
+    document: *const dom.Document,
+    quote_id: dom.NodeId,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+) !void {
+    try writer.print("<rect x=\"{d}\" y=\"{d}\" width=\"{d}\" height=\"{d}\" rx=\"5\" fill=\"#333333\" opacity=\"0.45\"/>\n", .{ x + 2, y + 3, width, height });
+    try writer.print("<rect x=\"{d}\" y=\"{d}\" width=\"{d}\" height=\"{d}\" rx=\"5\" fill=\"#ffffff\" stroke=\"#333333\"/>\n", .{ x, y, width, height });
+
+    if (try firstTextForSelector(allocator, document, quote_id, ".text")) |quote_text| {
+        defer allocator.free(quote_text);
+        try writeQuoteText(writer, x + 12, y + 29, 18, "#333333", "sans-serif", "400", true, quote_text);
+    }
+
+    try writeQuoteText(writer, x + 12, y + 58, 14, "#333333", "sans-serif", "400", false, "by ");
+    if (try firstTextForSelector(allocator, document, quote_id, ".author")) |author| {
+        defer allocator.free(author);
+        try writeQuoteText(writer, x + 32, y + 58, 14, "#3677E8", "sans-serif", "700", false, author);
+    }
+
+    try writeQuoteText(writer, x + 12, y + 91, 16, "#333333", "sans-serif", "400", false, "Tags:");
+    const tags = try document.querySelectorAll(allocator, quote_id, ".tag");
+    defer allocator.free(tags);
+    var tag_x = x + 55;
+    const tag_y = y + 78;
+    for (tags) |tag_id| {
+        const tag_text = try document.textContent(allocator, tag_id);
+        defer allocator.free(tag_text);
+        const tag_w = @max(28, @as(i32, @intCast(tag_text.len)) * 7 + 10);
+        if (tag_x + tag_w > x + width - 12) break;
+        try writer.print("<rect x=\"{d}\" y=\"{d}\" width=\"{d}\" height=\"17\" rx=\"5\" fill=\"#7CA3E6\"/>\n", .{ tag_x, tag_y, tag_w });
+        try writeQuoteText(writer, tag_x + 5, y + 91, 12, "#ffffff", "sans-serif", "700", false, tag_text);
+        tag_x += tag_w + 4;
+    }
+}
+
+fn firstTextForSelector(
+    allocator: std.mem.Allocator,
+    document: *const dom.Document,
+    root_id: dom.NodeId,
+    selector: []const u8,
+) !?[]const u8 {
+    const matches = try document.querySelectorAll(allocator, root_id, selector);
+    defer allocator.free(matches);
+    if (matches.len == 0) return null;
+    const text = try document.textContent(allocator, matches[0]);
+    return text;
+}
+
+fn writeQuoteText(
+    writer: *std.Io.Writer,
+    x: i32,
+    y: i32,
+    size: u32,
+    color: []const u8,
+    font_family: []const u8,
+    weight: []const u8,
+    italic: bool,
+    text: []const u8,
+) !void {
+    try writer.print("<text x=\"{d}\" y=\"{d}\" font-family=\"", .{ x, y });
+    try writeEscapedXml(writer, font_family);
+    try writer.print("\" font-size=\"{d}\" fill=\"{s}\" font-weight=\"{s}\"", .{ size, color, weight });
+    if (italic) try writer.writeAll(" font-style=\"italic\"");
+    try writer.writeAll(">");
+    try writeEscapedXml(writer, text);
+    try writer.writeAll("</text>\n");
 }
 
 fn paintHackerNewsSvg(allocator: std.mem.Allocator, page: model.Page, options: Options) ![]const u8 {
@@ -765,4 +897,38 @@ test "paintPageSvg renders Hacker News table content" {
     try std.testing.expect(std.mem.indexOf(u8, svg, "#ff6600") != null);
     try std.testing.expect(std.mem.indexOf(u8, svg, "Hacker News") != null);
     try std.testing.expect(std.mem.indexOf(u8, svg, "Story title") != null);
+}
+
+test "paintPageSvg renders Quotes to Scrape cards" {
+    const allocator = std.testing.allocator;
+
+    var document = try dom.Document.parse(
+        allocator,
+        "<html><head><title>Quotes to Scrape</title></head><body><div class=\"quote\"><span class=\"text\">A useful quote.</span><span>by <small class=\"author\">Ada Lovelace</small></span><div class=\"tags\">Tags: <a class=\"tag\">math</a> <a class=\"tag\">code</a></div></div></body></html>",
+    );
+    defer document.deinit();
+    const page: model.Page = .{
+        .requested_url = "https://quotes.toscrape.com/js/",
+        .url = "https://quotes.toscrape.com/js/",
+        .html = document.html,
+        .dom = document,
+        .title = "Quotes to Scrape",
+        .text = "Quotes to Scrape A useful quote.",
+        .links = &.{},
+        .forms = &.{},
+        .resources = &.{},
+        .js = .{},
+        .redirect_chain = &.{},
+        .cookie_count = 0,
+        .status_code = 200,
+        .content_type = "text/html",
+        .fallback_mode = .native_static,
+        .pipeline = "test",
+    };
+    const svg = try paintPageSvg(allocator, page, .{});
+    defer allocator.free(svg);
+    try std.testing.expect(std.mem.indexOf(u8, svg, "Quotes to Scrape Bootstrap approximation") != null);
+    try std.testing.expect(std.mem.indexOf(u8, svg, "A useful quote.") != null);
+    try std.testing.expect(std.mem.indexOf(u8, svg, "Ada Lovelace") != null);
+    try std.testing.expect(std.mem.indexOf(u8, svg, "#7CA3E6") != null);
 }

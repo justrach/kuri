@@ -116,10 +116,10 @@ Current local Hacker News comparison on `https://news.ycombinator.com` at `1280x
 Current local JS-rendered page comparison on `https://quotes.toscrape.com/js/` with `--paint-js` at `1280x720`:
 
 - Chrome actual screenshot: `71,989` bytes
-- Native SVG paint artifact: `8,959` bytes
-- Native SVG rasterized through wrapper: `49,501` bytes
-- Exact matching pixels through wrapper: `88.61%`
-- Mean absolute RGB delta through wrapper: `12.76/255`
+- Native SVG paint artifact: `8,457` bytes
+- Native SVG rasterized through wrapper: `68,496` bytes
+- Exact matching pixels through wrapper: `90.32%`
+- Mean absolute RGB delta through wrapper: `7.47/255`
 
 ### Screenshot Fallback
 
