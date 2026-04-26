@@ -2,6 +2,7 @@ const std = @import("std");
 const bench = @import("bench.zig");
 const cdp_server = @import("cdp_server.zig");
 const model = @import("model.zig");
+const native_paint = @import("native_paint.zig");
 const parity = @import("parity.zig");
 const runtime = @import("runtime.zig");
 const shell = @import("shell.zig");
@@ -18,6 +19,7 @@ const CommandTag = enum {
     serve_cdp,
     parity,
     screenshot,
+    paint,
     render,
     submit,
 };
@@ -31,6 +33,7 @@ const Command = union(CommandTag) {
     serve_cdp: ServeCdpCommand,
     parity: ParityCommand,
     screenshot: ScreenshotCommand,
+    paint: PaintCommand,
     render: RenderCommand,
     submit: SubmitCommand,
 };
@@ -58,6 +61,11 @@ const ScreenshotCommand = struct {
     quality: u8 = 80,
     full: bool = false,
     compress: bool = false,
+};
+
+const PaintCommand = struct {
+    url: []const u8,
+    out_path: ?[]const u8 = null,
 };
 
 const RenderCommand = struct {
@@ -282,6 +290,23 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 });
             }
         },
+        .paint => |paint_cmd| {
+            const result = native_paint.paintUrl(arena, paint_cmd.url, .{
+                .out_path = paint_cmd.out_path,
+            }) catch |err| {
+                std.debug.print("error: native paint failed: {s}\n", .{@errorName(err)});
+                std.process.exit(1);
+            };
+            std.debug.print("kuri-browser paint\n\nbackend: {s}\npath: {s}\nformat: svg\nviewport: {d}x{d}\nbytes: {d}\nnodes: {d}\ntext-bytes: {d}\n", .{
+                result.backend,
+                result.path,
+                result.width,
+                result.height,
+                result.bytes,
+                result.node_count,
+                result.text_bytes,
+            });
+        },
         .render => |render_cmd| {
             const output = try runtime.renderUrlOutput(arena, render_cmd.url, render_cmd.steps, render_cmd.dump, render_cmd.selector, render_cmd.har_path != null, .{
                 .enabled = render_cmd.js_enabled,
@@ -341,6 +366,9 @@ fn parseCommand(allocator: std.mem.Allocator, args: []const []const u8) !Command
     }
     if (std.mem.eql(u8, args[1], "screenshot")) {
         return .{ .screenshot = try parseScreenshotCommand(args[2..]) };
+    }
+    if (std.mem.eql(u8, args[1], "paint")) {
+        return .{ .paint = try parsePaintCommand(args[2..]) };
     }
     if (std.mem.eql(u8, args[1], "render")) {
         return .{ .render = try parseRenderCommand(allocator, args[2..]) };
@@ -454,6 +482,28 @@ fn parseScreenshotCommand(args: []const []const u8) !ScreenshotCommand {
 
 fn isScreenshotFormat(value: []const u8) bool {
     return std.ascii.eqlIgnoreCase(value, "png") or std.ascii.eqlIgnoreCase(value, "jpeg");
+}
+
+fn parsePaintCommand(args: []const []const u8) !PaintCommand {
+    if (args.len == 0) return error.MissingUrl;
+
+    var cmd: PaintCommand = .{ .url = "" };
+    var i: usize = 0;
+    while (i < args.len) {
+        const arg = args[i];
+        if (std.mem.eql(u8, arg, "--out")) {
+            if (i + 1 >= args.len) return error.MissingOutValue;
+            cmd.out_path = args[i + 1];
+            i += 2;
+            continue;
+        }
+        if (std.mem.startsWith(u8, arg, "--")) return error.UnknownCommand;
+        if (cmd.url.len != 0) return error.UnknownCommand;
+        cmd.url = arg;
+        i += 1;
+    }
+    if (cmd.url.len == 0) return error.MissingUrl;
+    return cmd;
 }
 
 fn parseParityCommand(args: []const []const u8) !ParityCommand {
@@ -678,6 +728,7 @@ test "parseCommand handles standard flags" {
     try std.testing.expectEqual(CommandTag.serve_cdp, std.meta.activeTag(try parseCommand(arena, &.{ "kuri-browser", "serve-cdp" })));
     try std.testing.expectEqual(CommandTag.parity, std.meta.activeTag(try parseCommand(arena, &.{ "kuri-browser", "parity" })));
     try std.testing.expectEqual(CommandTag.screenshot, std.meta.activeTag(try parseCommand(arena, &.{ "kuri-browser", "screenshot", "https://example.com" })));
+    try std.testing.expectEqual(CommandTag.paint, std.meta.activeTag(try parseCommand(arena, &.{ "kuri-browser", "paint", "https://example.com" })));
 
     const bench_cmd = try parseCommand(arena, &.{ "kuri-browser", "bench", "--kuri-base", "http://127.0.0.1:9999", "--offline" });
     try std.testing.expectEqualStrings("http://127.0.0.1:9999", bench_cmd.bench.kuri_base);
@@ -699,6 +750,10 @@ test "parseCommand handles standard flags" {
     try std.testing.expectEqual(@as(u8, 90), screenshot_cmd.screenshot.quality);
     try std.testing.expect(screenshot_cmd.screenshot.full);
     try std.testing.expect(screenshot_cmd.screenshot.compress);
+
+    const paint_cmd = try parseCommand(arena, &.{ "kuri-browser", "paint", "https://example.com", "--out", "example.svg" });
+    try std.testing.expectEqualStrings("https://example.com", paint_cmd.paint.url);
+    try std.testing.expectEqualStrings("example.svg", paint_cmd.paint.out_path.?);
 
     const render_cmd = try parseCommand(arena, &.{ "kuri-browser", "render", "https://example.com" });
     try std.testing.expectEqual(CommandTag.render, std.meta.activeTag(render_cmd));
@@ -774,6 +829,8 @@ test "parseCommand rejects unknown input" {
     try std.testing.expectError(error.InvalidPort, parseCommand(arena, &.{ "kuri-browser", "serve-cdp", "--port", "wat" }));
     try std.testing.expectError(error.MissingUrl, parseCommand(arena, &.{ "kuri-browser", "screenshot" }));
     try std.testing.expectError(error.MissingOutValue, parseCommand(arena, &.{ "kuri-browser", "screenshot", "https://example.com", "--out" }));
+    try std.testing.expectError(error.MissingUrl, parseCommand(arena, &.{ "kuri-browser", "paint" }));
+    try std.testing.expectError(error.MissingOutValue, parseCommand(arena, &.{ "kuri-browser", "paint", "https://example.com", "--out" }));
     try std.testing.expectError(error.MissingKuriBaseValue, parseCommand(arena, &.{ "kuri-browser", "screenshot", "https://example.com", "--kuri-base" }));
     try std.testing.expectError(error.InvalidScreenshotFormat, parseCommand(arena, &.{ "kuri-browser", "screenshot", "https://example.com", "--format", "webp" }));
     try std.testing.expectError(error.InvalidQuality, parseCommand(arena, &.{ "kuri-browser", "screenshot", "https://example.com", "--quality", "101" }));

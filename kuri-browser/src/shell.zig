@@ -21,6 +21,7 @@ pub fn usageText() []const u8 {
     \\  kuri-browser bench [--offline] [--kuri-base <url>]
     \\  kuri-browser serve-cdp [--host <ip>] [--port <n>]
     \\  kuri-browser screenshot <url> [--out <file>] [--kuri-base <url>] [--format png|jpeg] [--quality <1-100>] [--full] [--compress]
+    \\  kuri-browser paint <url> [--out <file.svg>]
     \\  kuri-browser render <url> [--step click:eN|type:eN=value ...] [--dump summary|html|text|links|forms|resources|js|snapshot] [--selector <css>] [--js] [--eval <expr>] [--wait-selector <css>] [--wait-eval <expr>] [--har <file>]
     \\  kuri-browser submit <url> [--form-index <n>] [--field name=value ...] [--dump summary|html|text|links|forms|resources|js|snapshot] [--selector <css>] [--js] [--eval <expr>] [--wait-selector <css>] [--wait-eval <expr>] [--har <file>]
     \\
@@ -31,6 +32,7 @@ pub fn usageText() []const u8 {
     \\  zig build run -- bench --offline
     \\  zig build run -- serve-cdp --port 9333
     \\  zig build run -- screenshot https://example.com --out example.jpg --compress --kuri-base http://127.0.0.1:8080
+    \\  zig build run -- paint https://example.com --out example.svg
     \\  zig build run -- parity --kuri-base http://127.0.0.1:8080
     \\  zig build run -- parity --offline
     \\  zig build run -- render https://news.ycombinator.com

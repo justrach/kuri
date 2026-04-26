@@ -5,6 +5,7 @@ const dom = @import("dom.zig");
 const fetch = @import("fetch.zig");
 const js_runtime = @import("js_runtime.zig");
 const model = @import("model.zig");
+const native_paint = @import("native_paint.zig");
 const render = @import("render.zig");
 const screenshot = @import("screenshot.zig");
 const snapshot = @import("snapshot.zig");
@@ -402,6 +403,21 @@ fn addChromeReplacementChecks(allocator: std.mem.Allocator, checks: *std.ArrayLi
         try std.fmt.allocPrint(allocator, "links={d}; forms={d}; h1={d}", .{ links.len, forms.len, headings.len }),
         elapsedSince(started),
     );
+    const paint_started = milliTimestamp();
+    const paint_svg = native_paint.paintPageSvg(allocator, syntheticPaintPage(document), .{}) catch |err| {
+        try appendCheck(allocator, checks, .chrome_replacement, "native SVG paint renderer", 6, .fail, try errDetail(allocator, "native paint failed", err), elapsedSince(paint_started));
+        return;
+    };
+    try appendCheck(
+        allocator,
+        checks,
+        .chrome_replacement,
+        "native SVG paint renderer",
+        6,
+        passFail(std.mem.indexOf(u8, paint_svg, "<svg") != null and std.mem.indexOf(u8, paint_svg, "Bench") != null),
+        try std.fmt.allocPrint(allocator, "backend=kuri-native-svg-paint; bytes={d}; scope=text/DOM SVG paint, no CSS layout", .{paint_svg.len}),
+        elapsedSince(paint_started),
+    );
     try appendCheck(
         allocator,
         checks,
@@ -428,8 +444,8 @@ fn addChromeReplacementChecks(allocator: std.mem.Allocator, checks: *std.ArrayLi
         .chrome_replacement,
         "layout, paint, screenshot/PDF",
         14,
-        .fail,
-        "Native layout/paint/PDF still do not exist; screenshots require the CDP fallback server.",
+        .partial,
+        "Native SVG text/DOM paint exists; full CSS layout, raster screenshot, and PDF still require future work or the CDP fallback.",
         0,
     );
     try appendCheck(
@@ -444,6 +460,27 @@ fn addChromeReplacementChecks(allocator: std.mem.Allocator, checks: *std.ArrayLi
     );
 }
 
+fn syntheticPaintPage(document: dom.Document) model.Page {
+    return .{
+        .requested_url = "https://bench.local/",
+        .url = "https://bench.local/",
+        .html = document.html,
+        .dom = document,
+        .title = "Bench",
+        .text = "Bench Docs Go",
+        .links = &.{},
+        .forms = &.{},
+        .resources = &.{},
+        .js = .{},
+        .redirect_chain = &.{},
+        .cookie_count = 0,
+        .status_code = 200,
+        .content_type = "text/html",
+        .fallback_mode = .native_static,
+        .pipeline = "synthetic",
+    };
+}
+
 fn addLiveChecks(allocator: std.mem.Allocator, checks: *std.ArrayList(Check), options: Options) !void {
     if (!options.run_live) {
         try appendSkippedLiveChecks(allocator, checks, "offline mode");
@@ -454,6 +491,7 @@ fn addLiveChecks(allocator: std.mem.Allocator, checks: *std.ArrayList(Check), op
     try checks.append(allocator, checkLiveQuotesJs(allocator) catch |err| try skippedCheck(allocator, .js_runtime, "live quotes JS probe", 6, err));
     try checks.append(allocator, checkLiveTodoMvcWait(allocator) catch |err| try skippedCheck(allocator, .wait_semantics, "live TodoMVC wait probe", 6, err));
     try checks.append(allocator, checkLiveHar(allocator) catch |err| try skippedCheck(allocator, .chrome_replacement, "live HAR capture probe", 4, err));
+    try checks.append(allocator, checkLiveNativePaint(allocator) catch |err| try skippedCheck(allocator, .chrome_replacement, "live native SVG paint probe", 4, err));
     try checks.append(allocator, checkLiveScreenshotFallback(allocator, options.kuri_base) catch |err| try skippedCheck(allocator, .chrome_replacement, "live CDP screenshot fallback probe", 6, err));
     try checks.append(allocator, checkKuriCdpHealth(allocator, options.kuri_base) catch |err| try skippedCheck(allocator, .cdp_surface, "live Kuri CDP baseline health", 4, err));
 }
@@ -463,6 +501,7 @@ fn appendSkippedLiveChecks(allocator: std.mem.Allocator, checks: *std.ArrayList(
     try appendCheck(allocator, checks, .js_runtime, "live quotes JS probe", 6, .skipped, reason, 0);
     try appendCheck(allocator, checks, .wait_semantics, "live TodoMVC wait probe", 6, .skipped, reason, 0);
     try appendCheck(allocator, checks, .chrome_replacement, "live HAR capture probe", 4, .skipped, reason, 0);
+    try appendCheck(allocator, checks, .chrome_replacement, "live native SVG paint probe", 4, .skipped, reason, 0);
     try appendCheck(allocator, checks, .chrome_replacement, "live CDP screenshot fallback probe", 6, .skipped, reason, 0);
     try appendCheck(allocator, checks, .cdp_surface, "live Kuri CDP baseline health", 4, .skipped, reason, 0);
 }
@@ -543,6 +582,32 @@ fn checkLiveHar(allocator: std.mem.Allocator) !Check {
         .weight = 4,
         .status = passFail(ok),
         .detail = try std.fmt.allocPrint(allocator, "cache=cache-busted-url; har-bytes={d}; page-status={d}", .{ har_json.len, artifacts.page.status_code }),
+        .duration_ms = elapsedSince(started),
+    };
+}
+
+fn checkLiveNativePaint(allocator: std.mem.Allocator) !Check {
+    const started = milliTimestamp();
+    const path = ".zig-cache/kuri-browser-native-paint-bench.svg";
+    std.Io.Dir.cwd().deleteFile(std.Io.Threaded.global_single_threaded.io(), path) catch {};
+    const url = try cacheBustedUrl(allocator, "https://example.com/");
+    const result = try native_paint.paintUrl(allocator, url, .{
+        .out_path = path,
+    });
+    const ok = result.bytes > 0 and result.node_count > 0;
+    std.Io.Dir.cwd().deleteFile(std.Io.Threaded.global_single_threaded.io(), path) catch {};
+    return .{
+        .area = .chrome_replacement,
+        .name = "live native SVG paint probe",
+        .weight = 4,
+        .status = passFail(ok),
+        .detail = try std.fmt.allocPrint(allocator, "cache=cache-busted-url; backend={s}; bytes={d}; nodes={d}; text-bytes={d}; path={s}", .{
+            result.backend,
+            result.bytes,
+            result.node_count,
+            result.text_bytes,
+            result.path,
+        }),
         .duration_ms = elapsedSince(started),
     };
 }

@@ -11,8 +11,8 @@ This score is meant to answer a narrower question:
 
 - Estimated feature parity: **66%**
 - Automated validation coverage: **63%** of the target surface
-- Offline replacement-readiness bench: **66%**, not ready
-- Last live replacement-readiness bench: **71%**, not ready, measured against local Kuri on 2026-04-26
+- Offline replacement-readiness bench: **71%**, not ready
+- Last live replacement-readiness bench: **76%**, not ready, measured against local Kuri on 2026-04-26
 - Last live parity validation: **47%** of the full target surface, with all cache-busted live probes passing on 2026-04-26
 
 The `66%` figure is weighted, not a raw item count.
@@ -78,17 +78,31 @@ Measured on `https://example.com` through the local Kuri/CDP fallback:
 - Compressed output: **18,183 bytes** as JPEG quality 50
 - Savings: **2,340 bytes**, **11%** smaller than PNG
 
+Native SVG paint is now separately available:
+
+```sh
+zig build run -- paint https://example.com --out example.svg
+```
+
+This path does not use Kuri/CDP or Chrome. It paints a text/DOM SVG approximation from the native page model and is useful for token-light visual context, but it is not pixel-equivalent CSS layout or a raster screenshot.
+
+Measured on cache-busted `https://example.com` in the same local live bench:
+
+- Native SVG paint: **1,131ms**, **1,557 bytes**
+- Kuri/CDP screenshot fallback: **1,662ms**, **18,183 bytes** as JPEG quality 50
+- Native SVG paint was about **32% faster** and about **91% smaller**, but the outputs are not equivalent
+
 Current bench result from this branch:
 
-- Offline deterministic readiness: **66%**, not ready
-- Offline + live probes readiness: **71%**, not ready
+- Offline deterministic readiness: **71%**, not ready
+- Offline + live probes readiness: **76%**, not ready
 - JS/runtime completeness: **100%**
 - Wait semantics: **100%**
 - CDP automation surface: **77-79%** depending on live Kuri availability
 - Playwright/Puppeteer compatibility: **39%**
-- Replace-headless-Chrome readiness: **41-52%** depending on live probes
+- Replace-headless-Chrome readiness: **62-70%** depending on live probes
 
-The latest cache-busted live run passed Hacker News selector extraction, `quotes.toscrape.com/js/`, TodoMVC wait/eval, HAR capture, the CDP screenshot fallback, the local Kuri health probe, and the minimal local CDP WebSocket dispatch smoke test.
+The latest cache-busted live run passed Hacker News selector extraction, `quotes.toscrape.com/js/`, TodoMVC wait/eval, HAR capture, native SVG paint, the CDP screenshot fallback, the local Kuri health probe, and the minimal local CDP WebSocket dispatch smoke test.
 
 The live suite currently probes:
 
@@ -117,7 +131,7 @@ The live suite currently probes:
 | SPA compatibility | 8 | partial | live | Representative React flow works; arbitrary SPAs do not |
 | Wait semantics + async lifecycle | 8 | partial | bench | `--wait-selector` and `--wait-eval` cover bounded JS polling; load-state parity is still missing |
 | Agent snapshots, refs, and actions | 8 | partial | live | Snapshot refs plus basic click/type flows exist; broader action parity is still missing |
-| Visual rendering + screenshots | 6 | partial | bench | Screenshot can delegate to Kuri/CDP fallback; native layout/paint/PDF are still missing |
+| Visual rendering + screenshots | 6 | partial | bench | Native SVG text/DOM paint exists and screenshot can delegate to Kuri/CDP fallback; full CSS layout, raster screenshots, and PDF are still missing |
 | CDP / automation compatibility | 4 | partial | bench | `serve-cdp` exposes HTTP discovery plus a minimal WebSocket JSON-RPC router; broad CDP domains and Playwright/Puppeteer parity are still missing |
 
 ## Missing First
@@ -125,5 +139,5 @@ The live suite currently probes:
 1. Full load-state and auto-wait lifecycle hooks.
 2. Broader ref-driven actions plus keyboard/select/checkbox parity.
 3. More complete DOM events and mutation semantics.
-4. Native rendered output or screenshot support without the CDP fallback.
+4. Full CSS layout, raster screenshot, and PDF support without the CDP fallback.
 5. Broader CDP browser protocol domains beyond the minimal WebSocket router.

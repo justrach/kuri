@@ -12,6 +12,7 @@ This folder is intentionally not wired into the root `build.zig`. It exists as a
 - `src/fetch.zig`: network acquisition, validation, redirects, and `curl` fallback
 - `src/js_engine.zig`: QuickJS-backed page execution plus browser API shims
 - `src/render.zig`: parsed-page extraction into the shared page model
+- `src/native_paint.zig`: native SVG text/DOM paint output
 - `src/screenshot.zig`: screenshot fallback through Kuri's existing CDP server
 - `src/bench.zig`: replacement-readiness benchmark
 - `src/parity.zig`: weighted parity score against Kuri's current browser surface
@@ -38,7 +39,7 @@ zig build run -- render https://example.com
 - use real HTTP fetch, redirects, cookies, parsed DOM, selector queries, and QuickJS-backed page evaluation
 - keep a stable `Page` model so future DOM/JS layers have a fixed handoff point
 - provide a small CDP discovery and WebSocket JSON-RPC shim while the native runtime evolves
-- keep native layout, paint, PDF, broad CDP domain coverage, and full Playwright/Puppeteer compatibility out of scope until the runtime is stable
+- keep full native CSS layout, raster screenshots, PDF, broad CDP domain coverage, and full Playwright/Puppeteer compatibility out of scope until the runtime is stable
 
 This is not wired into the root `zig build`, and it is not a production replacement for Kuri's managed Chrome path yet.
 
@@ -55,6 +56,7 @@ zig build run -- render https://news.ycombinator.com --dump links
 zig build run -- render https://news.ycombinator.com --selector ".titleline a" --dump text
 zig build run -- render https://todomvc.com/examples/react/dist/ --js --wait-eval "document.querySelectorAll('.todo-list li').length >= 1"
 zig build run -- render https://example.com --har example.har
+zig build run -- paint https://example.com --out example.svg
 zig build run -- serve-cdp --port 9333
 ```
 
@@ -72,9 +74,25 @@ The advertised `webSocketDebuggerUrl` upgrades to WebSocket and routes a small J
 
 This is enough for local protocol smoke tests and parity tracking. It is not enough to replace Chrome for Playwright/Puppeteer yet because sessions, isolated worlds, robust target/frame events, locator actionability, screenshots, tracing, downloads, and native layout/paint are still incomplete.
 
+### Native SVG Paint
+
+`paint` writes a native SVG approximation directly from the fetched page model:
+
+```sh
+zig build run -- paint https://example.com --out example.svg
+```
+
+This does not call Kuri/CDP or Chrome. It is useful for fast, token-light visual context from page title, text, links, form controls, images, and code blocks. It is not CSS layout, raster screenshot, PDF, canvas, video, or pixel-equivalent rendering.
+
+Current cache-busted local measurement on `https://example.com`:
+
+- Native SVG paint: `1,131ms`, `1,557` bytes
+- Kuri/CDP screenshot fallback: `1,662ms`, `18,183` bytes JPEG
+- Native SVG paint was about `32%` faster and about `91%` smaller, but the outputs are not equivalent
+
 ### Screenshot Fallback
 
-`kuri-browser` can capture screenshots through the existing Kuri/CDP renderer while native layout and paint are still missing.
+`kuri-browser` can capture screenshots through the existing Kuri/CDP renderer while full native layout and raster paint are still missing.
 
 Start the normal Kuri server in another terminal:
 
@@ -112,7 +130,7 @@ zig build run -- bench --offline
 zig build run -- bench --kuri-base http://127.0.0.1:8080
 ```
 
-The current live bench is useful for tracking progress, but the answer is still "not ready to replace headless Chrome" until broader CDP browser domains, native layout/paint, and Playwright/Puppeteer lifecycle support exist.
+The current live bench is useful for tracking progress, but the answer is still "not ready to replace headless Chrome" until broader CDP browser domains, full native layout/raster paint, and Playwright/Puppeteer lifecycle support exist.
 
 ## Target Direction
 
