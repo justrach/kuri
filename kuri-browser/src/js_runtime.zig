@@ -11,9 +11,15 @@ const max_pending_jobs = 256;
 pub const Options = struct {
     enabled: bool = false,
     eval_expression: ?[]const u8 = null,
+    wait_selector: ?[]const u8 = null,
+    wait_expression: ?[]const u8 = null,
+    wait_iterations: usize = 16,
 
     pub fn active(self: Options) bool {
-        return self.enabled or self.eval_expression != null;
+        return self.enabled or
+            self.eval_expression != null or
+            self.wait_selector != null or
+            self.wait_expression != null;
     }
 };
 
@@ -81,6 +87,13 @@ pub fn evaluatePage(
     try executeScriptsRecursive(allocator, session, &engine, document, document.root(), page_url, resources, &report);
     try drainPendingJobs(allocator, &engine, &report);
 
+    if (try waitExpressionForOptions(allocator, options)) |wait_expression| {
+        report.wait_expression = wait_expression;
+        const wait_result = try waitForCondition(allocator, &engine, wait_expression, options.wait_iterations, &report);
+        report.wait_satisfied = wait_result.satisfied;
+        report.wait_polls = wait_result.polls;
+    }
+
     report.output = jsengine.outputAlloc(&engine, allocator) orelse "";
     report.document_title = engine.evalAlloc(allocator, "document.title") orelse "";
 
@@ -92,6 +105,58 @@ pub fn evaluatePage(
     }
 
     return report;
+}
+
+const WaitResult = struct {
+    satisfied: bool,
+    polls: usize,
+};
+
+fn waitExpressionForOptions(allocator: std.mem.Allocator, options: Options) !?[]const u8 {
+    if (options.wait_expression) |expression| return @as(?[]const u8, try allocator.dupe(u8, expression));
+    if (options.wait_selector) |selector| {
+        const quoted = try jsonStringLiteral(allocator, selector);
+        defer allocator.free(quoted);
+        return @as(?[]const u8, try std.fmt.allocPrint(allocator, "!!document.querySelector({s})", .{quoted}));
+    }
+    return null;
+}
+
+fn waitForCondition(
+    allocator: std.mem.Allocator,
+    engine: *jsengine.JsEngine,
+    expression: []const u8,
+    max_iterations: usize,
+    report: *model.JsExecution,
+) !WaitResult {
+    const limit = if (max_iterations == 0) 1 else max_iterations;
+    var polls: usize = 0;
+    while (polls < limit) : (polls += 1) {
+        try drainPendingJobs(allocator, engine, report);
+        if (try evaluateBooleanExpression(allocator, engine, expression, report)) {
+            return .{ .satisfied = true, .polls = polls + 1 };
+        }
+    }
+    return .{ .satisfied = false, .polls = polls };
+}
+
+fn evaluateBooleanExpression(
+    allocator: std.mem.Allocator,
+    engine: *jsengine.JsEngine,
+    expression: []const u8,
+    report: *model.JsExecution,
+) !bool {
+    clearPendingException(engine.ctx);
+    const wrapped = try std.fmt.allocPrint(allocator, "!!({s})", .{expression});
+    defer allocator.free(wrapped);
+
+    const result = engine.ctx.eval(wrapped, "<kuri-wait>", .{});
+    defer result.deinit(engine.ctx);
+    if (result.isException()) {
+        try rememberCurrentException(allocator, engine.ctx, report);
+        return false;
+    }
+    return result.toBool(engine.ctx) catch false;
 }
 
 fn installBridge(
@@ -674,6 +739,13 @@ fn buildResponseJson(arena: std.mem.Allocator, payload: ResponsePayload) ![]cons
     return arena.dupe(u8, out.written());
 }
 
+fn jsonStringLiteral(allocator: std.mem.Allocator, value: []const u8) ![]const u8 {
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+    try std.json.Stringify.value(value, .{}, &out.writer);
+    return allocator.dupe(u8, out.written());
+}
+
 fn optionalNonEmpty(value: ?[]const u8) ?[]const u8 {
     const slice = value orelse return null;
     if (slice.len == 0) return null;
@@ -1222,6 +1294,8 @@ test "options active when js or eval requested" {
     try std.testing.expect(!(Options{}).active());
     try std.testing.expect((Options{ .enabled = true }).active());
     try std.testing.expect((Options{ .eval_expression = "document.title" }).active());
+    try std.testing.expect((Options{ .wait_selector = "#ready" }).active());
+    try std.testing.expect((Options{ .wait_expression = "window.done" }).active());
 }
 
 test "script type filter skips non-executable types" {
@@ -1335,4 +1409,43 @@ test "evaluatePage drains timer and microtask shims" {
 
     try std.testing.expectEqualStrings("1|1|1|timeout", result.eval_result);
     try std.testing.expectEqualStrings("timeout", result.document_title);
+}
+
+test "evaluatePage reports wait selector satisfaction" {
+    var arena_impl = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_impl.deinit();
+    const arena = arena_impl.allocator();
+
+    var session = fetch.Session.init(arena, "kuri-browser-test");
+    defer session.deinit();
+
+    const html =
+        "<html><body>" ++
+        "<script>" ++
+        "setTimeout(function() {" ++
+        "  var node = document.createElement('div');" ++
+        "  node.id = 'ready';" ++
+        "  document.body.appendChild(node);" ++
+        "}, 0);" ++
+        "</script>" ++
+        "</body></html>";
+    var document = try dom.Document.parse(arena, html);
+    defer document.deinit();
+
+    const result = try evaluatePage(
+        arena,
+        &session,
+        &document,
+        html,
+        "https://example.com",
+        &[_]model.Resource{},
+        .{
+            .wait_selector = "#ready",
+            .eval_expression = "String(!!document.querySelector('#ready'))",
+        },
+    );
+
+    try std.testing.expect(result.wait_satisfied);
+    try std.testing.expect(result.wait_polls > 0);
+    try std.testing.expectEqualStrings("true", result.eval_result);
 }

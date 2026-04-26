@@ -710,18 +710,19 @@ test "extractResources captures common static assets" {
 }
 
 test "buildFormSubmission merges overrides and encodes post bodies" {
+    var fields = [_]model.FormField{
+        .{ .name = "csrf", .kind = "hidden", .value = "abc123" },
+        .{ .name = "username", .kind = "text", .value = "" },
+        .{ .name = "remember", .kind = "checkbox", .value = "(unchecked)" },
+        .{ .name = "", .kind = "submit", .value = "Login" },
+    };
     const form: model.Form = .{
         .method = "post",
         .action = "https://example.com/login",
         .enctype = "application/x-www-form-urlencoded",
         .id = "",
         .class_name = "",
-        .fields = &.{
-            .{ .name = "csrf", .kind = "hidden", .value = "abc123" },
-            .{ .name = "username", .kind = "text", .value = "" },
-            .{ .name = "remember", .kind = "checkbox", .value = "(unchecked)" },
-            .{ .name = "", .kind = "submit", .value = "Login" },
-        },
+        .fields = &fields,
     };
     const submission = try buildFormSubmission(std.testing.allocator, form, &.{
         .{ .name = "username", .value = "admin" },

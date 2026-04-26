@@ -42,6 +42,9 @@ pub const JsExecution = struct {
     output: []const u8 = "",
     eval_result: []const u8 = "",
     document_title: []const u8 = "",
+    wait_expression: []const u8 = "",
+    wait_satisfied: bool = false,
+    wait_polls: usize = 0,
     error_message: []const u8 = "",
 };
 

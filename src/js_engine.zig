@@ -146,8 +146,7 @@ fn injectDomStubs(engine: *JsEngine, html: []const u8, url: ?[]const u8, allocat
     //    Escape backslashes, quotes, and newlines for safe embedding.
     //    Must null-terminate dynamic strings (QuickJS requires it).
     const escaped_html = escapeForJs(html, allocator) orelse "";
-    const html_inject = std.fmt.allocPrint(allocator,
-        "globalThis.__browdie_html = \"{s}\";", .{escaped_html}) catch return;
+    const html_inject = std.fmt.allocPrint(allocator, "globalThis.__browdie_html = \"{s}\";", .{escaped_html}) catch return;
     const html_inject_z = allocator.dupeZ(u8, html_inject) catch return;
     _ = engine.exec(html_inject_z);
 
@@ -742,8 +741,6 @@ const dom_runtime_enhancement_js =
     \\    this.disabled = false;
     \\    this.selected = false;
     \\    this.multiple = false;
-    \\    this.className = '';
-    \\    this.id = '';
     \\    if (attrs) {
     \\      var keys = Object.keys(attrs);
     \\      for (var i = 0; i < keys.length; i += 1) this.setAttribute(keys[i], attrs[keys[i]]);
@@ -751,6 +748,14 @@ const dom_runtime_enhancement_js =
     \\  }
     \\  Element.prototype = Object.create(Node.prototype);
     \\  Element.prototype.constructor = Element;
+    \\  Object.defineProperty(Element.prototype, 'id', {
+    \\    get: function() { return this.getAttribute('id') || ''; },
+    \\    set: function(value) { this._attrs.id = String(value); }
+    \\  });
+    \\  Object.defineProperty(Element.prototype, 'className', {
+    \\    get: function() { return this.getAttribute('class') || ''; },
+    \\    set: function(value) { this._attrs['class'] = String(value); }
+    \\  });
     \\  Object.defineProperty(Element.prototype, 'children', {
     \\    get: function() { return this.childNodes.filter(function(node) { return node.nodeType === Node.ELEMENT_NODE; }); }
     \\  });
@@ -1549,6 +1554,23 @@ test "DOM stubs: parses doctype and dynamic descendant selectors" {
         "var root = document.createElement('div');" ++
         "root.setAttribute('id', 'mount');" ++
         "root.innerHTML = '<span class=\"x\">hi</span>';" ++
+        "document.body.appendChild(root);" ++
+        "document.write(String(document.querySelectorAll('#mount .x').length));" ++
+        "</script></body></html>";
+    const output = try evalHtmlScripts(html, std.testing.allocator);
+    defer if (output) |o| std.testing.allocator.free(o);
+    try std.testing.expect(output != null);
+    try std.testing.expectEqualStrings("1", output.?);
+}
+
+test "DOM stubs: id and className properties reflect selector attributes" {
+    const html =
+        "<html><body><script>" ++
+        "var root = document.createElement('div');" ++
+        "root.id = 'mount';" ++
+        "var child = document.createElement('span');" ++
+        "child.className = 'x';" ++
+        "root.appendChild(child);" ++
         "document.body.appendChild(root);" ++
         "document.write(String(document.querySelectorAll('#mount .x').length));" ++
         "</script></body></html>";

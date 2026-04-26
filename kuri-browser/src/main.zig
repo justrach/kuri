@@ -1,4 +1,5 @@
 const std = @import("std");
+const bench = @import("bench.zig");
 const model = @import("model.zig");
 const parity = @import("parity.zig");
 const runtime = @import("runtime.zig");
@@ -11,6 +12,7 @@ const CommandTag = enum {
     version,
     status,
     roadmap,
+    bench,
     parity,
     render,
     submit,
@@ -21,12 +23,18 @@ const Command = union(CommandTag) {
     version,
     status,
     roadmap,
+    bench: BenchCommand,
     parity: ParityCommand,
     render: RenderCommand,
     submit: SubmitCommand,
 };
 
 const ParityCommand = struct {
+    kuri_base: []const u8 = "http://127.0.0.1:8080",
+    run_live: bool = true,
+};
+
+const BenchCommand = struct {
     kuri_base: []const u8 = "http://127.0.0.1:8080",
     run_live: bool = true,
 };
@@ -38,6 +46,8 @@ const RenderCommand = struct {
     selector: ?[]const u8 = null,
     js_enabled: bool = false,
     eval_expression: ?[]const u8 = null,
+    wait_selector: ?[]const u8 = null,
+    wait_expression: ?[]const u8 = null,
     har_path: ?[]const u8 = null,
 };
 
@@ -49,6 +59,8 @@ const SubmitCommand = struct {
     selector: ?[]const u8 = null,
     js_enabled: bool = false,
     eval_expression: ?[]const u8 = null,
+    wait_selector: ?[]const u8 = null,
+    wait_expression: ?[]const u8 = null,
     har_path: ?[]const u8 = null,
 };
 
@@ -131,6 +143,16 @@ pub fn main(init: std.process.Init.Minimal) !void {
             std.debug.print("{s}", .{shell.usageText()});
             std.process.exit(1);
         },
+        error.MissingWaitSelectorValue => {
+            std.debug.print("error: --wait-selector requires a CSS selector\n", .{});
+            std.debug.print("{s}", .{shell.usageText()});
+            std.process.exit(1);
+        },
+        error.MissingWaitEvalValue => {
+            std.debug.print("error: --wait-eval requires an expression\n", .{});
+            std.debug.print("{s}", .{shell.usageText()});
+            std.process.exit(1);
+        },
         else => return err,
     };
 
@@ -145,6 +167,13 @@ pub fn main(init: std.process.Init.Minimal) !void {
             const text = try runtime.roadmapText(arena);
             std.debug.print("{s}", .{text});
         },
+        .bench => |bench_cmd| {
+            const text = try bench.reportText(arena, .{
+                .kuri_base = bench_cmd.kuri_base,
+                .run_live = bench_cmd.run_live,
+            });
+            std.debug.print("{s}", .{text});
+        },
         .parity => |parity_cmd| {
             const text = try parity.reportText(arena, .{
                 .kuri_base = parity_cmd.kuri_base,
@@ -156,6 +185,8 @@ pub fn main(init: std.process.Init.Minimal) !void {
             const output = try runtime.renderUrlOutput(arena, render_cmd.url, render_cmd.steps, render_cmd.dump, render_cmd.selector, render_cmd.har_path != null, .{
                 .enabled = render_cmd.js_enabled,
                 .eval_expression = render_cmd.eval_expression,
+                .wait_selector = render_cmd.wait_selector,
+                .wait_expression = render_cmd.wait_expression,
             });
             if (render_cmd.har_path) |path| {
                 try writeFile(path, output.har_json.?);
@@ -166,6 +197,8 @@ pub fn main(init: std.process.Init.Minimal) !void {
             const output = runtime.submitFormOutput(arena, submit_cmd.url, submit_cmd.form_index, submit_cmd.fields, submit_cmd.dump, submit_cmd.selector, submit_cmd.har_path != null, .{
                 .enabled = submit_cmd.js_enabled,
                 .eval_expression = submit_cmd.eval_expression,
+                .wait_selector = submit_cmd.wait_selector,
+                .wait_expression = submit_cmd.wait_expression,
             }) catch |err| switch (err) {
                 error.FormNotFound => {
                     std.debug.print("error: form index {d} not found on page\n", .{submit_cmd.form_index});
@@ -196,6 +229,9 @@ fn parseCommand(allocator: std.mem.Allocator, args: []const []const u8) !Command
     if (std.mem.eql(u8, args[1], "--version") or std.mem.eql(u8, args[1], "-V")) return .version;
     if (std.mem.eql(u8, args[1], "status")) return .status;
     if (std.mem.eql(u8, args[1], "roadmap")) return .roadmap;
+    if (std.mem.eql(u8, args[1], "bench")) {
+        return .{ .bench = try parseBenchCommand(args[2..]) };
+    }
     if (std.mem.eql(u8, args[1], "parity")) {
         return .{ .parity = try parseParityCommand(args[2..]) };
     }
@@ -207,6 +243,27 @@ fn parseCommand(allocator: std.mem.Allocator, args: []const []const u8) !Command
     }
 
     return error.UnknownCommand;
+}
+
+fn parseBenchCommand(args: []const []const u8) !BenchCommand {
+    var cmd: BenchCommand = .{};
+    var i: usize = 0;
+    while (i < args.len) {
+        const arg = args[i];
+        if (std.mem.eql(u8, arg, "--kuri-base")) {
+            if (i + 1 >= args.len) return error.UnknownCommand;
+            cmd.kuri_base = args[i + 1];
+            i += 2;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--offline")) {
+            cmd.run_live = false;
+            i += 1;
+            continue;
+        }
+        return error.UnknownCommand;
+    }
+    return cmd;
 }
 
 fn parseParityCommand(args: []const []const u8) !ParityCommand {
@@ -268,6 +325,20 @@ fn parseRenderCommand(allocator: std.mem.Allocator, args: []const []const u8) !R
             i += 2;
             continue;
         }
+        if (std.mem.eql(u8, arg, "--wait-selector")) {
+            if (i + 1 >= args.len) return error.MissingWaitSelectorValue;
+            render_cmd.js_enabled = true;
+            render_cmd.wait_selector = args[i + 1];
+            i += 2;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--wait-eval")) {
+            if (i + 1 >= args.len) return error.MissingWaitEvalValue;
+            render_cmd.js_enabled = true;
+            render_cmd.wait_expression = args[i + 1];
+            i += 2;
+            continue;
+        }
         if (std.mem.eql(u8, arg, "--har")) {
             if (i + 1 >= args.len) return error.MissingHarPathValue;
             render_cmd.har_path = args[i + 1];
@@ -315,6 +386,20 @@ fn parseSubmitCommand(allocator: std.mem.Allocator, args: []const []const u8) !S
             if (i + 1 >= args.len) return error.MissingEvalValue;
             submit_cmd.js_enabled = true;
             submit_cmd.eval_expression = args[i + 1];
+            i += 2;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--wait-selector")) {
+            if (i + 1 >= args.len) return error.MissingWaitSelectorValue;
+            submit_cmd.js_enabled = true;
+            submit_cmd.wait_selector = args[i + 1];
+            i += 2;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--wait-eval")) {
+            if (i + 1 >= args.len) return error.MissingWaitEvalValue;
+            submit_cmd.js_enabled = true;
+            submit_cmd.wait_expression = args[i + 1];
             i += 2;
             continue;
         }
@@ -399,7 +484,12 @@ test "parseCommand handles standard flags" {
     try std.testing.expectEqual(CommandTag.version, std.meta.activeTag(try parseCommand(arena, &.{ "kuri-browser", "--version" })));
     try std.testing.expectEqual(CommandTag.status, std.meta.activeTag(try parseCommand(arena, &.{ "kuri-browser", "status" })));
     try std.testing.expectEqual(CommandTag.roadmap, std.meta.activeTag(try parseCommand(arena, &.{ "kuri-browser", "roadmap" })));
+    try std.testing.expectEqual(CommandTag.bench, std.meta.activeTag(try parseCommand(arena, &.{ "kuri-browser", "bench" })));
     try std.testing.expectEqual(CommandTag.parity, std.meta.activeTag(try parseCommand(arena, &.{ "kuri-browser", "parity" })));
+
+    const bench_cmd = try parseCommand(arena, &.{ "kuri-browser", "bench", "--kuri-base", "http://127.0.0.1:9999", "--offline" });
+    try std.testing.expectEqualStrings("http://127.0.0.1:9999", bench_cmd.bench.kuri_base);
+    try std.testing.expect(!bench_cmd.bench.run_live);
 
     const parity_cmd = try parseCommand(arena, &.{ "kuri-browser", "parity", "--kuri-base", "http://127.0.0.1:9999", "--offline" });
     try std.testing.expectEqualStrings("http://127.0.0.1:9999", parity_cmd.parity.kuri_base);
@@ -432,6 +522,11 @@ test "parseCommand handles standard flags" {
     try std.testing.expect(js_cmd.render.js_enabled);
     try std.testing.expectEqualStrings("document.title", js_cmd.render.eval_expression.?);
 
+    const wait_cmd = try parseCommand(arena, &.{ "kuri-browser", "render", "https://example.com", "--wait-selector", "#ready", "--wait-eval", "window.ready" });
+    try std.testing.expect(wait_cmd.render.js_enabled);
+    try std.testing.expectEqualStrings("#ready", wait_cmd.render.wait_selector.?);
+    try std.testing.expectEqualStrings("window.ready", wait_cmd.render.wait_expression.?);
+
     const submit_cmd = try parseCommand(arena, &.{ "kuri-browser", "submit", "https://example.com/login", "--form-index", "2", "--field", "username=admin", "--field", "password=admin" });
     try std.testing.expectEqual(CommandTag.submit, std.meta.activeTag(submit_cmd));
     try std.testing.expectEqual(@as(usize, 2), submit_cmd.submit.form_index);
@@ -445,6 +540,11 @@ test "parseCommand handles standard flags" {
     const submit_js_cmd = try parseCommand(arena, &.{ "kuri-browser", "submit", "https://example.com/login", "--field", "username=admin", "--js", "--eval", "document.title" });
     try std.testing.expect(submit_js_cmd.submit.js_enabled);
     try std.testing.expectEqualStrings("document.title", submit_js_cmd.submit.eval_expression.?);
+
+    const submit_wait_cmd = try parseCommand(arena, &.{ "kuri-browser", "submit", "https://example.com/login", "--field", "username=admin", "--wait-selector", ".ready", "--wait-eval", "window.ready" });
+    try std.testing.expect(submit_wait_cmd.submit.js_enabled);
+    try std.testing.expectEqualStrings(".ready", submit_wait_cmd.submit.wait_selector.?);
+    try std.testing.expectEqualStrings("window.ready", submit_wait_cmd.submit.wait_expression.?);
 
     const selector_cmd = try parseCommand(arena, &.{ "kuri-browser", "render", "https://example.com", "--selector", ".titleline a" });
     try std.testing.expectEqualStrings(".titleline a", selector_cmd.render.selector.?);
@@ -462,6 +562,8 @@ test "parseCommand rejects unknown input" {
     try std.testing.expectError(error.InvalidStepSyntax, parseCommand(arena, &.{ "kuri-browser", "render", "https://example.com", "--step", "wat" }));
     try std.testing.expectError(error.MissingSelectorValue, parseCommand(arena, &.{ "kuri-browser", "render", "https://example.com", "--selector" }));
     try std.testing.expectError(error.MissingEvalValue, parseCommand(arena, &.{ "kuri-browser", "render", "https://example.com", "--eval" }));
+    try std.testing.expectError(error.MissingWaitSelectorValue, parseCommand(arena, &.{ "kuri-browser", "render", "https://example.com", "--wait-selector" }));
+    try std.testing.expectError(error.MissingWaitEvalValue, parseCommand(arena, &.{ "kuri-browser", "render", "https://example.com", "--wait-eval" }));
     try std.testing.expectError(error.MissingHarPathValue, parseCommand(arena, &.{ "kuri-browser", "render", "https://example.com", "--har" }));
     try std.testing.expectError(error.MissingFieldValue, parseCommand(arena, &.{ "kuri-browser", "submit", "https://example.com/login", "--field" }));
     try std.testing.expectError(error.InvalidFieldSyntax, parseCommand(arena, &.{ "kuri-browser", "submit", "https://example.com/login", "--field", "=admin" }));

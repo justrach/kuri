@@ -70,7 +70,21 @@ pub fn build(b: *std.Build) void {
     runtime_tests.root_module.linkLibrary(quickjs_dep.artifact("quickjs-ng"));
     const run_runtime_tests = b.addRunArtifact(runtime_tests);
 
+    const jsengine_test_mod = b.createModule(.{
+        .root_source_file = b.path("../src/js_engine.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    jsengine_test_mod.addImport("quickjs", quickjs_dep.module("quickjs"));
+    const jsengine_tests = b.addTest(.{
+        .root_module = jsengine_test_mod,
+    });
+    jsengine_tests.root_module.linkLibrary(quickjs_dep.artifact("quickjs-ng"));
+    const run_jsengine_tests = b.addRunArtifact(jsengine_tests);
+
     const test_step = b.step("test", "Run kuri-browser tests");
     test_step.dependOn(&run_main_tests.step);
     test_step.dependOn(&run_runtime_tests.step);
+    test_step.dependOn(&run_jsengine_tests.step);
 }

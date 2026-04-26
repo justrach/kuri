@@ -9,11 +9,11 @@ This score is meant to answer a narrower question:
 
 ## Current Score
 
-- Estimated feature parity: **57%**
+- Estimated feature parity: **61%**
 - Automated validation coverage: **63%** of the target surface
 - Live-validated parity: **depends on the current Kuri run**
 
-The `57%` figure is weighted, not a raw item count.
+The `61%` figure is weighted, not a raw item count.
 
 - `yes` = full weight
 - `partial` = half weight
@@ -32,6 +32,26 @@ If you only want the tracked scorecard without probing a live Kuri server:
 ```sh
 zig build run -- parity --offline
 ```
+
+Run the broader replacement-readiness bench:
+
+```sh
+zig build run -- bench --offline
+```
+
+That bench covers JS/runtime completeness, wait semantics, CDP surface area, Playwright/Puppeteer compatibility, and whether this can replace headless Chrome yet.
+
+Current bench result from this branch:
+
+- Offline deterministic readiness: **47%**, not ready
+- Offline + live probes readiness: **53%**, not ready
+- JS/runtime completeness: **100%**
+- Wait semantics: **100%**
+- CDP automation surface: **30%**
+- Playwright/Puppeteer compatibility: **11%**
+- Replace-headless-Chrome readiness: **32-38%** depending on live probes
+
+The live run passed Hacker News selector extraction, `quotes.toscrape.com/js/`, TodoMVC wait/eval, and HAR capture. The local Kuri CDP baseline was skipped because `http://127.0.0.1:8080/health` was not reachable.
 
 The live suite currently probes:
 
@@ -58,14 +78,14 @@ The live suite currently probes:
 | JS execution + eval | 12 | partial | live | Real sites work, but the shim surface is still incomplete |
 | Browser-side fetch/XHR/storage | 8 | partial | manual | Basic bridge exists; broad compatibility still missing |
 | SPA compatibility | 8 | partial | live | Representative React flow works; arbitrary SPAs do not |
-| Wait semantics + async lifecycle | 8 | no | none | No stable wait model yet |
+| Wait semantics + async lifecycle | 8 | partial | bench | `--wait-selector` and `--wait-eval` cover bounded JS polling; load-state parity is still missing |
 | Agent snapshots, refs, and actions | 8 | partial | live | Snapshot refs plus basic click/type flows exist; broader action parity is still missing |
 | Visual rendering + screenshots | 6 | no | none | No layout/paint/screenshot path |
 | CDP / automation compatibility | 4 | no | none | No CDP-compatible server |
 
 ## Missing First
 
-1. Wait semantics and lifecycle hooks.
+1. Full load-state and auto-wait lifecycle hooks.
 2. Broader ref-driven actions plus keyboard/select/checkbox parity.
 3. More complete DOM events and mutation semantics.
 4. Rendered output or screenshot support.

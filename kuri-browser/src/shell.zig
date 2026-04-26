@@ -7,43 +7,44 @@ const snapshot = @import("snapshot.zig");
 
 pub fn usageText() []const u8 {
     return
-        \\kuri-browser
-        \\
-        \\Standalone experimental browser-runtime workspace.
-        \\This build is intentionally separate from Kuri's main build.
-        \\
-        \\USAGE
-        \\  kuri-browser --help
-        \\  kuri-browser --version
-        \\  kuri-browser status
-        \\  kuri-browser roadmap
-        \\  kuri-browser parity [--kuri-base <url>] [--offline]
-        \\  kuri-browser render <url> [--step click:eN|type:eN=value ...] [--dump summary|html|text|links|forms|resources|js|snapshot] [--selector <css>] [--js] [--eval <expr>] [--har <file>]
-        \\  kuri-browser submit <url> [--form-index <n>] [--field name=value ...] [--dump summary|html|text|links|forms|resources|js|snapshot] [--selector <css>] [--js] [--eval <expr>] [--har <file>]
-        \\
-        \\EXAMPLES
-        \\  zig build run -- --help
-        \\  zig build run -- status
-        \\  zig build run -- roadmap
-        \\  zig build run -- parity --kuri-base http://127.0.0.1:8080
-        \\  zig build run -- parity --offline
-        \\  zig build run -- render https://news.ycombinator.com
-        \\  zig build run -- render https://example.com --dump html
-        \\  zig build run -- render https://example.com --har example.har
-        \\  zig build run -- render https://news.ycombinator.com --js --eval "document.querySelectorAll('a').length" --dump js
-        \\  zig build run -- render https://news.ycombinator.com --dump snapshot
-        \\  zig build run -- render https://example.com --step click:e0 --dump summary
-        \\  zig build run -- render https://quotes.toscrape.com/login --dump forms
-        \\  zig build run -- render https://www.wikipedia.org/ --dump resources --har wiki.har
-        \\  zig build run -- submit https://quotes.toscrape.com/login --field username=admin --field password=admin --js --dump text --har login.har
-        \\  zig build run -- render https://news.ycombinator.com --selector ".titleline a" --dump text
-        \\
+    \\kuri-browser
+    \\
+    \\Standalone experimental browser-runtime workspace.
+    \\This build is intentionally separate from Kuri's main build.
+    \\
+    \\USAGE
+    \\  kuri-browser --help
+    \\  kuri-browser --version
+    \\  kuri-browser status
+    \\  kuri-browser roadmap
+    \\  kuri-browser parity [--kuri-base <url>] [--offline]
+    \\  kuri-browser bench [--offline] [--kuri-base <url>]
+    \\  kuri-browser render <url> [--step click:eN|type:eN=value ...] [--dump summary|html|text|links|forms|resources|js|snapshot] [--selector <css>] [--js] [--eval <expr>] [--wait-selector <css>] [--wait-eval <expr>] [--har <file>]
+    \\  kuri-browser submit <url> [--form-index <n>] [--field name=value ...] [--dump summary|html|text|links|forms|resources|js|snapshot] [--selector <css>] [--js] [--eval <expr>] [--wait-selector <css>] [--wait-eval <expr>] [--har <file>]
+    \\
+    \\EXAMPLES
+    \\  zig build run -- --help
+    \\  zig build run -- status
+    \\  zig build run -- roadmap
+    \\  zig build run -- bench --offline
+    \\  zig build run -- parity --kuri-base http://127.0.0.1:8080
+    \\  zig build run -- parity --offline
+    \\  zig build run -- render https://news.ycombinator.com
+    \\  zig build run -- render https://example.com --dump html
+    \\  zig build run -- render https://example.com --har example.har
+    \\  zig build run -- render https://news.ycombinator.com --js --eval "document.querySelectorAll('a').length" --dump js
+    \\  zig build run -- render https://news.ycombinator.com --dump snapshot
+    \\  zig build run -- render https://example.com --step click:e0 --dump summary
+    \\  zig build run -- render https://quotes.toscrape.com/login --dump forms
+    \\  zig build run -- render https://www.wikipedia.org/ --dump resources --har wiki.har
+    \\  zig build run -- submit https://quotes.toscrape.com/login --field username=admin --field password=admin --js --dump text --har login.har
+    \\  zig build run -- render https://news.ycombinator.com --selector ".titleline a" --dump text
+    \\
     ;
 }
 
 pub fn renderStatusText(allocator: std.mem.Allocator, shape: core.RuntimeShape) ![]const u8 {
-    return std.fmt.allocPrint(
-        allocator,
+    return std.fmt.allocPrint(allocator,
         \\kuri-browser
         \\
         \\mode: {s}
@@ -138,6 +139,13 @@ fn renderSummaryPageText(allocator: std.mem.Allocator, page: model.Page) ![]cons
             try out.print(allocator, "js-network: {d} fetch, {d} xhr\n\n", .{
                 page.js.fetch_requests,
                 page.js.xhr_requests,
+            });
+        }
+        if (page.js.wait_expression.len > 0) {
+            try out.print(allocator, "js-wait: {s} after {d} polls ({s})\n\n", .{
+                if (page.js.wait_satisfied) "satisfied" else "timeout",
+                page.js.wait_polls,
+                page.js.wait_expression,
             });
         }
     } else {
@@ -357,6 +365,11 @@ fn renderJsText(allocator: std.mem.Allocator, js: model.JsExecution) ![]const u8
     if (js.document_title.len > 0) {
         try out.print(allocator, "document-title: {s}\n", .{js.document_title});
     }
+    if (js.wait_expression.len > 0) {
+        try out.print(allocator, "wait-expression: {s}\n", .{js.wait_expression});
+        try out.print(allocator, "wait-satisfied: {s}\n", .{if (js.wait_satisfied) "yes" else "no"});
+        try out.print(allocator, "wait-polls: {d}\n", .{js.wait_polls});
+    }
     if (js.eval_result.len > 0) {
         try out.print(allocator, "eval-result: {s}\n", .{js.eval_result});
     }
@@ -392,6 +405,7 @@ fn previewText(text: []const u8, max_len: usize) []const u8 {
 
 test "usage mentions render command" {
     try std.testing.expect(std.mem.indexOf(u8, usageText(), "parity") != null);
+    try std.testing.expect(std.mem.indexOf(u8, usageText(), "bench") != null);
     try std.testing.expect(std.mem.indexOf(u8, usageText(), "render <url>") != null);
     try std.testing.expect(std.mem.indexOf(u8, usageText(), "submit <url>") != null);
     try std.testing.expect(std.mem.indexOf(u8, usageText(), "--dump summary|html|text|links|forms|resources|js|snapshot") != null);
@@ -399,5 +413,7 @@ test "usage mentions render command" {
     try std.testing.expect(std.mem.indexOf(u8, usageText(), "--selector <css>") != null);
     try std.testing.expect(std.mem.indexOf(u8, usageText(), "--js") != null);
     try std.testing.expect(std.mem.indexOf(u8, usageText(), "--eval <expr>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, usageText(), "--wait-selector <css>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, usageText(), "--wait-eval <expr>") != null);
     try std.testing.expect(std.mem.indexOf(u8, usageText(), "--har <file>") != null);
 }

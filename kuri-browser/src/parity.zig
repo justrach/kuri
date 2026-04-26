@@ -137,8 +137,8 @@ const features = [_]Feature{
     .{
         .name = "Wait semantics + async page events",
         .weight = 8,
-        .status = .no,
-        .gap = "No stable `waitFor*` / lifecycle model yet.",
+        .status = .partial,
+        .gap = "`--wait-selector` and `--wait-eval` now cover bounded JS polling; full lifecycle/load-state parity is still missing.",
     },
     .{
         .name = "Agent snapshots, refs, and actions",
@@ -408,7 +408,7 @@ pub fn reportText(allocator: std.mem.Allocator, options: Options) ![]const u8 {
     }
 
     try out.writer.writeAll("\nMissing Next\n");
-    try out.writer.writeAll("- Wait semantics and async lifecycle control\n");
+    try out.writer.writeAll("- Full load-state and auto-wait lifecycle control\n");
     try out.writer.writeAll("- Broader ref-driven actions plus keyboard/select/checkbox parity\n");
     try out.writer.writeAll("- Screenshot/rendered output\n");
     try out.writer.writeAll("- Broader SPA/browser API coverage beyond the current representative sites\n");
@@ -473,17 +473,17 @@ fn runLiveChecks(allocator: std.mem.Allocator, options: Options) ![]LiveCheckRes
         return skippedResults(allocator, try std.fmt.allocPrint(allocator, "Kuri unavailable: {s}", .{@errorName(err)}));
     };
 
-        return allocator.dupe(LiveCheckResult, &.{
-            try checkExampleTitle(allocator, &kuri),
-            try checkExampleText(allocator, &kuri),
-            try checkHnSelectorCount(allocator, &kuri),
-            try checkHttpbingoCookieRedirect(allocator, &kuri),
-            try checkQuotesJsCount(allocator, &kuri),
-            try checkTodoMvcShell(allocator, &kuri),
-            try checkHarCapture(allocator, &kuri),
-            try checkExampleActionClick(allocator, &kuri),
-            try checkExampleSnapshotCount(allocator, &kuri),
-        });
+    return allocator.dupe(LiveCheckResult, &.{
+        try checkExampleTitle(allocator, &kuri),
+        try checkExampleText(allocator, &kuri),
+        try checkHnSelectorCount(allocator, &kuri),
+        try checkHttpbingoCookieRedirect(allocator, &kuri),
+        try checkQuotesJsCount(allocator, &kuri),
+        try checkTodoMvcShell(allocator, &kuri),
+        try checkHarCapture(allocator, &kuri),
+        try checkExampleActionClick(allocator, &kuri),
+        try checkExampleSnapshotCount(allocator, &kuri),
+    });
 }
 
 fn skippedResults(allocator: std.mem.Allocator, reason: []const u8) ![]LiveCheckResult {
