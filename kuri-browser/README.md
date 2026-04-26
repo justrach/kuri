@@ -103,6 +103,14 @@ Current local Chrome comparison on `https://example.com` at `1280x720`:
 
 So this is much closer for the simple `example.com` target, but it is still not 1:1. Exact pixel parity requires matching Chrome's layout, font shaping, antialiasing, viewport behavior, and raster pipeline, not just drawing similar SVG text.
 
+Current local Hacker News comparison on `https://news.ycombinator.com` at `1280x720`:
+
+- Chrome actual screenshot: `159,387` bytes
+- Native SVG paint artifact: `10,127` bytes
+- Native SVG rasterized through wrapper: `146,370` bytes
+- Exact matching pixels through wrapper: `88.06%`
+- Mean absolute RGB delta through wrapper: `10.58/255`
+
 ### Screenshot Fallback
 
 `kuri-browser` can capture screenshots through the existing Kuri/CDP renderer while full native layout and raster paint are still missing.

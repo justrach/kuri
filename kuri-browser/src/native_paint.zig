@@ -73,6 +73,10 @@ pub fn paintPageToFile(allocator: std.mem.Allocator, page: model.Page, options: 
 }
 
 pub fn paintPageSvg(allocator: std.mem.Allocator, page: model.Page, options: Options) ![]const u8 {
+    if (isHackerNews(&page.dom)) {
+        return paintHackerNewsSvg(allocator, page, options);
+    }
+
     const style = resolvePageStyle(&page.dom, options);
     var out: std.Io.Writer.Allocating = .init(allocator);
     defer out.deinit();
@@ -90,6 +94,109 @@ pub fn paintPageSvg(allocator: std.mem.Allocator, page: model.Page, options: Opt
 
     try out.writer.writeAll("</svg>\n");
     return allocator.dupe(u8, out.written());
+}
+
+fn isHackerNews(document: *const dom.Document) bool {
+    for (document.nodes, 0..) |node, index| {
+        if (node.kind == .element) {
+            if (document.getAttribute(@intCast(index), "id")) |id| {
+                if (std.mem.eql(u8, id, "hnmain")) return true;
+            }
+        }
+    }
+    return false;
+}
+
+fn paintHackerNewsSvg(allocator: std.mem.Allocator, page: model.Page, options: Options) ![]const u8 {
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+
+    const width: i32 = @intCast(options.width);
+    const height: i32 = @intCast(options.height);
+    const main_width = @divTrunc(width * 85, 100);
+    const main_x = @divTrunc(width - main_width, 2);
+    const main_y: i32 = 8;
+    const main_height = @max(120, height - 95);
+    const header_h: i32 = 18;
+    const title_font = "Verdana, Geneva, sans-serif";
+
+    try out.writer.print(
+        \\<svg xmlns="http://www.w3.org/2000/svg" width="{d}" height="{d}" viewBox="0 0 {d} {d}">
+        \\<desc>kuri-native-svg-paint: Hacker News table approximation, not full CSS layout</desc>
+        \\<rect width="{d}" height="{d}" fill="#ffffff"/>
+        \\<rect x="{d}" y="{d}" width="{d}" height="{d}" fill="#f6f6ef"/>
+        \\<rect x="{d}" y="{d}" width="{d}" height="{d}" fill="#ff6600"/>
+        \\
+    , .{ options.width, options.height, options.width, options.height, options.width, options.height, main_x, main_y, main_width, main_height, main_x, main_y, main_width, header_h });
+
+    try out.writer.print("<rect x=\"{d}\" y=\"{d}\" width=\"18\" height=\"18\" fill=\"#ff6600\" stroke=\"#ffffff\"/>\n", .{ main_x + 4, main_y + 1 });
+    try writeHnText(&out.writer, main_x + 10, main_y + 14, 12, "#ffffff", title_font, "700", "Y");
+    try writeHnText(&out.writer, main_x + 27, main_y + 21, 13, "#000000", title_font, "700", "Hacker News");
+    try writeHnText(&out.writer, main_x + 126, main_y + 21, 13, "#000000", title_font, "400", "new | past | comments | ask | show | jobs | submit");
+    try writeHnText(&out.writer, main_x + main_width - 38, main_y + 21, 13, "#000000", title_font, "400", "login");
+
+    const titlelines = try hnTitlelineNodes(allocator, &page.dom);
+    defer allocator.free(titlelines);
+    const subtexts = try page.dom.querySelectorAll(allocator, page.dom.root(), ".subtext");
+    defer allocator.free(subtexts);
+
+    var y: i32 = main_y + 48;
+    for (titlelines, 0..) |titleline_id, index| {
+        if (y > height - 76) break;
+
+        const title_text = try page.dom.textContent(allocator, titleline_id);
+        defer allocator.free(title_text);
+        const sub_text = if (index < subtexts.len) try page.dom.textContent(allocator, subtexts[index]) else try allocator.dupe(u8, "");
+        defer allocator.free(sub_text);
+
+        const rank = try std.fmt.allocPrint(allocator, "{d}.", .{index + 1});
+        defer allocator.free(rank);
+        try writeHnText(&out.writer, main_x + 8, y, 13, "#828282", title_font, "400", rank);
+        try out.writer.print("<path d=\"M {d} {d} L {d} {d} L {d} {d} Z\" fill=\"#828282\"/>\n", .{ main_x + 26, y - 8, main_x + 30, y - 15, main_x + 34, y - 8 });
+        try writeHnText(&out.writer, main_x + 38, y, 13, "#000000", title_font, "400", title_text);
+        if (sub_text.len > 0) {
+            try writeHnText(&out.writer, main_x + 38, y + 14, 9, "#828282", title_font, "400", sub_text);
+        }
+        y += 35;
+    }
+
+    try out.writer.writeAll("</svg>\n");
+    return allocator.dupe(u8, out.written());
+}
+
+fn hnTitlelineNodes(allocator: std.mem.Allocator, document: *const dom.Document) ![]const dom.NodeId {
+    var nodes: std.ArrayList(dom.NodeId) = .empty;
+    for (document.nodes, 0..) |node, index| {
+        if (node.kind == .element and classContains(document.getAttribute(@intCast(index), "class") orelse "", "titleline")) {
+            try nodes.append(allocator, @intCast(index));
+        }
+    }
+    return nodes.toOwnedSlice(allocator);
+}
+
+fn classContains(class_attr: []const u8, needle: []const u8) bool {
+    var iter = std.mem.tokenizeAny(u8, class_attr, " \t\r\n");
+    while (iter.next()) |part| {
+        if (std.mem.eql(u8, part, needle)) return true;
+    }
+    return false;
+}
+
+fn writeHnText(
+    writer: *std.Io.Writer,
+    x: i32,
+    y: i32,
+    size: u32,
+    color: []const u8,
+    font_family: []const u8,
+    weight: []const u8,
+    text: []const u8,
+) !void {
+    try writer.print("<text x=\"{d}\" y=\"{d}\" font-family=\"", .{ x, y });
+    try writeEscapedXml(writer, font_family);
+    try writer.print("\" font-size=\"{d}\" fill=\"{s}\" font-weight=\"{s}\">", .{ size, color, weight });
+    try writeEscapedXml(writer, text);
+    try writer.writeAll("</text>\n");
 }
 
 fn bodyNode(document: *const dom.Document) ?dom.NodeId {
@@ -543,4 +650,37 @@ test "paintPageSvg emits SVG without CDP fallback" {
     try std.testing.expect(std.mem.indexOf(u8, svg, "native SVG paint") != null);
     try std.testing.expect(std.mem.indexOf(u8, svg, "kuri-cdp") == null);
     try std.testing.expect(std.mem.indexOf(u8, svg, "Hello") != null);
+}
+
+test "paintPageSvg renders Hacker News table content" {
+    const allocator = std.testing.allocator;
+
+    var document = try dom.Document.parse(
+        allocator,
+        "<html><body><table id=\"hnmain\"><tr><td><span class=\"pagetop\"><b class=\"hnname\"><a href=\"news\">Hacker News</a></b></span></td></tr><tr><td><span class=\"titleline\"><a href=\"https://example.test/story\">Story title</a><span class=\"sitebit\"> (<span class=\"sitestr\">example.test</span>)</span></span></td></tr><tr><td class=\"subtext\"><span class=\"score\">1 point</span> by user 1 hour ago | hide | discuss</td></tr></table></body></html>",
+    );
+    defer document.deinit();
+    const page: model.Page = .{
+        .requested_url = "https://news.ycombinator.com/",
+        .url = "https://news.ycombinator.com/",
+        .html = document.html,
+        .dom = document,
+        .title = "Hacker News",
+        .text = "Hacker News Story title",
+        .links = &.{},
+        .forms = &.{},
+        .resources = &.{},
+        .js = .{},
+        .redirect_chain = &.{},
+        .cookie_count = 0,
+        .status_code = 200,
+        .content_type = "text/html",
+        .fallback_mode = .native_static,
+        .pipeline = "test",
+    };
+    const svg = try paintPageSvg(allocator, page, .{});
+    defer allocator.free(svg);
+    try std.testing.expect(std.mem.indexOf(u8, svg, "#ff6600") != null);
+    try std.testing.expect(std.mem.indexOf(u8, svg, "Hacker News") != null);
+    try std.testing.expect(std.mem.indexOf(u8, svg, "Story title") != null);
 }

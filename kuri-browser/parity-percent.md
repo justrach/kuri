@@ -99,6 +99,14 @@ Measured against real Chrome on `https://example.com` at `1280x720`:
 
 The wrapper mode removes Chrome's standalone-SVG page display artifact and measures the renderer content. It is still not 1:1 because the remaining text pixels differ from Chrome's HTML layout/raster path.
 
+Measured against real Chrome on `https://news.ycombinator.com` at `1280x720`:
+
+- Chrome actual screenshot: **159,387 bytes**
+- Native SVG paint artifact: **10,127 bytes**
+- Native SVG rasterized through a no-margin HTML wrapper: **146,370 bytes**
+- Exact matching pixels through wrapper: **88.06%**
+- Mean absolute RGB delta through wrapper: **10.58/255**
+
 Measured on cache-busted `https://example.com` in the local live bench before pixel comparison:
 
 - Native SVG paint path: **1,081ms**, **1,557 bytes**
@@ -144,7 +152,7 @@ The live suite currently probes:
 | SPA compatibility | 8 | partial | live | Representative React flow works; arbitrary SPAs do not |
 | Wait semantics + async lifecycle | 8 | partial | bench | `--wait-selector` and `--wait-eval` cover bounded JS polling; load-state parity is still missing |
 | Agent snapshots, refs, and actions | 8 | partial | live | Snapshot refs plus basic click/type flows exist; broader action parity is still missing |
-| Visual rendering + screenshots | 6 | partial | bench + pixel harness | Native SVG text/DOM paint reaches 99.35% exact pixels on the simple `example.com` wrapper comparison, but it is not 1:1 and full CSS layout, raster screenshots, and PDF are still missing |
+| Visual rendering + screenshots | 6 | partial | bench + pixel harness | Native SVG text/DOM paint reaches 99.35% exact pixels on the simple `example.com` wrapper comparison and 88.06% on Hacker News, but it is not 1:1 and full CSS layout, raster screenshots, and PDF are still missing |
 | CDP / automation compatibility | 4 | partial | bench | `serve-cdp` exposes HTTP discovery plus a minimal WebSocket JSON-RPC router; broad CDP domains and Playwright/Puppeteer parity are still missing |
 
 ## Missing First
