@@ -1,5 +1,6 @@
 const std = @import("std");
 const model = @import("model.zig");
+const parity = @import("parity.zig");
 const runtime = @import("runtime.zig");
 const shell = @import("shell.zig");
 
@@ -10,6 +11,7 @@ const CommandTag = enum {
     version,
     status,
     roadmap,
+    parity,
     render,
     submit,
 };
@@ -19,12 +21,19 @@ const Command = union(CommandTag) {
     version,
     status,
     roadmap,
+    parity: ParityCommand,
     render: RenderCommand,
     submit: SubmitCommand,
 };
 
+const ParityCommand = struct {
+    kuri_base: []const u8 = "http://127.0.0.1:8080",
+    run_live: bool = true,
+};
+
 const RenderCommand = struct {
     url: []const u8,
+    steps: []const model.AgentStep = &.{},
     dump: model.DumpFormat = .summary,
     selector: ?[]const u8 = null,
     js_enabled: bool = false,
@@ -69,6 +78,16 @@ pub fn main(init: std.process.Init.Minimal) !void {
         },
         error.MissingDumpValue => {
             std.debug.print("error: --dump requires a value\n", .{});
+            std.debug.print("{s}", .{shell.usageText()});
+            std.process.exit(1);
+        },
+        error.MissingStepValue => {
+            std.debug.print("error: --step requires action syntax\n", .{});
+            std.debug.print("{s}", .{shell.usageText()});
+            std.process.exit(1);
+        },
+        error.InvalidStepSyntax => {
+            std.debug.print("error: invalid step syntax, expected click:eN or type:eN=value\n", .{});
             std.debug.print("{s}", .{shell.usageText()});
             std.process.exit(1);
         },
@@ -126,8 +145,15 @@ pub fn main(init: std.process.Init.Minimal) !void {
             const text = try runtime.roadmapText(arena);
             std.debug.print("{s}", .{text});
         },
+        .parity => |parity_cmd| {
+            const text = try parity.reportText(arena, .{
+                .kuri_base = parity_cmd.kuri_base,
+                .run_live = parity_cmd.run_live,
+            });
+            std.debug.print("{s}", .{text});
+        },
         .render => |render_cmd| {
-            const output = try runtime.renderUrlOutput(arena, render_cmd.url, render_cmd.dump, render_cmd.selector, render_cmd.har_path != null, .{
+            const output = try runtime.renderUrlOutput(arena, render_cmd.url, render_cmd.steps, render_cmd.dump, render_cmd.selector, render_cmd.har_path != null, .{
                 .enabled = render_cmd.js_enabled,
                 .eval_expression = render_cmd.eval_expression,
             });
@@ -170,8 +196,11 @@ fn parseCommand(allocator: std.mem.Allocator, args: []const []const u8) !Command
     if (std.mem.eql(u8, args[1], "--version") or std.mem.eql(u8, args[1], "-V")) return .version;
     if (std.mem.eql(u8, args[1], "status")) return .status;
     if (std.mem.eql(u8, args[1], "roadmap")) return .roadmap;
+    if (std.mem.eql(u8, args[1], "parity")) {
+        return .{ .parity = try parseParityCommand(args[2..]) };
+    }
     if (std.mem.eql(u8, args[1], "render")) {
-        return .{ .render = try parseRenderCommand(args[2..]) };
+        return .{ .render = try parseRenderCommand(allocator, args[2..]) };
     }
     if (std.mem.eql(u8, args[1], "submit")) {
         return .{ .submit = try parseSubmitCommand(allocator, args[2..]) };
@@ -180,13 +209,41 @@ fn parseCommand(allocator: std.mem.Allocator, args: []const []const u8) !Command
     return error.UnknownCommand;
 }
 
-fn parseRenderCommand(args: []const []const u8) !RenderCommand {
-    if (args.len == 0) return error.MissingUrl;
-
-    var render_cmd: RenderCommand = .{ .url = "" };
+fn parseParityCommand(args: []const []const u8) !ParityCommand {
+    var cmd: ParityCommand = .{};
     var i: usize = 0;
     while (i < args.len) {
         const arg = args[i];
+        if (std.mem.eql(u8, arg, "--kuri-base")) {
+            if (i + 1 >= args.len) return error.UnknownCommand;
+            cmd.kuri_base = args[i + 1];
+            i += 2;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--offline")) {
+            cmd.run_live = false;
+            i += 1;
+            continue;
+        }
+        return error.UnknownCommand;
+    }
+    return cmd;
+}
+
+fn parseRenderCommand(allocator: std.mem.Allocator, args: []const []const u8) !RenderCommand {
+    if (args.len == 0) return error.MissingUrl;
+
+    var render_cmd: RenderCommand = .{ .url = "" };
+    var steps: std.ArrayList(model.AgentStep) = .empty;
+    var i: usize = 0;
+    while (i < args.len) {
+        const arg = args[i];
+        if (std.mem.eql(u8, arg, "--step")) {
+            if (i + 1 >= args.len) return error.MissingStepValue;
+            try steps.append(allocator, try parseAgentStep(args[i + 1]));
+            i += 2;
+            continue;
+        }
         if (std.mem.eql(u8, arg, "--dump")) {
             if (i + 1 >= args.len) return error.MissingDumpValue;
             render_cmd.dump = model.DumpFormat.parse(args[i + 1]) orelse return error.InvalidDump;
@@ -224,6 +281,7 @@ fn parseRenderCommand(args: []const []const u8) !RenderCommand {
     }
 
     if (render_cmd.url.len == 0) return error.MissingUrl;
+    render_cmd.steps = try steps.toOwnedSlice(allocator);
     return render_cmd;
 }
 
@@ -301,6 +359,23 @@ fn parseFieldInput(arg: []const u8) !model.FieldInput {
     };
 }
 
+fn parseAgentStep(arg: []const u8) !model.AgentStep {
+    if (std.mem.startsWith(u8, arg, "click:")) {
+        const ref = arg["click:".len..];
+        if (ref.len == 0) return error.InvalidStepSyntax;
+        return .{ .click = ref };
+    }
+    if (std.mem.startsWith(u8, arg, "type:")) {
+        const payload = arg["type:".len..];
+        const eq_index = std.mem.indexOfScalar(u8, payload, '=') orelse return error.InvalidStepSyntax;
+        const ref = payload[0..eq_index];
+        const value = payload[eq_index + 1 ..];
+        if (ref.len == 0) return error.InvalidStepSyntax;
+        return .{ .type = .{ .ref = ref, .value = value } };
+    }
+    return error.InvalidStepSyntax;
+}
+
 fn writeFile(path: []const u8, data: []const u8) !void {
     const io = std.Io.Threaded.global_single_threaded.io();
     try std.Io.Dir.cwd().writeFile(io, .{
@@ -324,6 +399,11 @@ test "parseCommand handles standard flags" {
     try std.testing.expectEqual(CommandTag.version, std.meta.activeTag(try parseCommand(arena, &.{ "kuri-browser", "--version" })));
     try std.testing.expectEqual(CommandTag.status, std.meta.activeTag(try parseCommand(arena, &.{ "kuri-browser", "status" })));
     try std.testing.expectEqual(CommandTag.roadmap, std.meta.activeTag(try parseCommand(arena, &.{ "kuri-browser", "roadmap" })));
+    try std.testing.expectEqual(CommandTag.parity, std.meta.activeTag(try parseCommand(arena, &.{ "kuri-browser", "parity" })));
+
+    const parity_cmd = try parseCommand(arena, &.{ "kuri-browser", "parity", "--kuri-base", "http://127.0.0.1:9999", "--offline" });
+    try std.testing.expectEqualStrings("http://127.0.0.1:9999", parity_cmd.parity.kuri_base);
+    try std.testing.expect(!parity_cmd.parity.run_live);
 
     const render_cmd = try parseCommand(arena, &.{ "kuri-browser", "render", "https://example.com" });
     try std.testing.expectEqual(CommandTag.render, std.meta.activeTag(render_cmd));
@@ -338,6 +418,12 @@ test "parseCommand handles standard flags" {
 
     const js_dump_cmd = try parseCommand(arena, &.{ "kuri-browser", "render", "https://example.com", "--dump", "js" });
     try std.testing.expectEqual(model.DumpFormat.js, js_dump_cmd.render.dump);
+
+    const snapshot_dump_cmd = try parseCommand(arena, &.{ "kuri-browser", "render", "https://example.com", "--dump", "snapshot" });
+    try std.testing.expectEqual(model.DumpFormat.snapshot, snapshot_dump_cmd.render.dump);
+
+    const action_cmd = try parseCommand(arena, &.{ "kuri-browser", "render", "https://example.com", "--step", "click:e0", "--step", "type:e1=admin" });
+    try std.testing.expectEqual(@as(usize, 2), action_cmd.render.steps.len);
 
     const har_cmd = try parseCommand(arena, &.{ "kuri-browser", "render", "https://example.com", "--har", "tmp.har" });
     try std.testing.expectEqualStrings("tmp.har", har_cmd.render.har_path.?);
@@ -373,6 +459,7 @@ test "parseCommand rejects unknown input" {
     try std.testing.expectError(error.MissingUrl, parseCommand(arena, &.{ "kuri-browser", "render" }));
     try std.testing.expectError(error.MissingDumpValue, parseCommand(arena, &.{ "kuri-browser", "render", "https://example.com", "--dump" }));
     try std.testing.expectError(error.InvalidDump, parseCommand(arena, &.{ "kuri-browser", "render", "https://example.com", "--dump", "wat" }));
+    try std.testing.expectError(error.InvalidStepSyntax, parseCommand(arena, &.{ "kuri-browser", "render", "https://example.com", "--step", "wat" }));
     try std.testing.expectError(error.MissingSelectorValue, parseCommand(arena, &.{ "kuri-browser", "render", "https://example.com", "--selector" }));
     try std.testing.expectError(error.MissingEvalValue, parseCommand(arena, &.{ "kuri-browser", "render", "https://example.com", "--eval" }));
     try std.testing.expectError(error.MissingHarPathValue, parseCommand(arena, &.{ "kuri-browser", "render", "https://example.com", "--har" }));

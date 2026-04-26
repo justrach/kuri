@@ -18,7 +18,7 @@ pub const RenderOptions = struct {
     js: js_runtime.Options = .{},
 };
 
-const Submission = struct {
+pub const Submission = struct {
     method: std.http.Method,
     url: []const u8,
     body: ?[]const u8 = null,
@@ -87,10 +87,31 @@ pub fn extractForms(allocator: std.mem.Allocator, document: *const dom.Document,
     return try forms.toOwnedSlice(allocator);
 }
 
+pub fn extractForm(allocator: std.mem.Allocator, document: *const dom.Document, form_id: dom.NodeId, page_url: []const u8) !model.Form {
+    return .{
+        .method = try extractFormMethod(allocator, document, form_id),
+        .action = try extractFormAction(allocator, document, form_id, page_url),
+        .enctype = try allocator.dupe(u8, document.getAttribute(form_id, "enctype") orelse "application/x-www-form-urlencoded"),
+        .id = try allocator.dupe(u8, document.getAttribute(form_id, "id") orelse ""),
+        .class_name = try allocator.dupe(u8, document.getAttribute(form_id, "class") orelse ""),
+        .fields = try extractFormFields(allocator, document, form_id),
+    };
+}
+
 pub fn extractResources(allocator: std.mem.Allocator, document: *const dom.Document, page_url: []const u8) ![]model.Resource {
     var resources: std.ArrayList(model.Resource) = .empty;
     try collectResources(allocator, document, document.root(), page_url, &resources);
     return try resources.toOwnedSlice(allocator);
+}
+
+pub fn pageFromFetchResult(
+    allocator: std.mem.Allocator,
+    session: *fetch.Session,
+    result: fetch.FetchResult,
+    pipeline: []const u8,
+    js_options: js_runtime.Options,
+) !model.Page {
+    return pageFromFetchResultWithPipeline(allocator, session, result, pipeline, js_options);
 }
 
 fn pageFromFetchResultWithPipeline(
@@ -183,7 +204,7 @@ fn extractFormFields(allocator: std.mem.Allocator, document: *const dom.Document
     return try fields.toOwnedSlice(allocator);
 }
 
-fn buildFormSubmission(allocator: std.mem.Allocator, form: model.Form, overrides: []const model.FieldInput) !Submission {
+pub fn buildFormSubmission(allocator: std.mem.Allocator, form: model.Form, overrides: []const model.FieldInput) !Submission {
     const method = try parseFormMethod(form.method);
     if (method == .POST and !std.ascii.eqlIgnoreCase(form.enctype, "application/x-www-form-urlencoded")) {
         return error.UnsupportedFormEncoding;
@@ -516,7 +537,7 @@ fn selectedOptionText(allocator: std.mem.Allocator, document: *const dom.Documen
     return null;
 }
 
-fn resolveUrl(allocator: std.mem.Allocator, base_url: []const u8, raw_url: []const u8) ![]const u8 {
+pub fn resolveUrl(allocator: std.mem.Allocator, base_url: []const u8, raw_url: []const u8) ![]const u8 {
     if (std.mem.startsWith(u8, raw_url, "http://") or std.mem.startsWith(u8, raw_url, "https://")) {
         return allocator.dupe(u8, raw_url);
     }

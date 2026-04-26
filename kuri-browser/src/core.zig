@@ -41,7 +41,7 @@ pub const BrowserRuntime = struct {
             .transport = "stateful fetcher with redirects, cookies, subresource loading, and curl fallback",
             .dom = "parsed HTML tree with basic selector queries",
             .js = "QuickJS evaluation with DOM shims for inline and external scripts",
-            .automation_surface = "DOM queries, resource inspection, JS eval, and basic form submission",
+            .automation_surface = "DOM queries, snapshots, JS eval, and basic ref-driven click/type flows",
             .fallback_strategy = "native_static -> native_js_later -> external_browser",
         };
     }

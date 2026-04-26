@@ -3,6 +3,7 @@ const core = @import("core.zig");
 const dom = @import("dom.zig");
 const model = @import("model.zig");
 const render = @import("render.zig");
+const snapshot = @import("snapshot.zig");
 
 pub fn usageText() []const u8 {
     return
@@ -16,17 +17,22 @@ pub fn usageText() []const u8 {
         \\  kuri-browser --version
         \\  kuri-browser status
         \\  kuri-browser roadmap
-        \\  kuri-browser render <url> [--dump summary|html|text|links|forms|resources|js] [--selector <css>] [--js] [--eval <expr>] [--har <file>]
-        \\  kuri-browser submit <url> [--form-index <n>] [--field name=value ...] [--dump summary|html|text|links|forms|resources|js] [--selector <css>] [--js] [--eval <expr>] [--har <file>]
+        \\  kuri-browser parity [--kuri-base <url>] [--offline]
+        \\  kuri-browser render <url> [--step click:eN|type:eN=value ...] [--dump summary|html|text|links|forms|resources|js|snapshot] [--selector <css>] [--js] [--eval <expr>] [--har <file>]
+        \\  kuri-browser submit <url> [--form-index <n>] [--field name=value ...] [--dump summary|html|text|links|forms|resources|js|snapshot] [--selector <css>] [--js] [--eval <expr>] [--har <file>]
         \\
         \\EXAMPLES
         \\  zig build run -- --help
         \\  zig build run -- status
         \\  zig build run -- roadmap
+        \\  zig build run -- parity --kuri-base http://127.0.0.1:8080
+        \\  zig build run -- parity --offline
         \\  zig build run -- render https://news.ycombinator.com
         \\  zig build run -- render https://example.com --dump html
         \\  zig build run -- render https://example.com --har example.har
         \\  zig build run -- render https://news.ycombinator.com --js --eval "document.querySelectorAll('a').length" --dump js
+        \\  zig build run -- render https://news.ycombinator.com --dump snapshot
+        \\  zig build run -- render https://example.com --step click:e0 --dump summary
         \\  zig build run -- render https://quotes.toscrape.com/login --dump forms
         \\  zig build run -- render https://www.wikipedia.org/ --dump resources --har wiki.har
         \\  zig build run -- submit https://quotes.toscrape.com/login --field username=admin --field password=admin --js --dump text --har login.har
@@ -97,6 +103,7 @@ pub fn renderPageWithFormat(allocator: std.mem.Allocator, page: model.Page, form
         .forms => renderFormsText(allocator, page.forms),
         .resources => renderResourcesText(allocator, page.resources),
         .js => renderJsText(allocator, page.js),
+        .snapshot => renderSnapshotText(allocator, page),
     };
 }
 
@@ -215,6 +222,7 @@ fn renderSelectorView(allocator: std.mem.Allocator, page: model.Page, format: mo
         .forms => std.fmt.allocPrint(allocator, "Selector-scoped form rendering is not supported for: {s}\n", .{selector}),
         .resources => std.fmt.allocPrint(allocator, "Selector-scoped resource rendering is not supported for: {s}\n", .{selector}),
         .js => std.fmt.allocPrint(allocator, "Selector-scoped JS rendering is not supported for: {s}\n", .{selector}),
+        .snapshot => std.fmt.allocPrint(allocator, "Selector-scoped snapshot rendering is not supported for: {s}\n", .{selector}),
     };
 }
 
@@ -363,6 +371,12 @@ fn renderJsText(allocator: std.mem.Allocator, js: model.JsExecution) ![]const u8
     return try out.toOwnedSlice(allocator);
 }
 
+fn renderSnapshotText(allocator: std.mem.Allocator, page: model.Page) ![]const u8 {
+    const nodes = try snapshot.buildInteractiveSnapshot(allocator, &page.dom, page.dom.root());
+    defer snapshot.freeSnapshot(allocator, nodes);
+    return snapshot.formatCompact(allocator, nodes);
+}
+
 fn loadedResourceCount(resources: []const model.Resource) usize {
     var count: usize = 0;
     for (resources) |resource| {
@@ -377,9 +391,11 @@ fn previewText(text: []const u8, max_len: usize) []const u8 {
 }
 
 test "usage mentions render command" {
+    try std.testing.expect(std.mem.indexOf(u8, usageText(), "parity") != null);
     try std.testing.expect(std.mem.indexOf(u8, usageText(), "render <url>") != null);
     try std.testing.expect(std.mem.indexOf(u8, usageText(), "submit <url>") != null);
-    try std.testing.expect(std.mem.indexOf(u8, usageText(), "--dump summary|html|text|links|forms|resources|js") != null);
+    try std.testing.expect(std.mem.indexOf(u8, usageText(), "--dump summary|html|text|links|forms|resources|js|snapshot") != null);
+    try std.testing.expect(std.mem.indexOf(u8, usageText(), "--step click:eN|type:eN=value") != null);
     try std.testing.expect(std.mem.indexOf(u8, usageText(), "--selector <css>") != null);
     try std.testing.expect(std.mem.indexOf(u8, usageText(), "--js") != null);
     try std.testing.expect(std.mem.indexOf(u8, usageText(), "--eval <expr>") != null);

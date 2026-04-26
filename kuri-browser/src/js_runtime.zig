@@ -1103,17 +1103,104 @@ const browser_bridge_js =
     \\  XMLHttpRequest.LOADING = 3;
     \\  XMLHttpRequest.DONE = 4;
     \\
+    \\  var __kuriTimerNextId = 1;
+    \\  var __kuriTimers = Object.create(null);
+    \\
+    \\  function __kuriClearTimer(id) {
+    \\    if (!Object.prototype.hasOwnProperty.call(__kuriTimers, id)) return;
+    \\    __kuriTimers[id].cancelled = true;
+    \\    delete __kuriTimers[id];
+    \\  }
+    \\
+    \\  function __kuriScheduleTimer(callback, args, useAnimationFrame) {
+    \\    var id = __kuriTimerNextId++;
+    \\    var fn = callback;
+    \\    if (typeof fn !== 'function') {
+    \\      var source = String(callback || '');
+    \\      fn = function() {
+    \\        return globalThis.eval(source);
+    \\      };
+    \\    }
+    \\    var state = { cancelled: false };
+    \\    __kuriTimers[id] = state;
+    \\    Promise.resolve().then(function() {
+    \\      if (state.cancelled) return;
+    \\      try {
+    \\        if (useAnimationFrame) {
+    \\          fn.apply(globalThis, [Date.now()].concat(args));
+    \\        } else {
+    \\          fn.apply(globalThis, args);
+    \\        }
+    \\      } finally {
+    \\        delete __kuriTimers[id];
+    \\      }
+    \\    });
+    \\    return id;
+    \\  }
+    \\
+    \\  function queueMicrotask(callback) {
+    \\    Promise.resolve().then(callback);
+    \\  }
+    \\
+    \\  function setTimeout(callback, delay) {
+    \\    var args = Array.prototype.slice.call(arguments, 2);
+    \\    return __kuriScheduleTimer(callback, args, false);
+    \\  }
+    \\
+    \\  function clearTimeout(id) {
+    \\    __kuriClearTimer(id);
+    \\  }
+    \\
+    \\  function setInterval(callback, delay) {
+    \\    var args = Array.prototype.slice.call(arguments, 2);
+    \\    return __kuriScheduleTimer(callback, args, false);
+    \\  }
+    \\
+    \\  function clearInterval(id) {
+    \\    __kuriClearTimer(id);
+    \\  }
+    \\
+    \\  function requestAnimationFrame(callback) {
+    \\    return __kuriScheduleTimer(callback, [], true);
+    \\  }
+    \\
+    \\  function cancelAnimationFrame(id) {
+    \\    __kuriClearTimer(id);
+    \\  }
+    \\
+    \\  if (!globalThis.performance) {
+    \\    globalThis.performance = {
+    \\      now: function() { return Date.now(); }
+    \\    };
+    \\  } else if (typeof globalThis.performance.now !== 'function') {
+    \\    globalThis.performance.now = function() { return Date.now(); };
+    \\  }
+    \\
     \\  globalThis.Headers = globalThis.Headers || Headers;
     \\  globalThis.Request = globalThis.Request || Request;
     \\  globalThis.Response = globalThis.Response || Response;
     \\  globalThis.fetch = fetch;
     \\  globalThis.XMLHttpRequest = XMLHttpRequest;
+    \\  globalThis.queueMicrotask = queueMicrotask;
+    \\  globalThis.setTimeout = setTimeout;
+    \\  globalThis.clearTimeout = clearTimeout;
+    \\  globalThis.setInterval = setInterval;
+    \\  globalThis.clearInterval = clearInterval;
+    \\  globalThis.requestAnimationFrame = requestAnimationFrame;
+    \\  globalThis.cancelAnimationFrame = cancelAnimationFrame;
     \\  if (globalThis.window) {
     \\    globalThis.window.Headers = globalThis.Headers;
     \\    globalThis.window.Request = globalThis.Request;
     \\    globalThis.window.Response = globalThis.Response;
     \\    globalThis.window.fetch = fetch;
     \\    globalThis.window.XMLHttpRequest = XMLHttpRequest;
+    \\    globalThis.window.queueMicrotask = queueMicrotask;
+    \\    globalThis.window.setTimeout = setTimeout;
+    \\    globalThis.window.clearTimeout = clearTimeout;
+    \\    globalThis.window.setInterval = setInterval;
+    \\    globalThis.window.clearInterval = clearInterval;
+    \\    globalThis.window.requestAnimationFrame = requestAnimationFrame;
+    \\    globalThis.window.cancelAnimationFrame = cancelAnimationFrame;
     \\  }
     \\
     \\  if (globalThis.document) {
@@ -1206,5 +1293,46 @@ test "wrapEvalExpression lifts statement bodies" {
 test "bridge shim installs fetch and xhr names" {
     try std.testing.expect(std.mem.indexOf(u8, browser_bridge_js, "globalThis.fetch = fetch;") != null);
     try std.testing.expect(std.mem.indexOf(u8, browser_bridge_js, "globalThis.XMLHttpRequest = XMLHttpRequest;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, browser_bridge_js, "globalThis.setTimeout = setTimeout;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, browser_bridge_js, "globalThis.requestAnimationFrame = requestAnimationFrame;") != null);
     try std.testing.expect(std.mem.indexOf(u8, browser_bridge_js, "document, 'cookie'") != null);
+}
+
+test "evaluatePage drains timer and microtask shims" {
+    var arena_impl = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_impl.deinit();
+    const arena = arena_impl.allocator();
+
+    var session = fetch.Session.init(arena, "kuri-browser-test");
+    defer session.deinit();
+
+    const html =
+        "<html><head><title>start</title></head><body>" ++
+        "<script>" ++
+        "window.__timeout = 0;" ++
+        "window.__micro = 0;" ++
+        "window.__raf = 0;" ++
+        "setTimeout(function() { window.__timeout = 1; document.title = 'timeout'; }, 0);" ++
+        "queueMicrotask(function() { window.__micro = 1; });" ++
+        "requestAnimationFrame(function() { window.__raf = 1; });" ++
+        "</script>" ++
+        "</body></html>";
+    var document = try dom.Document.parse(arena, html);
+    defer document.deinit();
+
+    const result = try evaluatePage(
+        arena,
+        &session,
+        &document,
+        html,
+        "https://example.com",
+        &[_]model.Resource{},
+        .{
+            .enabled = true,
+            .eval_expression = "[window.__timeout, window.__micro, window.__raf, document.title].join('|')",
+        },
+    );
+
+    try std.testing.expectEqualStrings("1|1|1|timeout", result.eval_result);
+    try std.testing.expectEqualStrings("timeout", result.document_title);
 }

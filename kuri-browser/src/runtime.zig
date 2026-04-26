@@ -1,4 +1,5 @@
 const std = @import("std");
+const agent = @import("agent.zig");
 const core = @import("core.zig");
 const js_runtime = @import("js_runtime.zig");
 const render = @import("render.zig");
@@ -66,11 +67,19 @@ pub const CommandOutput = struct {
 pub fn renderUrlOutput(
     allocator: std.mem.Allocator,
     url: []const u8,
+    steps: []const model.AgentStep,
     format: model.DumpFormat,
     selector: ?[]const u8,
     capture_har: bool,
     js_options: js_runtime.Options,
 ) !CommandOutput {
+    if (steps.len > 0) {
+        const artifacts = try agent.runUrlActions(allocator, url, steps, capture_har, js_options);
+        return .{
+            .text = try shell.renderPageWithFormat(allocator, artifacts.page, format, selector),
+            .har_json = artifacts.har_json,
+        };
+    }
     if (!capture_har) {
         return .{ .text = try renderUrlTextWithOptions(allocator, url, format, selector, js_options) };
     }

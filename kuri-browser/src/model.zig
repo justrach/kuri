@@ -56,6 +56,14 @@ pub const FieldInput = struct {
     value: []const u8,
 };
 
+pub const AgentStep = union(enum) {
+    click: []const u8,
+    type: struct {
+        ref: []const u8,
+        value: []const u8,
+    },
+};
+
 pub const Form = struct {
     method: []const u8,
     action: []const u8,
@@ -73,6 +81,7 @@ pub const DumpFormat = enum {
     forms,
     resources,
     js,
+    snapshot,
 
     pub fn parse(value: []const u8) ?DumpFormat {
         if (std.mem.eql(u8, value, "summary")) return .summary;
@@ -82,6 +91,7 @@ pub const DumpFormat = enum {
         if (std.mem.eql(u8, value, "forms")) return .forms;
         if (std.mem.eql(u8, value, "resources")) return .resources;
         if (std.mem.eql(u8, value, "js")) return .js;
+        if (std.mem.eql(u8, value, "snapshot")) return .snapshot;
         return null;
     }
 
@@ -94,6 +104,7 @@ pub const DumpFormat = enum {
             .forms => "forms",
             .resources => "resources",
             .js => "js",
+            .snapshot => "snapshot",
         };
     }
 };
@@ -131,9 +142,11 @@ test "dump formats parse and label" {
     try std.testing.expectEqual(DumpFormat.forms, DumpFormat.parse("forms").?);
     try std.testing.expectEqual(DumpFormat.resources, DumpFormat.parse("resources").?);
     try std.testing.expectEqual(DumpFormat.js, DumpFormat.parse("js").?);
+    try std.testing.expectEqual(DumpFormat.snapshot, DumpFormat.parse("snapshot").?);
     try std.testing.expectEqual(@as(?DumpFormat, null), DumpFormat.parse("wat"));
     try std.testing.expectEqualStrings("links", DumpFormat.links.label());
     try std.testing.expectEqualStrings("forms", DumpFormat.forms.label());
     try std.testing.expectEqualStrings("resources", DumpFormat.resources.label());
     try std.testing.expectEqualStrings("js", DumpFormat.js.label());
+    try std.testing.expectEqualStrings("snapshot", DumpFormat.snapshot.label());
 }
