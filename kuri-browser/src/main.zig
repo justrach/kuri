@@ -1,5 +1,6 @@
 const std = @import("std");
 const bench = @import("bench.zig");
+const cdp_server = @import("cdp_server.zig");
 const model = @import("model.zig");
 const parity = @import("parity.zig");
 const runtime = @import("runtime.zig");
@@ -13,6 +14,7 @@ const CommandTag = enum {
     status,
     roadmap,
     bench,
+    serve_cdp,
     parity,
     render,
     submit,
@@ -24,6 +26,7 @@ const Command = union(CommandTag) {
     status,
     roadmap,
     bench: BenchCommand,
+    serve_cdp: ServeCdpCommand,
     parity: ParityCommand,
     render: RenderCommand,
     submit: SubmitCommand,
@@ -37,6 +40,11 @@ const ParityCommand = struct {
 const BenchCommand = struct {
     kuri_base: []const u8 = "http://127.0.0.1:8080",
     run_live: bool = true,
+};
+
+const ServeCdpCommand = struct {
+    host: []const u8 = "127.0.0.1",
+    port: u16 = 9333,
 };
 
 const RenderCommand = struct {
@@ -153,6 +161,21 @@ pub fn main(init: std.process.Init.Minimal) !void {
             std.debug.print("{s}", .{shell.usageText()});
             std.process.exit(1);
         },
+        error.MissingHostValue => {
+            std.debug.print("error: --host requires a value\n", .{});
+            std.debug.print("{s}", .{shell.usageText()});
+            std.process.exit(1);
+        },
+        error.MissingPortValue => {
+            std.debug.print("error: --port requires a value\n", .{});
+            std.debug.print("{s}", .{shell.usageText()});
+            std.process.exit(1);
+        },
+        error.InvalidPort => {
+            std.debug.print("error: invalid port\n", .{});
+            std.debug.print("{s}", .{shell.usageText()});
+            std.process.exit(1);
+        },
         else => return err,
     };
 
@@ -173,6 +196,12 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 .run_live = bench_cmd.run_live,
             });
             std.debug.print("{s}", .{text});
+        },
+        .serve_cdp => |serve_cmd| {
+            try cdp_server.serve(gpa_impl.allocator(), .{
+                .host = serve_cmd.host,
+                .port = serve_cmd.port,
+            });
         },
         .parity => |parity_cmd| {
             const text = try parity.reportText(arena, .{
@@ -232,6 +261,9 @@ fn parseCommand(allocator: std.mem.Allocator, args: []const []const u8) !Command
     if (std.mem.eql(u8, args[1], "bench")) {
         return .{ .bench = try parseBenchCommand(args[2..]) };
     }
+    if (std.mem.eql(u8, args[1], "serve-cdp")) {
+        return .{ .serve_cdp = try parseServeCdpCommand(args[2..]) };
+    }
     if (std.mem.eql(u8, args[1], "parity")) {
         return .{ .parity = try parseParityCommand(args[2..]) };
     }
@@ -259,6 +291,29 @@ fn parseBenchCommand(args: []const []const u8) !BenchCommand {
         if (std.mem.eql(u8, arg, "--offline")) {
             cmd.run_live = false;
             i += 1;
+            continue;
+        }
+        return error.UnknownCommand;
+    }
+    return cmd;
+}
+
+fn parseServeCdpCommand(args: []const []const u8) !ServeCdpCommand {
+    var cmd: ServeCdpCommand = .{};
+    var i: usize = 0;
+    while (i < args.len) {
+        const arg = args[i];
+        if (std.mem.eql(u8, arg, "--host")) {
+            if (i + 1 >= args.len) return error.MissingHostValue;
+            cmd.host = args[i + 1];
+            i += 2;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--port")) {
+            if (i + 1 >= args.len) return error.MissingPortValue;
+            cmd.port = std.fmt.parseInt(u16, args[i + 1], 10) catch return error.InvalidPort;
+            if (cmd.port == 0) return error.InvalidPort;
+            i += 2;
             continue;
         }
         return error.UnknownCommand;
@@ -485,11 +540,16 @@ test "parseCommand handles standard flags" {
     try std.testing.expectEqual(CommandTag.status, std.meta.activeTag(try parseCommand(arena, &.{ "kuri-browser", "status" })));
     try std.testing.expectEqual(CommandTag.roadmap, std.meta.activeTag(try parseCommand(arena, &.{ "kuri-browser", "roadmap" })));
     try std.testing.expectEqual(CommandTag.bench, std.meta.activeTag(try parseCommand(arena, &.{ "kuri-browser", "bench" })));
+    try std.testing.expectEqual(CommandTag.serve_cdp, std.meta.activeTag(try parseCommand(arena, &.{ "kuri-browser", "serve-cdp" })));
     try std.testing.expectEqual(CommandTag.parity, std.meta.activeTag(try parseCommand(arena, &.{ "kuri-browser", "parity" })));
 
     const bench_cmd = try parseCommand(arena, &.{ "kuri-browser", "bench", "--kuri-base", "http://127.0.0.1:9999", "--offline" });
     try std.testing.expectEqualStrings("http://127.0.0.1:9999", bench_cmd.bench.kuri_base);
     try std.testing.expect(!bench_cmd.bench.run_live);
+
+    const serve_cmd = try parseCommand(arena, &.{ "kuri-browser", "serve-cdp", "--host", "127.0.0.1", "--port", "9444" });
+    try std.testing.expectEqualStrings("127.0.0.1", serve_cmd.serve_cdp.host);
+    try std.testing.expectEqual(@as(u16, 9444), serve_cmd.serve_cdp.port);
 
     const parity_cmd = try parseCommand(arena, &.{ "kuri-browser", "parity", "--kuri-base", "http://127.0.0.1:9999", "--offline" });
     try std.testing.expectEqualStrings("http://127.0.0.1:9999", parity_cmd.parity.kuri_base);
@@ -564,6 +624,9 @@ test "parseCommand rejects unknown input" {
     try std.testing.expectError(error.MissingEvalValue, parseCommand(arena, &.{ "kuri-browser", "render", "https://example.com", "--eval" }));
     try std.testing.expectError(error.MissingWaitSelectorValue, parseCommand(arena, &.{ "kuri-browser", "render", "https://example.com", "--wait-selector" }));
     try std.testing.expectError(error.MissingWaitEvalValue, parseCommand(arena, &.{ "kuri-browser", "render", "https://example.com", "--wait-eval" }));
+    try std.testing.expectError(error.MissingHostValue, parseCommand(arena, &.{ "kuri-browser", "serve-cdp", "--host" }));
+    try std.testing.expectError(error.MissingPortValue, parseCommand(arena, &.{ "kuri-browser", "serve-cdp", "--port" }));
+    try std.testing.expectError(error.InvalidPort, parseCommand(arena, &.{ "kuri-browser", "serve-cdp", "--port", "wat" }));
     try std.testing.expectError(error.MissingHarPathValue, parseCommand(arena, &.{ "kuri-browser", "render", "https://example.com", "--har" }));
     try std.testing.expectError(error.MissingFieldValue, parseCommand(arena, &.{ "kuri-browser", "submit", "https://example.com/login", "--field" }));
     try std.testing.expectError(error.InvalidFieldSyntax, parseCommand(arena, &.{ "kuri-browser", "submit", "https://example.com/login", "--field", "=admin" }));

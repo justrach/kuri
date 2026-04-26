@@ -19,6 +19,7 @@ pub fn usageText() []const u8 {
     \\  kuri-browser roadmap
     \\  kuri-browser parity [--kuri-base <url>] [--offline]
     \\  kuri-browser bench [--offline] [--kuri-base <url>]
+    \\  kuri-browser serve-cdp [--host <ip>] [--port <n>]
     \\  kuri-browser render <url> [--step click:eN|type:eN=value ...] [--dump summary|html|text|links|forms|resources|js|snapshot] [--selector <css>] [--js] [--eval <expr>] [--wait-selector <css>] [--wait-eval <expr>] [--har <file>]
     \\  kuri-browser submit <url> [--form-index <n>] [--field name=value ...] [--dump summary|html|text|links|forms|resources|js|snapshot] [--selector <css>] [--js] [--eval <expr>] [--wait-selector <css>] [--wait-eval <expr>] [--har <file>]
     \\
@@ -27,6 +28,7 @@ pub fn usageText() []const u8 {
     \\  zig build run -- status
     \\  zig build run -- roadmap
     \\  zig build run -- bench --offline
+    \\  zig build run -- serve-cdp --port 9333
     \\  zig build run -- parity --kuri-base http://127.0.0.1:8080
     \\  zig build run -- parity --offline
     \\  zig build run -- render https://news.ycombinator.com
@@ -406,6 +408,7 @@ fn previewText(text: []const u8, max_len: usize) []const u8 {
 test "usage mentions render command" {
     try std.testing.expect(std.mem.indexOf(u8, usageText(), "parity") != null);
     try std.testing.expect(std.mem.indexOf(u8, usageText(), "bench") != null);
+    try std.testing.expect(std.mem.indexOf(u8, usageText(), "serve-cdp") != null);
     try std.testing.expect(std.mem.indexOf(u8, usageText(), "render <url>") != null);
     try std.testing.expect(std.mem.indexOf(u8, usageText(), "submit <url>") != null);
     try std.testing.expect(std.mem.indexOf(u8, usageText(), "--dump summary|html|text|links|forms|resources|js|snapshot") != null);

@@ -1,4 +1,5 @@
 const std = @import("std");
+const cdp_server = @import("cdp_server.zig");
 const core = @import("core.zig");
 const dom = @import("dom.zig");
 const fetch = @import("fetch.zig");
@@ -109,7 +110,7 @@ pub fn reportText(allocator: std.mem.Allocator, options: Options) ![]const u8 {
     }
 
     try out.writer.writeAll("\nMissing First\n");
-    try out.writer.writeAll("- CDP/WebSocket protocol router and browser discovery endpoints\n");
+    try out.writer.writeAll("- CDP WebSocket protocol router and browser protocol domains\n");
     try out.writer.writeAll("- Playwright/Puppeteer protocol domains, target/session lifecycle, and locator auto-wait behavior\n");
     try out.writer.writeAll("- Layout, paint, screenshot/PDF, viewport, and input fidelity\n");
     try out.writer.writeAll("- More complete web-platform APIs and event-loop timing semantics\n");
@@ -268,14 +269,36 @@ fn addAutomationSurfaceChecks(allocator: std.mem.Allocator, checks: *std.ArrayLi
         "CLI supports JS eval, snapshots, click refs, and type refs; it is not protocol-compatible.",
         0,
     );
+    const discovery_started = milliTimestamp();
+    const version = cdp_server.versionJson(allocator, .{}) catch |err| {
+        try appendCheck(allocator, checks, .cdp_surface, "CDP HTTP discovery endpoints", 6, .fail, try errDetail(allocator, "discovery JSON failed", err), elapsedSince(discovery_started));
+        return;
+    };
+    const list = cdp_server.listJson(allocator, .{}, "about:blank") catch |err| {
+        try appendCheck(allocator, checks, .cdp_surface, "CDP HTTP discovery endpoints", 6, .fail, try errDetail(allocator, "target JSON failed", err), elapsedSince(discovery_started));
+        return;
+    };
+    const discovery_ok = std.mem.indexOf(u8, version, "\"webSocketDebuggerUrl\"") != null and
+        std.mem.indexOf(u8, version, "KuriBrowser") != null and
+        std.mem.indexOf(u8, list, "\"type\":\"page\"") != null;
     try appendCheck(
         allocator,
         checks,
         .cdp_surface,
-        "DevTools WebSocket and /json discovery",
-        12,
+        "CDP HTTP discovery endpoints",
+        6,
+        passFail(discovery_ok),
+        "serve-cdp exposes /health, /json/version, /json/list, /json/new, and /json/protocol.",
+        elapsedSince(discovery_started),
+    );
+    try appendCheck(
+        allocator,
+        checks,
+        .cdp_surface,
+        "CDP WebSocket protocol router",
+        10,
         .fail,
-        "No CDP WebSocket server, target discovery endpoint, session router, or protocol schema exists yet.",
+        "serve-cdp advertises DevTools URLs, but WebSocket upgrade and JSON-RPC routing are not implemented yet.",
         0,
     );
     try appendCheck(
@@ -298,7 +321,7 @@ fn addPlaywrightChecks(allocator: std.mem.Allocator, checks: *std.ArrayList(Chec
         "browserWSEndpoint connection",
         12,
         .fail,
-        "Playwright/Puppeteer cannot attach because kuri-browser exposes no DevTools WebSocket endpoint.",
+        "Playwright/Puppeteer cannot attach yet because serve-cdp does not implement WebSocket upgrade or CDP JSON-RPC routing.",
         0,
     );
     try appendCheck(

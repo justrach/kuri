@@ -9,11 +9,11 @@ This score is meant to answer a narrower question:
 
 ## Current Score
 
-- Estimated feature parity: **61%**
+- Estimated feature parity: **63%**
 - Automated validation coverage: **63%** of the target surface
 - Live-validated parity: **depends on the current Kuri run**
 
-The `61%` figure is weighted, not a raw item count.
+The `63%` figure is weighted, not a raw item count.
 
 - `yes` = full weight
 - `partial` = half weight
@@ -41,13 +41,23 @@ zig build run -- bench --offline
 
 That bench covers JS/runtime completeness, wait semantics, CDP surface area, Playwright/Puppeteer compatibility, and whether this can replace headless Chrome yet.
 
+Run the minimal CDP discovery server:
+
+```sh
+zig build run -- serve-cdp --port 9333
+curl http://127.0.0.1:9333/json/version
+curl http://127.0.0.1:9333/json/list
+```
+
+This currently exposes Chrome-style HTTP discovery only. The advertised `webSocketDebuggerUrl` is a placeholder until the WebSocket protocol router lands.
+
 Current bench result from this branch:
 
-- Offline deterministic readiness: **47%**, not ready
-- Offline + live probes readiness: **53%**, not ready
+- Offline deterministic readiness: **49%**, not ready
+- Offline + live probes readiness: **55%**, not ready
 - JS/runtime completeness: **100%**
 - Wait semantics: **100%**
-- CDP automation surface: **30%**
+- CDP automation surface: **41%**
 - Playwright/Puppeteer compatibility: **11%**
 - Replace-headless-Chrome readiness: **32-38%** depending on live probes
 
@@ -81,7 +91,7 @@ The live suite currently probes:
 | Wait semantics + async lifecycle | 8 | partial | bench | `--wait-selector` and `--wait-eval` cover bounded JS polling; load-state parity is still missing |
 | Agent snapshots, refs, and actions | 8 | partial | live | Snapshot refs plus basic click/type flows exist; broader action parity is still missing |
 | Visual rendering + screenshots | 6 | no | none | No layout/paint/screenshot path |
-| CDP / automation compatibility | 4 | no | none | No CDP-compatible server |
+| CDP / automation compatibility | 4 | partial | bench | `serve-cdp` exposes Chrome-style HTTP discovery; WebSocket protocol routing is missing |
 
 ## Missing First
 

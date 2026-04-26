@@ -156,8 +156,8 @@ const features = [_]Feature{
     .{
         .name = "CDP / automation compatibility",
         .weight = 4,
-        .status = .no,
-        .gap = "No CDP-compatible server surface yet.",
+        .status = .partial,
+        .gap = "`serve-cdp` exposes Chrome-style HTTP discovery, but WebSocket protocol routing is still missing.",
     },
 };
 
@@ -412,7 +412,7 @@ pub fn reportText(allocator: std.mem.Allocator, options: Options) ![]const u8 {
     try out.writer.writeAll("- Broader ref-driven actions plus keyboard/select/checkbox parity\n");
     try out.writer.writeAll("- Screenshot/rendered output\n");
     try out.writer.writeAll("- Broader SPA/browser API coverage beyond the current representative sites\n");
-    try out.writer.writeAll("- Any CDP-compatibility layer\n");
+    try out.writer.writeAll("- CDP WebSocket protocol routing beyond HTTP discovery\n");
 
     return allocator.dupe(u8, out.written());
 }
