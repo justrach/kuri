@@ -1,5 +1,8 @@
 const std = @import("std");
 
+pub const desktop_user_agent =
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36";
+
 pub const Options = struct {
     kuri_base: []const u8 = "http://127.0.0.1:8080",
     out_path: ?[]const u8 = null,
@@ -8,6 +11,10 @@ pub const Options = struct {
     full: bool = false,
     compress: bool = false,
     close_tab: bool = true,
+    wait_ms: u64 = 0,
+    wait_selector: ?[]const u8 = null,
+    wait_timeout_ms: u64 = 10_000,
+    user_agent: ?[]const u8 = null,
 };
 
 pub const Result = struct {
@@ -34,11 +41,12 @@ const QueryParam = struct {
 };
 
 pub fn captureUrl(allocator: std.mem.Allocator, url: []const u8, options: Options) !Result {
+    const initial_url = if (options.user_agent != null) "about:blank" else url;
     const tab_url = try buildUrl(allocator, options.kuri_base, "/tab/new", &.{
-        .{ .key = "url", .value = url },
+        .{ .key = "url", .value = initial_url },
         .{ .key = "wait", .value = "true" },
     });
-    const tab_body = try httpGet(allocator, tab_url);
+    const tab_body = httpGet(allocator, tab_url) catch return error.OpenTabFailed;
     const tab_id = try jsonStringField(allocator, tab_body, "tab_id");
     errdefer allocator.free(tab_id);
 
@@ -46,13 +54,25 @@ pub fn captureUrl(allocator: std.mem.Allocator, url: []const u8, options: Option
         errdefer closeTab(allocator, options.kuri_base, tab_id);
     }
 
+    if (options.user_agent) |user_agent| {
+        setTabUserAgent(allocator, options.kuri_base, tab_id, user_agent) catch return error.SetUserAgentFailed;
+        navigateTab(allocator, options.kuri_base, tab_id, url) catch return error.NavigateTabFailed;
+        waitTabReady(allocator, options.kuri_base, tab_id, options.wait_timeout_ms) catch return error.WaitTabReadyFailed;
+    }
+    if (options.wait_selector) |selector| {
+        waitTabSelector(allocator, options.kuri_base, tab_id, selector, options.wait_timeout_ms) catch return error.WaitSelectorFailed;
+    }
+    if (options.wait_ms > 0) {
+        sleepMs(options.wait_ms);
+    }
+
     var original_bytes: ?usize = null;
     const capture = if (options.compress) blk: {
-        const png = try captureTabScreenshot(allocator, options.kuri_base, tab_id, "png", 80, options.full);
-        const jpeg = try captureTabScreenshot(allocator, options.kuri_base, tab_id, "jpeg", options.quality, options.full);
+        const png = captureTabScreenshotWithRetry(allocator, options.kuri_base, tab_id, "png", 80, options.full) catch return error.CaptureScreenshotFailed;
+        const jpeg = captureTabScreenshotWithRetry(allocator, options.kuri_base, tab_id, "jpeg", options.quality, options.full) catch return error.CaptureScreenshotFailed;
         original_bytes = png.bytes.len;
         break :blk if (jpeg.bytes.len < png.bytes.len) jpeg else png;
-    } else try captureTabScreenshot(allocator, options.kuri_base, tab_id, options.format, options.quality, options.full);
+    } else captureTabScreenshotWithRetry(allocator, options.kuri_base, tab_id, options.format, options.quality, options.full) catch return error.CaptureScreenshotFailed;
 
     const path = try outputPathForCapture(allocator, options.out_path, capture.format, options.compress);
     const io = std.Io.Threaded.global_single_threaded.io();
@@ -74,6 +94,25 @@ pub fn captureUrl(allocator: std.mem.Allocator, url: []const u8, options: Option
         .saved_bytes = saved,
         .saved_percent = if (original_bytes) |original| percentSigned(saved, original) else 0,
     };
+}
+
+fn captureTabScreenshotWithRetry(
+    allocator: std.mem.Allocator,
+    kuri_base: []const u8,
+    tab_id: []const u8,
+    format: []const u8,
+    quality: u8,
+    full: bool,
+) !Capture {
+    var attempt: u8 = 0;
+    while (attempt < 3) : (attempt += 1) {
+        return captureTabScreenshot(allocator, kuri_base, tab_id, format, quality, full) catch |err| {
+            if (attempt == 2) return err;
+            sleepMs(5_000);
+            continue;
+        };
+    }
+    return error.CaptureScreenshotFailed;
 }
 
 fn captureTabScreenshot(
@@ -102,6 +141,57 @@ fn captureTabScreenshot(
         .quality = quality,
         .bytes = decoded,
     };
+}
+
+fn setTabUserAgent(allocator: std.mem.Allocator, kuri_base: []const u8, tab_id: []const u8, user_agent: []const u8) !void {
+    const set_url = try buildUrl(allocator, kuri_base, "/set/useragent", &.{
+        .{ .key = "tab_id", .value = tab_id },
+        .{ .key = "ua", .value = user_agent },
+    });
+    _ = try httpGet(allocator, set_url);
+}
+
+fn navigateTab(allocator: std.mem.Allocator, kuri_base: []const u8, tab_id: []const u8, url: []const u8) !void {
+    const navigate_url = try buildUrl(allocator, kuri_base, "/navigate", &.{
+        .{ .key = "tab_id", .value = tab_id },
+        .{ .key = "url", .value = url },
+        .{ .key = "bot_detect", .value = "false" },
+    });
+    _ = try httpGet(allocator, navigate_url);
+}
+
+fn waitTabReady(allocator: std.mem.Allocator, kuri_base: []const u8, tab_id: []const u8, timeout_ms: u64) !void {
+    const timeout_text = try std.fmt.allocPrint(allocator, "{d}", .{timeout_ms});
+    const wait_url = try buildUrl(allocator, kuri_base, "/wait", &.{
+        .{ .key = "tab_id", .value = tab_id },
+        .{ .key = "timeout", .value = timeout_text },
+    });
+    _ = try httpGet(allocator, wait_url);
+}
+
+fn waitTabSelector(
+    allocator: std.mem.Allocator,
+    kuri_base: []const u8,
+    tab_id: []const u8,
+    selector: []const u8,
+    timeout_ms: u64,
+) !void {
+    const timeout_text = try std.fmt.allocPrint(allocator, "{d}", .{timeout_ms});
+    const wait_url = try buildUrl(allocator, kuri_base, "/wait", &.{
+        .{ .key = "tab_id", .value = tab_id },
+        .{ .key = "selector", .value = selector },
+        .{ .key = "timeout", .value = timeout_text },
+    });
+    _ = try httpGet(allocator, wait_url);
+}
+
+fn sleepMs(ms: u64) void {
+    const ns = ms * std.time.ns_per_ms;
+    const ts = std.c.timespec{
+        .sec = @intCast(ns / std.time.ns_per_s),
+        .nsec = @intCast(ns % std.time.ns_per_s),
+    };
+    _ = std.c.nanosleep(&ts, null);
 }
 
 fn closeTab(allocator: std.mem.Allocator, kuri_base: []const u8, tab_id: []const u8) void {

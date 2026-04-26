@@ -139,6 +139,7 @@ Then run:
 cd kuri-browser
 zig build run -- screenshot https://example.com --out example.png --kuri-base http://127.0.0.1:8080
 zig build run -- screenshot https://example.com --out example.jpg --compress --kuri-base http://127.0.0.1:8080
+zig build run -- screenshot https://www.singaporeair.com/en_UK/sg/home#/book/bookflight --out sia.png --kuri-base http://127.0.0.1:8080 --desktop-user-agent --wait-ms 15000
 ```
 
 `--compress` is token-oriented. It captures a PNG baseline, captures a JPEG candidate, keeps whichever file is smaller, fixes the output extension to match the selected format, and prints:
@@ -149,6 +150,8 @@ zig build run -- screenshot https://example.com --out example.jpg --compress --k
 - `saved-percent`: rounded percentage saved versus PNG
 
 Current local measurement on `https://example.com`: PNG `20,523` bytes to JPEG quality 50 `18,183` bytes, saving `2,340` bytes or `11%`.
+
+For heavier JS sites, `--wait-ms`, `--wait-selector`, `--wait-timeout-ms`, `--user-agent`, and `--desktop-user-agent` make the CDP fallback wait for late-rendered app shells before capture. This is still Chrome/CDP fallback behavior, not native Kuri layout.
 
 ### Readiness Checks
 

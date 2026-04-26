@@ -61,6 +61,10 @@ const ScreenshotCommand = struct {
     quality: u8 = 80,
     full: bool = false,
     compress: bool = false,
+    wait_ms: u64 = 0,
+    wait_selector: ?[]const u8 = null,
+    wait_timeout_ms: u64 = 10_000,
+    user_agent: ?[]const u8 = null,
 };
 
 const PaintCommand = struct {
@@ -185,6 +189,26 @@ pub fn main(init: std.process.Init.Minimal) !void {
             std.debug.print("{s}", .{shell.usageText()});
             std.process.exit(1);
         },
+        error.MissingWaitMsValue => {
+            std.debug.print("error: --wait-ms requires milliseconds\n", .{});
+            std.debug.print("{s}", .{shell.usageText()});
+            std.process.exit(1);
+        },
+        error.MissingWaitTimeoutMsValue => {
+            std.debug.print("error: --wait-timeout-ms requires milliseconds\n", .{});
+            std.debug.print("{s}", .{shell.usageText()});
+            std.process.exit(1);
+        },
+        error.InvalidWaitMs => {
+            std.debug.print("error: invalid wait milliseconds\n", .{});
+            std.debug.print("{s}", .{shell.usageText()});
+            std.process.exit(1);
+        },
+        error.MissingUserAgentValue => {
+            std.debug.print("error: --user-agent requires a value\n", .{});
+            std.debug.print("{s}", .{shell.usageText()});
+            std.process.exit(1);
+        },
         error.MissingHostValue => {
             std.debug.print("error: --host requires a value\n", .{});
             std.debug.print("{s}", .{shell.usageText()});
@@ -272,6 +296,10 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 .quality = screenshot_cmd.quality,
                 .full = screenshot_cmd.full,
                 .compress = screenshot_cmd.compress,
+                .wait_ms = screenshot_cmd.wait_ms,
+                .wait_selector = screenshot_cmd.wait_selector,
+                .wait_timeout_ms = screenshot_cmd.wait_timeout_ms,
+                .user_agent = screenshot_cmd.user_agent,
             }) catch |err| {
                 std.debug.print("error: screenshot fallback failed: {s}\n", .{@errorName(err)});
                 std.debug.print("hint: start the main Kuri CDP server, then retry with --kuri-base http://127.0.0.1:8080\n", .{});
@@ -475,6 +503,35 @@ fn parseScreenshotCommand(args: []const []const u8) !ScreenshotCommand {
         if (std.mem.eql(u8, arg, "--compress")) {
             cmd.compress = true;
             if (!quality_explicit) cmd.quality = 50;
+            i += 1;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--wait-ms")) {
+            if (i + 1 >= args.len) return error.MissingWaitMsValue;
+            cmd.wait_ms = std.fmt.parseInt(u64, args[i + 1], 10) catch return error.InvalidWaitMs;
+            i += 2;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--wait-selector")) {
+            if (i + 1 >= args.len) return error.MissingWaitSelectorValue;
+            cmd.wait_selector = args[i + 1];
+            i += 2;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--wait-timeout-ms")) {
+            if (i + 1 >= args.len) return error.MissingWaitTimeoutMsValue;
+            cmd.wait_timeout_ms = std.fmt.parseInt(u64, args[i + 1], 10) catch return error.InvalidWaitMs;
+            i += 2;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--user-agent")) {
+            if (i + 1 >= args.len) return error.MissingUserAgentValue;
+            cmd.user_agent = args[i + 1];
+            i += 2;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--desktop-user-agent")) {
+            cmd.user_agent = screenshot.desktop_user_agent;
             i += 1;
             continue;
         }
@@ -769,7 +826,7 @@ test "parseCommand handles standard flags" {
     try std.testing.expectEqualStrings("http://127.0.0.1:9999", parity_cmd.parity.kuri_base);
     try std.testing.expect(!parity_cmd.parity.run_live);
 
-    const screenshot_cmd = try parseCommand(arena, &.{ "kuri-browser", "screenshot", "https://example.com", "--out", "shot.png", "--kuri-base", "http://127.0.0.1:9999", "--format", "jpeg", "--quality", "90", "--full", "--compress" });
+    const screenshot_cmd = try parseCommand(arena, &.{ "kuri-browser", "screenshot", "https://example.com", "--out", "shot.png", "--kuri-base", "http://127.0.0.1:9999", "--format", "jpeg", "--quality", "90", "--full", "--compress", "--wait-ms", "15000", "--wait-selector", ".hero", "--wait-timeout-ms", "20000", "--desktop-user-agent" });
     try std.testing.expectEqualStrings("https://example.com", screenshot_cmd.screenshot.url);
     try std.testing.expectEqualStrings("shot.png", screenshot_cmd.screenshot.out_path.?);
     try std.testing.expectEqualStrings("http://127.0.0.1:9999", screenshot_cmd.screenshot.kuri_base);
@@ -777,6 +834,10 @@ test "parseCommand handles standard flags" {
     try std.testing.expectEqual(@as(u8, 90), screenshot_cmd.screenshot.quality);
     try std.testing.expect(screenshot_cmd.screenshot.full);
     try std.testing.expect(screenshot_cmd.screenshot.compress);
+    try std.testing.expectEqual(@as(u64, 15_000), screenshot_cmd.screenshot.wait_ms);
+    try std.testing.expectEqualStrings(".hero", screenshot_cmd.screenshot.wait_selector.?);
+    try std.testing.expectEqual(@as(u64, 20_000), screenshot_cmd.screenshot.wait_timeout_ms);
+    try std.testing.expectEqualStrings(screenshot.desktop_user_agent, screenshot_cmd.screenshot.user_agent.?);
 
     const paint_cmd = try parseCommand(arena, &.{ "kuri-browser", "paint", "https://example.com", "--out", "example.svg" });
     try std.testing.expectEqualStrings("https://example.com", paint_cmd.paint.url);
@@ -866,6 +927,9 @@ test "parseCommand rejects unknown input" {
     try std.testing.expectError(error.MissingOutValue, parseCommand(arena, &.{ "kuri-browser", "paint", "https://example.com", "--out" }));
     try std.testing.expectError(error.MissingWaitSelectorValue, parseCommand(arena, &.{ "kuri-browser", "paint", "https://example.com", "--wait-selector" }));
     try std.testing.expectError(error.MissingWaitEvalValue, parseCommand(arena, &.{ "kuri-browser", "paint", "https://example.com", "--wait-eval" }));
+    try std.testing.expectError(error.MissingWaitMsValue, parseCommand(arena, &.{ "kuri-browser", "screenshot", "https://example.com", "--wait-ms" }));
+    try std.testing.expectError(error.InvalidWaitMs, parseCommand(arena, &.{ "kuri-browser", "screenshot", "https://example.com", "--wait-ms", "nope" }));
+    try std.testing.expectError(error.MissingUserAgentValue, parseCommand(arena, &.{ "kuri-browser", "screenshot", "https://example.com", "--user-agent" }));
     try std.testing.expectError(error.MissingKuriBaseValue, parseCommand(arena, &.{ "kuri-browser", "screenshot", "https://example.com", "--kuri-base" }));
     try std.testing.expectError(error.InvalidScreenshotFormat, parseCommand(arena, &.{ "kuri-browser", "screenshot", "https://example.com", "--format", "webp" }));
     try std.testing.expectError(error.InvalidQuality, parseCommand(arena, &.{ "kuri-browser", "screenshot", "https://example.com", "--quality", "101" }));

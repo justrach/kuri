@@ -35,6 +35,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--out-dir")
     parser.add_argument("--keep-artifacts", action="store_true")
     parser.add_argument("--direct-svg", action="store_true", help="rasterize the SVG file directly instead of through a no-margin HTML wrapper")
+    parser.add_argument("--chrome-virtual-time-ms", type=int, default=0, help="pass --virtual-time-budget to Chrome screenshots for heavy JS pages")
+    parser.add_argument("--chrome-user-agent", help="override Chrome's user agent for the reference and SVG-raster screenshots")
     parser.add_argument("--paint-js", action="store_true", help="enable kuri-browser JS execution before native paint")
     parser.add_argument("--paint-wait-selector", help="wait for a selector in the native paint JS runtime")
     parser.add_argument("--paint-wait-eval", help="wait for a JS expression in the native paint JS runtime")
@@ -72,7 +74,17 @@ def run_checked(cmd: list[str], timeout: float, expected_file: Path | None = Non
     return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
 
 
-def chrome_screenshot(chrome: Path, url: str, png_path: Path, profile_dir: Path, width: int, height: int, timeout: float) -> None:
+def chrome_screenshot(
+    chrome: Path,
+    url: str,
+    png_path: Path,
+    profile_dir: Path,
+    width: int,
+    height: int,
+    timeout: float,
+    virtual_time_ms: int = 0,
+    user_agent: str | None = None,
+) -> None:
     cmd = [
         str(chrome),
         "--headless=new",
@@ -85,8 +97,12 @@ def chrome_screenshot(chrome: Path, url: str, png_path: Path, profile_dir: Path,
         f"--user-data-dir={profile_dir}",
         f"--window-size={width},{height}",
         f"--screenshot={png_path}",
-        url,
     ]
+    if virtual_time_ms > 0:
+        cmd.append(f"--virtual-time-budget={virtual_time_ms}")
+    if user_agent:
+        cmd.append(f"--user-agent={user_agent}")
+    cmd.append(url)
     run_checked(cmd, timeout, png_path)
     if not png_path.exists() or png_path.stat().st_size == 0:
         raise SystemExit(f"Chrome did not write screenshot: {png_path}")
@@ -254,14 +270,34 @@ def main() -> int:
         if args.paint_wait_eval:
             paint_cmd.extend(["--wait-eval", args.paint_wait_eval])
         run_checked(paint_cmd, args.timeout, native_svg)
-        chrome_screenshot(chrome, args.url, actual_png, out_dir / "chrome-actual-profile", width, height, args.timeout)
+        chrome_screenshot(
+            chrome,
+            args.url,
+            actual_png,
+            out_dir / "chrome-actual-profile",
+            width,
+            height,
+            args.timeout,
+            args.chrome_virtual_time_ms,
+            args.chrome_user_agent,
+        )
         native_url = native_svg.resolve().as_uri()
         raster_mode = "direct-svg"
         if not args.direct_svg:
             write_svg_wrapper(native_svg, native_wrapper, width, height)
             native_url = native_wrapper.resolve().as_uri()
             raster_mode = "html-wrapper"
-        chrome_screenshot(chrome, native_url, native_png, out_dir / "chrome-native-profile", width, height, args.timeout)
+        chrome_screenshot(
+            chrome,
+            native_url,
+            native_png,
+            out_dir / "chrome-native-profile",
+            width,
+            height,
+            args.timeout,
+            args.chrome_virtual_time_ms,
+            args.chrome_user_agent,
+        )
         metrics = compare_pngs(actual_png, native_png)
 
         print("kuri-browser native paint pixel parity")
@@ -269,6 +305,8 @@ def main() -> int:
         print(f"viewport: {width}x{height}")
         print(f"native-raster-mode: {raster_mode}")
         print(f"native-js: {'yes' if args.paint_js or args.paint_wait_selector or args.paint_wait_eval else 'no'}")
+        print(f"chrome-virtual-time-ms: {args.chrome_virtual_time_ms}")
+        print(f"chrome-user-agent: {'custom' if args.chrome_user_agent else 'default'}")
         print(f"artifacts: {out_dir}")
         print(f"actual-png-bytes: {actual_png.stat().st_size}")
         print(f"native-svg-bytes: {native_svg.stat().st_size}")
