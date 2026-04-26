@@ -89,7 +89,6 @@ pub fn evaluatePage(
         if (!eval_ok and report.error_message.len == 0) {
             report.error_message = try allocator.dupe(u8, "JsEvalFailed");
         }
-        report.eval_result = engine.evalAlloc(allocator, "globalThis.__kuri_eval_result || ''") orelse "";
     }
 
     return report;
@@ -170,7 +169,7 @@ fn maybeExecuteScript(
         defer allocator.free(script_url);
 
         if (scriptBodyForUrl(resources, script_url)) |script_body| {
-            try executeScriptSource(allocator, engine, script_body, report);
+            try executeScriptSource(allocator, engine, script_body, script_url, .global_eval, report);
             return;
         }
 
@@ -187,7 +186,7 @@ fn maybeExecuteScript(
         const trimmed = std.mem.trim(u8, result.body, " \t\r\n");
         if (trimmed.len == 0) return;
 
-        try executeScriptSource(allocator, engine, trimmed, report);
+        try executeScriptSource(allocator, engine, trimmed, script_url, .global_eval, report);
         return;
     }
 
@@ -198,22 +197,154 @@ fn maybeExecuteScript(
     if (trimmed.len == 0) return;
 
     report.inline_scripts += 1;
-    try executeScriptSource(allocator, engine, trimmed, report);
+    try executeScriptSource(allocator, engine, trimmed, "<inline>", .global_eval, report);
 }
+
+const ScriptExecMode = enum {
+    direct,
+    global_eval,
+};
 
 fn executeScriptSource(
     allocator: std.mem.Allocator,
     engine: *jsengine.JsEngine,
     source: []const u8,
+    label: []const u8,
+    mode: ScriptExecMode,
     report: *model.JsExecution,
 ) !void {
-    if (engine.exec(source)) {
+    const ok = switch (mode) {
+        .direct => engine.exec(source),
+        .global_eval => try executeViaGlobalEval(engine, source),
+    };
+
+    if (ok) {
         report.executed_scripts += 1;
     } else {
         report.failed_scripts += 1;
+        const had_error = report.error_message.len != 0;
         try rememberCurrentException(allocator, engine.ctx, report);
+        if (!had_error and report.error_message.len > 0) {
+            const combined = try annotateScriptError(allocator, label, report.error_message, source);
+            allocator.free(report.error_message);
+            report.error_message = combined;
+        }
     }
     try drainPendingJobs(allocator, engine, report);
+}
+
+const EvalLocation = struct {
+    line: usize,
+    column: usize,
+};
+
+fn annotateScriptError(
+    allocator: std.mem.Allocator,
+    label: []const u8,
+    message: []const u8,
+    source: []const u8,
+) ![]u8 {
+    const preview_len = @min(source.len, 80);
+    const preview = std.mem.trim(u8, source[0..preview_len], " \t\r\n");
+    const suffix_start = if (source.len > 80) source.len - 80 else 0;
+    const suffix = try sanitizeBytesForMessage(allocator, std.mem.trim(u8, source[suffix_start..], " \t\r\n"));
+    defer allocator.free(suffix);
+    if (extractEvalLocation(message)) |location| {
+        const excerpt = try sourceLineExcerpt(allocator, source, location.line);
+        defer allocator.free(excerpt);
+        return std.fmt.allocPrint(
+            allocator,
+            "{s}: {s} [line {d}:{d}={s}] [prefix={s}] [suffix={s}]",
+            .{ label, message, location.line, location.column, excerpt, preview, suffix },
+        );
+    }
+    return std.fmt.allocPrint(
+        allocator,
+        "{s}: {s} [prefix={s}] [suffix={s}]",
+        .{ label, message, preview, suffix },
+    );
+}
+
+fn extractEvalLocation(message: []const u8) ?EvalLocation {
+    var i: usize = 0;
+    while (i < message.len) : (i += 1) {
+        if (message[i] != ':') continue;
+        var j = i + 1;
+        var line: usize = 0;
+        var saw_line_digit = false;
+        while (j < message.len and std.ascii.isDigit(message[j])) : (j += 1) {
+            saw_line_digit = true;
+            line = (line * 10) + (message[j] - '0');
+        }
+        if (!saw_line_digit or j >= message.len or message[j] != ':') continue;
+        j += 1;
+        var column: usize = 0;
+        var saw_col_digit = false;
+        while (j < message.len and std.ascii.isDigit(message[j])) : (j += 1) {
+            saw_col_digit = true;
+            column = (column * 10) + (message[j] - '0');
+        }
+        if (saw_col_digit) return .{ .line = line, .column = column };
+    }
+    return null;
+}
+
+fn sourceLineExcerpt(allocator: std.mem.Allocator, source: []const u8, target_line: usize) ![]u8 {
+    if (target_line == 0) return allocator.dupe(u8, "");
+
+    var current_line: usize = 1;
+    var start: usize = 0;
+    var index: usize = 0;
+    while (index < source.len and current_line < target_line) : (index += 1) {
+        if (source[index] == '\n') {
+            current_line += 1;
+            start = index + 1;
+        }
+    }
+
+    var end = start;
+    while (end < source.len and source[end] != '\n' and source[end] != '\r') : (end += 1) {}
+    return sanitizeBytesForMessage(allocator, source[start..end]);
+}
+
+fn sanitizeBytesForMessage(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    const hex = "0123456789ABCDEF";
+    for (input) |byte| {
+        switch (byte) {
+            '\t' => try out.appendSlice(allocator, "\\t"),
+            else => {
+                if (byte >= 0x20 and byte < 0x7f) {
+                    try out.append(allocator, byte);
+                } else {
+                    try out.appendSlice(allocator, "\\x");
+                    try out.append(allocator, hex[byte >> 4]);
+                    try out.append(allocator, hex[byte & 0x0f]);
+                }
+            },
+        }
+    }
+    return try out.toOwnedSlice(allocator);
+}
+
+fn executeViaGlobalEval(engine: *jsengine.JsEngine, source: []const u8) !bool {
+    const result = try callViaGlobalEval(engine, source);
+    defer result.deinit(engine.ctx);
+    return !result.isException();
+}
+
+fn callViaGlobalEval(engine: *jsengine.JsEngine, source: []const u8) !quickjs.Value {
+    const global = engine.ctx.getGlobalObject();
+    defer global.deinit(engine.ctx);
+
+    const eval_fn = global.getPropertyStr(engine.ctx, "eval");
+    defer eval_fn.deinit(engine.ctx);
+    if (eval_fn.isException()) return quickjs.Value.exception;
+
+    const script = quickjs.Value.initStringLen(engine.ctx, source);
+    defer script.deinit(engine.ctx);
+
+    return eval_fn.call(engine.ctx, quickjs.Value.undefined, &.{script.dup(engine.ctx)});
 }
 
 fn evaluateExpression(
@@ -222,47 +353,128 @@ fn evaluateExpression(
     expression: []const u8,
     report: *model.JsExecution,
 ) !bool {
+    clearPendingException(engine.ctx);
+
     const wrapped = try wrapEvalExpression(allocator, expression);
     defer allocator.free(wrapped);
 
-    const script = try std.fmt.allocPrint(
-        allocator,
-        \\globalThis.__kuri_eval_result = "";
-        \\globalThis.__kuri_eval_error = "";
-        \\Promise.resolve((function() {{
-        \\  try {{
-        \\    return {s};
-        \\  }} catch (e) {{
-        \\    globalThis.__kuri_eval_error = String((e && e.stack) || (e && e.message) || e);
-        \\    return "";
-        \\  }}
-        \\}})()).then(function(value) {{
-        \\  globalThis.__kuri_eval_result = value == null ? "" : String(value);
-        \\}}, function(err) {{
-        \\  globalThis.__kuri_eval_error = String((err && err.stack) || (err && err.message) || err);
-        \\}});
-    , .{wrapped});
-    defer allocator.free(script);
+    const result = engine.ctx.eval(wrapped, "<kuri-eval>", .{});
+    defer result.deinit(engine.ctx);
+    if (result.isException()) {
+        clearPendingException(engine.ctx);
 
-    if (!engine.exec(script)) {
+        const fallback = try callViaGlobalEval(engine, wrapped);
+        defer fallback.deinit(engine.ctx);
+        if (!fallback.isException()) {
+            if (!isThenable(engine.ctx, fallback)) {
+                report.eval_result = try valueToOwnedString(allocator, engine.ctx, fallback);
+                return true;
+            }
+        }
+        try rememberCurrentException(allocator, engine.ctx, report);
+        return false;
+    }
+
+    if (!isThenable(engine.ctx, result)) {
+        report.eval_result = try valueToOwnedString(allocator, engine.ctx, result);
+        return true;
+    }
+
+    if (!engine.exec(eval_helper_js)) {
+        try rememberCurrentException(allocator, engine.ctx, report);
+        return false;
+    }
+
+    const global = engine.ctx.getGlobalObject();
+    defer global.deinit(engine.ctx);
+
+    const runner = global.getPropertyStr(engine.ctx, "__kuri_run_eval");
+    defer runner.deinit(engine.ctx);
+    if (runner.isException()) {
+        try rememberCurrentException(allocator, engine.ctx, report);
+        return false;
+    }
+
+    const script = quickjs.Value.initStringLen(engine.ctx, wrapped);
+    defer script.deinit(engine.ctx);
+
+    const async_result = runner.call(engine.ctx, quickjs.Value.undefined, &.{script.dup(engine.ctx)});
+    defer async_result.deinit(engine.ctx);
+    if (async_result.isException()) {
         try rememberCurrentException(allocator, engine.ctx, report);
         return false;
     }
 
     try drainPendingJobs(allocator, engine, report);
 
-    const eval_error = engine.evalAlloc(allocator, "globalThis.__kuri_eval_error || ''") orelse return true;
-    if (eval_error.len == 0) {
-        allocator.free(eval_error);
-        return true;
+    const eval_error = try globalStringPropertyAlloc(allocator, engine.ctx, "__kuri_eval_error");
+    if (eval_error.len != 0) {
+        if (report.error_message.len == 0) report.error_message = eval_error else allocator.free(eval_error);
+        return false;
     }
-    if (report.error_message.len == 0) {
-        report.error_message = eval_error;
-    } else {
-        allocator.free(eval_error);
-    }
-    return false;
+    allocator.free(eval_error);
+
+    report.eval_result = try globalStringPropertyAlloc(allocator, engine.ctx, "__kuri_eval_result");
+    return true;
 }
+
+fn clearPendingException(ctx: *quickjs.Context) void {
+    if (!ctx.hasException()) return;
+    const exc = ctx.getException();
+    defer exc.deinit(ctx);
+}
+
+fn globalStringPropertyAlloc(
+    allocator: std.mem.Allocator,
+    ctx: *quickjs.Context,
+    name: [:0]const u8,
+) ![]const u8 {
+    const global = ctx.getGlobalObject();
+    defer global.deinit(ctx);
+
+    const value = global.getPropertyStr(ctx, name);
+    defer value.deinit(ctx);
+    if (value.isException()) return allocator.dupe(u8, "");
+
+    const cstr = value.toCString(ctx) orelse return allocator.dupe(u8, "");
+    defer ctx.freeCString(cstr);
+    return allocator.dupe(u8, std.mem.span(cstr));
+}
+
+fn valueToOwnedString(
+    allocator: std.mem.Allocator,
+    ctx: *quickjs.Context,
+    value: quickjs.Value,
+) ![]const u8 {
+    const cstr = value.toCString(ctx) orelse return allocator.dupe(u8, "");
+    defer ctx.freeCString(cstr);
+    return allocator.dupe(u8, std.mem.span(cstr));
+}
+
+fn isThenable(ctx: *quickjs.Context, value: quickjs.Value) bool {
+    if (!value.isObject()) return false;
+    const then = value.getPropertyStr(ctx, "then");
+    defer then.deinit(ctx);
+    if (then.isException()) return false;
+    return then.isFunction(ctx);
+}
+
+const eval_helper_js =
+    \\globalThis.__kuri_run_eval = function(source) {
+    \\  globalThis.__kuri_eval_result = "";
+    \\  globalThis.__kuri_eval_error = "";
+    \\  try {
+    \\    var value = globalThis.eval(String(source));
+    \\    Promise.resolve(value).then(function(resolved) {
+    \\      globalThis.__kuri_eval_result = resolved == null ? "" : String(resolved);
+    \\    }, function(err) {
+    \\      globalThis.__kuri_eval_error = String((err && err.stack) || (err && err.message) || err);
+    \\    });
+    \\  } catch (e) {
+    \\    globalThis.__kuri_eval_error = String((e && e.stack) || (e && e.message) || e);
+    \\  }
+    \\};
+;
 
 fn wrapEvalExpression(allocator: std.mem.Allocator, expression: []const u8) ![]const u8 {
     const trimmed = std.mem.trim(u8, expression, " \t\r\n");
@@ -313,8 +525,16 @@ fn drainPendingJobs(
 }
 
 fn inlineScriptSource(allocator: std.mem.Allocator, document: *const dom.Document, node_id: dom.NodeId) ![]const u8 {
-    var out: std.ArrayList(u8) = .empty;
     const node = document.getNode(node_id);
+    if (node.kind == .element and std.ascii.eqlIgnoreCase(node.name, "script")) {
+        const outer = document.html[node.source_start..node.source_end];
+        const open_end = std.mem.indexOfScalar(u8, outer, '>') orelse return allocator.dupe(u8, "");
+        const close_start = std.mem.lastIndexOf(u8, outer, "</") orelse outer.len;
+        if (close_start <= open_end) return allocator.dupe(u8, "");
+        return allocator.dupe(u8, outer[open_end + 1 .. close_start]);
+    }
+
+    var out: std.ArrayList(u8) = .empty;
     var child = node.first_child;
     while (child) |child_id| : (child = document.getNode(child_id).next_sibling) {
         const child_node = document.getNode(child_id);
@@ -499,24 +719,35 @@ fn rememberCurrentException(
     const exc = ctx.getException();
     defer exc.deinit(ctx);
 
+    var message_span: ?[]const u8 = null;
     const stack = exc.getPropertyStr(ctx, "stack");
     defer stack.deinit(ctx);
-    if (!stack.isException()) {
-        if (stack.toCString(ctx)) |value| {
-            defer ctx.freeCString(value);
-            try rememberError(allocator, report, std.mem.span(value));
-            return;
-        }
-    }
-
     const message = exc.getPropertyStr(ctx, "message");
     defer message.deinit(ctx);
     if (!message.isException()) {
         if (message.toCString(ctx)) |value| {
             defer ctx.freeCString(value);
-            try rememberError(allocator, report, std.mem.span(value));
+            message_span = std.mem.span(value);
+        }
+    }
+
+    if (!stack.isException()) {
+        if (stack.toCString(ctx)) |value| {
+            defer ctx.freeCString(value);
+            const stack_span = std.mem.span(value);
+            if (message_span) |msg| {
+                const combined = try std.fmt.allocPrint(allocator, "{s}\n{s}", .{ msg, stack_span });
+                if (report.error_message.len == 0) report.error_message = combined else allocator.free(combined);
+                return;
+            }
+            try rememberError(allocator, report, stack_span);
             return;
         }
+    }
+
+    if (message_span) |msg| {
+        try rememberError(allocator, report, msg);
+        return;
     }
 
     if (exc.toCString(ctx)) |value| {
@@ -924,6 +1155,40 @@ test "inlineScriptSource preserves raw script content" {
     const source = try inlineScriptSource(arena, &document, script_id);
     try std.testing.expect(std.mem.indexOf(u8, source, "const x = 1;") != null);
     try std.testing.expect(std.mem.indexOf(u8, source, "const y = 2;") != null);
+}
+
+test "inlineScriptSource supports quotes-style HTML strings" {
+    var arena_impl = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_impl.deinit();
+    const arena = arena_impl.allocator();
+
+    const html =
+        "<script>" ++
+        "var data = [{ tags: ['life'], author: { name: 'Author' }, text: 'Quote' }];" ++
+        "for (var i in data) {" ++
+        "  var d = data[i];" ++
+        "  var tags = $.map(d['tags'], function(t) { return \"<a class='tag'>\" + t + \"</a>\"; }).join(\" \");" ++
+        "  document.write(\"<div class='quote'><span class='text'>\" + d['text'] + \"</span><span>by <small class='author'>\" + d['author']['name'] + \"</small></span><div class='tags'>Tags: \" + tags + \"</div></div>\");" ++
+        "}" ++
+        "</script>";
+    const document = try dom.Document.parse(arena, html);
+    const script_id = (try document.querySelector(arena, "script")).?;
+    const source = try inlineScriptSource(arena, &document, script_id);
+
+    var engine = try jsengine.JsEngine.init();
+    defer engine.deinit();
+
+    try std.testing.expect(engine.exec(
+        \\globalThis.$ = {
+        \\  map: function(items, fn) {
+        \\    var out = [];
+        \\    for (var i = 0; i < items.length; i += 1) out.push(fn(items[i], i));
+        \\    return out;
+        \\  }
+        \\};
+        \\globalThis.document = { write: function() {} };
+    ));
+    try std.testing.expect(engine.exec(source));
 }
 
 test "wrapEvalExpression trims trailing semicolons" {
