@@ -744,6 +744,7 @@ pub fn paintToSvg(
     try buf.writer.print(
         "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{d}\" height=\"{d}\" viewBox=\"0 0 {d} {d}\">",
         .{ result.viewport.width, result.viewport.height, result.viewport.width, result.viewport.height });
+    try buf.writer.writeAll("<desc>kuri-engine: CSS-aware layout + paint, not full CSS layout</desc>");
     try buf.writer.writeAll("<rect width=\"100%\" height=\"100%\" fill=\"white\"/>");
     try paintBox(allocator, &buf, result.root);
     try buf.writer.writeAll("</svg>");
