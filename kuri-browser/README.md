@@ -84,11 +84,22 @@ zig build run -- paint https://example.com --out example.svg
 
 This does not call Kuri/CDP or Chrome. It is useful for fast, token-light visual context from page title, text, links, form controls, images, and code blocks. It is not CSS layout, raster screenshot, PDF, canvas, video, or pixel-equivalent rendering.
 
-Current cache-busted local measurement on `https://example.com`:
+Check pixel parity against real Chrome before treating this as a renderer replacement:
 
-- Native SVG paint: `1,131ms`, `1,557` bytes
-- Kuri/CDP screenshot fallback: `1,662ms`, `18,183` bytes JPEG
-- Native SVG paint was about `32%` faster and about `91%` smaller, but the outputs are not equivalent
+```sh
+zig build
+python3 tools/paint_parity.py https://example.com --keep-artifacts
+```
+
+Current local Chrome comparison on `https://example.com` at `1280x720`:
+
+- Chrome actual screenshot: `16,577` bytes
+- Native SVG paint artifact: `1,531` bytes
+- Native SVG rasterized through Chrome: `30,028` bytes
+- Exact matching pixels: `0.00%`
+- Mean absolute RGB delta: `19.53/255`
+
+So this is not 1:1 yet. Earlier timing comparisons only show that the text/DOM SVG path can be faster to produce than CDP screenshots on tiny pages; they do not prove render correctness.
 
 ### Screenshot Fallback
 
@@ -130,7 +141,7 @@ zig build run -- bench --offline
 zig build run -- bench --kuri-base http://127.0.0.1:8080
 ```
 
-The current live bench is useful for tracking progress, but the answer is still "not ready to replace headless Chrome" until broader CDP browser domains, full native layout/raster paint, and Playwright/Puppeteer lifecycle support exist.
+The current live bench is useful for tracking progress, but the answer is still "not ready to replace headless Chrome" until broader CDP browser domains, full native layout/raster paint, pixel-parity checks, and Playwright/Puppeteer lifecycle support exist.
 
 ## Target Direction
 

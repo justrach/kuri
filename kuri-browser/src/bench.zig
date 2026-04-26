@@ -414,8 +414,8 @@ fn addChromeReplacementChecks(allocator: std.mem.Allocator, checks: *std.ArrayLi
         .chrome_replacement,
         "native SVG paint renderer",
         6,
-        passFail(std.mem.indexOf(u8, paint_svg, "<svg") != null and std.mem.indexOf(u8, paint_svg, "Bench") != null),
-        try std.fmt.allocPrint(allocator, "backend=kuri-native-svg-paint; bytes={d}; scope=text/DOM SVG paint, no CSS layout", .{paint_svg.len}),
+        if (std.mem.indexOf(u8, paint_svg, "<svg") != null and std.mem.indexOf(u8, paint_svg, "Bench") != null) .partial else .fail,
+        try std.fmt.allocPrint(allocator, "backend=kuri-native-svg-paint; bytes={d}; scope=text/DOM SVG paint, not 1:1 pixel rendering; validate with tools/paint_parity.py", .{paint_svg.len}),
         elapsedSince(paint_started),
     );
     try appendCheck(
@@ -600,8 +600,8 @@ fn checkLiveNativePaint(allocator: std.mem.Allocator) !Check {
         .area = .chrome_replacement,
         .name = "live native SVG paint probe",
         .weight = 4,
-        .status = passFail(ok),
-        .detail = try std.fmt.allocPrint(allocator, "cache=cache-busted-url; backend={s}; bytes={d}; nodes={d}; text-bytes={d}; path={s}", .{
+        .status = if (ok) .partial else .fail,
+        .detail = try std.fmt.allocPrint(allocator, "cache=cache-busted-url; backend={s}; bytes={d}; nodes={d}; text-bytes={d}; path={s}; not 1:1 pixel rendering", .{
             result.backend,
             result.bytes,
             result.node_count,
