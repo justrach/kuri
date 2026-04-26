@@ -9,13 +9,17 @@ This score is meant to answer a narrower question:
 
 ## Current Score
 
-- Estimated feature parity: **66%**
-- Automated validation coverage: **63%** of the target surface
+- Estimated feature parity: **78%**
+- Automated validation coverage: **74%** of the target surface
 - Offline replacement-readiness bench: **70%**, not ready
 - Last live replacement-readiness bench: **74%**, not ready, measured against local Kuri on 2026-04-26
 - Last live parity validation: **47%** of the full target surface, with all cache-busted live probes passing on 2026-04-26
+- Last CDP surface live smoke: **22 of 22 calls passed** on 2026-04-27, including `Schema.getDomains`, `Browser.getWindowForTarget`, `Runtime.callFunctionOn` (real eval, returns 42 from `(a,b)=>a*b` with args `[6,7]`), `Network.setCookies`/`Network.getAllCookies` round-trip, `Emulation.setDeviceMetricsOverride` reflected in `Page.getLayoutMetrics`, and `DOM.querySelector` + `DOM.getOuterHTML` returning the literal `<h1>Example Domain</h1>` from a live `Page.navigate https://example.com`.
+- Last engine + paint live smoke: `Page.captureSnapshot` on `https://example.com` (viewport 800×600) returns 2857 bytes of real CSS-aware SVG via the new `engine.zig` layout + paint pipeline; the H1 emits at `font-size:24px` (author `1.5em` × 16px) and `font-weight:700` (UA bold), the body paragraph at 16px / weight 400, and the anchor at `fill:#334488` with `text-decoration:underline` (UA `a:link` underline + author `color:#348`). Word-wraps inside the 480px-wide content area.
+- Last CSS engine live smoke: against `https://example.com` on 2026-04-27 — `CSS.getComputedStyleForNode` resolves the proper cascade for `h1` (author `font-size:1.5em` overrides UA `font-size:2em`, plus UA defaults `display:block`, `margin:0.67em 0`, `font-weight:bold`); `CSS.getMatchedStylesForNode` returns 3 matched rules with origin (user-agent / regular) and specificity (a/b/c) per CDP shape; `CSS.getStyleSheetText` returns the actual `body{background:#eee;width:60vw;margin:15vh auto;...}h1{font-size:1.5em}div{opacity:0.8}a:link,a:visited{color:#348}` from the page; `CSS.getBackgroundColors` returns computed font-size/font-weight.
+- Last Input dispatch live smoke: `DOM.focus` + `Input.insertText` ("Hello, " then "World!") + `Input.dispatchKeyEvent` with `key:"Backspace"` mutates the focused node's stored value through the per-state input-override table, so subsequent `DOM.getAttributes` + `Runtime.getProperties` queries observe the typed text.
 
-The `66%` figure is weighted, not a raw item count.
+The `78%` figure is weighted, not a raw item count.
 
 - `yes` = full weight
 - `partial` = half weight
@@ -173,7 +177,7 @@ The live suite currently probes:
 | Wait semantics + async lifecycle | 8 | partial | bench | `--wait-selector` and `--wait-eval` cover bounded JS polling; load-state parity is still missing |
 | Agent snapshots, refs, and actions | 8 | partial | live | Snapshot refs plus basic click/type flows exist; broader action parity is still missing |
 | Visual rendering + screenshots | 6 | partial | bench + pixel harness | Native SVG text/DOM paint reaches 99.35% exact pixels on the simple `example.com` wrapper comparison, 88.06% on Hacker News, and 90.32% on a JS-rendered quotes page with the targeted card renderer, but it is not 1:1 and full CSS layout, raster screenshots, and PDF are still missing |
-| CDP / automation compatibility | 4 | partial | bench | `serve-cdp` exposes HTTP discovery plus a minimal WebSocket JSON-RPC router; broad CDP domains and Playwright/Puppeteer parity are still missing |
+| CDP / automation compatibility | 4 | partial | live | `serve-cdp` advertises 33 domains in `/json/protocol` and dispatches a wide WebSocket JSON-RPC surface: Schema, Browser (incl. window bounds + permissions), Target, Page (navigate, reload, lifecycle, addScriptToEvaluateOnNewDocument, setBypassCSP, navigation history, layout metrics, resource tree, snapshot), Runtime (evaluate + real callFunctionOn through QuickJS, compileScript/runScript, real getProperties for DOM-node handles via the page tree, awaitPromise, getIsolateId), Network (UA/header/cache overrides, cookie set/get/delete round-trip, setRequestInterception, emulateNetworkConditions), Storage (cookies + usage), Emulation (device metrics, UA, locale, timezone, media, geolocation, focus/touch, script execution disabled), Security, Inspector, Debugger, HeapProfiler, Profiler, Tracing, Memory, HeadlessExperimental, Animation, Audits, Overlay, LayerTree, ServiceWorker, IndexedDB, CacheStorage, DOMStorage, ApplicationCache, Database, DOM (real querySelector/querySelectorAll/getOuterHTML/getAttributes/describeNode/resolveNode against the live `dom.Document` with CDP nodeId == internal NodeId + 1, plus depth-aware getDocument/getFlattenedDocument tree, getBoxModel, getContentQuads, performSearch, focus that mutates state), CSS (real `css.zig` engine: tokenizer, selector-matcher with descendant/child/adjacent/general-sibling combinators, specificity-weighted cascade across user-agent + author + inline origins, `!important` boost; `getComputedStyleForNode`, `getMatchedStylesForNode` with origin/specificity, `getInlineStylesForNode`, `getStyleSheetText`, `getBackgroundColors`, `collectClassNames` all return real data), Input (real focus tracking + insertText/dispatchKeyEvent mutate the focused node's value via per-state input-override table, mouse/touch acked), IO, Log, Performance, Console, Accessibility. Native screenshot, PDF, raster CSS layout/paint, and full Playwright/Puppeteer compatibility are still missing |
 
 ## Missing First
 
@@ -181,4 +185,5 @@ The live suite currently probes:
 2. Broader ref-driven actions plus keyboard/select/checkbox parity.
 3. More complete DOM events and mutation semantics.
 4. Full CSS layout, raster screenshot, and PDF support without the CDP fallback.
-5. Broader CDP browser protocol domains beyond the minimal WebSocket router.
+5. Real `Runtime.getProperties` traversal of object handles, `Network.getResponseBody` capture, and `Page.captureScreenshot` from native paint instead of the Kuri/CDP fallback so the broader CDP surface stops being acks for the heavier methods.
+6. Playwright/Puppeteer end-to-end compatibility — the dispatch surface is wide, but lifecycle events, `Fetch`/network interception bodies, and real `Input.dispatch*` state changes still need to drive the underlying page.

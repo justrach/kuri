@@ -82,7 +82,6 @@ pub fn build(b: *std.Build) void {
     });
     jsengine_tests.root_module.linkLibrary(quickjs_dep.artifact("quickjs-ng"));
     const run_jsengine_tests = b.addRunArtifact(jsengine_tests);
-
     const test_step = b.step("test", "Run kuri-browser tests");
     test_step.dependOn(&run_main_tests.step);
     test_step.dependOn(&run_runtime_tests.step);
