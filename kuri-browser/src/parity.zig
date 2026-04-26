@@ -150,8 +150,8 @@ const features = [_]Feature{
     .{
         .name = "Visual rendering + screenshots",
         .weight = 6,
-        .status = .no,
-        .gap = "No layout engine, paint model, or screenshot path.",
+        .status = .partial,
+        .gap = "`screenshot` can delegate to the existing Kuri/CDP renderer; native layout/paint/PDF are still missing.",
     },
     .{
         .name = "CDP / automation compatibility",
@@ -410,7 +410,7 @@ pub fn reportText(allocator: std.mem.Allocator, options: Options) ![]const u8 {
     try out.writer.writeAll("\nMissing Next\n");
     try out.writer.writeAll("- Full load-state and auto-wait lifecycle control\n");
     try out.writer.writeAll("- Broader ref-driven actions plus keyboard/select/checkbox parity\n");
-    try out.writer.writeAll("- Screenshot/rendered output\n");
+    try out.writer.writeAll("- Native screenshot/rendered output without the CDP fallback\n");
     try out.writer.writeAll("- Broader SPA/browser API coverage beyond the current representative sites\n");
     try out.writer.writeAll("- CDP WebSocket protocol routing beyond HTTP discovery\n");
 

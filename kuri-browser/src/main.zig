@@ -5,6 +5,7 @@ const model = @import("model.zig");
 const parity = @import("parity.zig");
 const runtime = @import("runtime.zig");
 const shell = @import("shell.zig");
+const screenshot = @import("screenshot.zig");
 
 const version = "0.0.0";
 
@@ -16,6 +17,7 @@ const CommandTag = enum {
     bench,
     serve_cdp,
     parity,
+    screenshot,
     render,
     submit,
 };
@@ -28,6 +30,7 @@ const Command = union(CommandTag) {
     bench: BenchCommand,
     serve_cdp: ServeCdpCommand,
     parity: ParityCommand,
+    screenshot: ScreenshotCommand,
     render: RenderCommand,
     submit: SubmitCommand,
 };
@@ -45,6 +48,16 @@ const BenchCommand = struct {
 const ServeCdpCommand = struct {
     host: []const u8 = "127.0.0.1",
     port: u16 = 9333,
+};
+
+const ScreenshotCommand = struct {
+    url: []const u8,
+    out_path: ?[]const u8 = null,
+    kuri_base: []const u8 = "http://127.0.0.1:8080",
+    format: []const u8 = "png",
+    quality: u8 = 80,
+    full: bool = false,
+    compress: bool = false,
 };
 
 const RenderCommand = struct {
@@ -176,6 +189,36 @@ pub fn main(init: std.process.Init.Minimal) !void {
             std.debug.print("{s}", .{shell.usageText()});
             std.process.exit(1);
         },
+        error.MissingOutValue => {
+            std.debug.print("error: --out requires a file path\n", .{});
+            std.debug.print("{s}", .{shell.usageText()});
+            std.process.exit(1);
+        },
+        error.MissingKuriBaseValue => {
+            std.debug.print("error: --kuri-base requires a URL\n", .{});
+            std.debug.print("{s}", .{shell.usageText()});
+            std.process.exit(1);
+        },
+        error.MissingFormatValue => {
+            std.debug.print("error: --format requires png or jpeg\n", .{});
+            std.debug.print("{s}", .{shell.usageText()});
+            std.process.exit(1);
+        },
+        error.InvalidScreenshotFormat => {
+            std.debug.print("error: invalid screenshot format, expected png or jpeg\n", .{});
+            std.debug.print("{s}", .{shell.usageText()});
+            std.process.exit(1);
+        },
+        error.MissingQualityValue => {
+            std.debug.print("error: --quality requires 1-100\n", .{});
+            std.debug.print("{s}", .{shell.usageText()});
+            std.process.exit(1);
+        },
+        error.InvalidQuality => {
+            std.debug.print("error: invalid quality, expected 1-100\n", .{});
+            std.debug.print("{s}", .{shell.usageText()});
+            std.process.exit(1);
+        },
         else => return err,
     };
 
@@ -209,6 +252,35 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 .run_live = parity_cmd.run_live,
             });
             std.debug.print("{s}", .{text});
+        },
+        .screenshot => |screenshot_cmd| {
+            const result = screenshot.captureUrl(arena, screenshot_cmd.url, .{
+                .kuri_base = screenshot_cmd.kuri_base,
+                .out_path = screenshot_cmd.out_path,
+                .format = screenshot_cmd.format,
+                .quality = screenshot_cmd.quality,
+                .full = screenshot_cmd.full,
+                .compress = screenshot_cmd.compress,
+            }) catch |err| {
+                std.debug.print("error: screenshot fallback failed: {s}\n", .{@errorName(err)});
+                std.debug.print("hint: start the main Kuri CDP server, then retry with --kuri-base http://127.0.0.1:8080\n", .{});
+                std.process.exit(1);
+            };
+            std.debug.print("kuri-browser screenshot\n\nbackend: {s}\npath: {s}\nformat: {s}\nquality: {d}\nbytes: {d}\ntab-id: {s}\n", .{
+                result.backend,
+                result.path,
+                result.format,
+                result.quality,
+                result.bytes,
+                result.tab_id,
+            });
+            if (result.original_bytes) |original| {
+                std.debug.print("original-bytes: {d}\nsaved-bytes: {d}\nsaved-percent: {d}%\n", .{
+                    original,
+                    result.saved_bytes,
+                    result.saved_percent,
+                });
+            }
         },
         .render => |render_cmd| {
             const output = try runtime.renderUrlOutput(arena, render_cmd.url, render_cmd.steps, render_cmd.dump, render_cmd.selector, render_cmd.har_path != null, .{
@@ -267,6 +339,9 @@ fn parseCommand(allocator: std.mem.Allocator, args: []const []const u8) !Command
     if (std.mem.eql(u8, args[1], "parity")) {
         return .{ .parity = try parseParityCommand(args[2..]) };
     }
+    if (std.mem.eql(u8, args[1], "screenshot")) {
+        return .{ .screenshot = try parseScreenshotCommand(args[2..]) };
+    }
     if (std.mem.eql(u8, args[1], "render")) {
         return .{ .render = try parseRenderCommand(allocator, args[2..]) };
     }
@@ -319,6 +394,66 @@ fn parseServeCdpCommand(args: []const []const u8) !ServeCdpCommand {
         return error.UnknownCommand;
     }
     return cmd;
+}
+
+fn parseScreenshotCommand(args: []const []const u8) !ScreenshotCommand {
+    if (args.len == 0) return error.MissingUrl;
+
+    var cmd: ScreenshotCommand = .{ .url = "" };
+    var quality_explicit = false;
+    var i: usize = 0;
+    while (i < args.len) {
+        const arg = args[i];
+        if (std.mem.eql(u8, arg, "--out")) {
+            if (i + 1 >= args.len) return error.MissingOutValue;
+            cmd.out_path = args[i + 1];
+            i += 2;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--kuri-base")) {
+            if (i + 1 >= args.len) return error.MissingKuriBaseValue;
+            cmd.kuri_base = args[i + 1];
+            i += 2;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--format")) {
+            if (i + 1 >= args.len) return error.MissingFormatValue;
+            if (!isScreenshotFormat(args[i + 1])) return error.InvalidScreenshotFormat;
+            cmd.format = args[i + 1];
+            i += 2;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--quality")) {
+            if (i + 1 >= args.len) return error.MissingQualityValue;
+            cmd.quality = std.fmt.parseInt(u8, args[i + 1], 10) catch return error.InvalidQuality;
+            if (cmd.quality == 0 or cmd.quality > 100) return error.InvalidQuality;
+            quality_explicit = true;
+            i += 2;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--full")) {
+            cmd.full = true;
+            i += 1;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--compress")) {
+            cmd.compress = true;
+            if (!quality_explicit) cmd.quality = 50;
+            i += 1;
+            continue;
+        }
+        if (std.mem.startsWith(u8, arg, "--")) return error.UnknownCommand;
+        if (cmd.url.len != 0) return error.UnknownCommand;
+        cmd.url = arg;
+        i += 1;
+    }
+
+    if (cmd.url.len == 0) return error.MissingUrl;
+    return cmd;
+}
+
+fn isScreenshotFormat(value: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(value, "png") or std.ascii.eqlIgnoreCase(value, "jpeg");
 }
 
 fn parseParityCommand(args: []const []const u8) !ParityCommand {
@@ -542,6 +677,7 @@ test "parseCommand handles standard flags" {
     try std.testing.expectEqual(CommandTag.bench, std.meta.activeTag(try parseCommand(arena, &.{ "kuri-browser", "bench" })));
     try std.testing.expectEqual(CommandTag.serve_cdp, std.meta.activeTag(try parseCommand(arena, &.{ "kuri-browser", "serve-cdp" })));
     try std.testing.expectEqual(CommandTag.parity, std.meta.activeTag(try parseCommand(arena, &.{ "kuri-browser", "parity" })));
+    try std.testing.expectEqual(CommandTag.screenshot, std.meta.activeTag(try parseCommand(arena, &.{ "kuri-browser", "screenshot", "https://example.com" })));
 
     const bench_cmd = try parseCommand(arena, &.{ "kuri-browser", "bench", "--kuri-base", "http://127.0.0.1:9999", "--offline" });
     try std.testing.expectEqualStrings("http://127.0.0.1:9999", bench_cmd.bench.kuri_base);
@@ -554,6 +690,15 @@ test "parseCommand handles standard flags" {
     const parity_cmd = try parseCommand(arena, &.{ "kuri-browser", "parity", "--kuri-base", "http://127.0.0.1:9999", "--offline" });
     try std.testing.expectEqualStrings("http://127.0.0.1:9999", parity_cmd.parity.kuri_base);
     try std.testing.expect(!parity_cmd.parity.run_live);
+
+    const screenshot_cmd = try parseCommand(arena, &.{ "kuri-browser", "screenshot", "https://example.com", "--out", "shot.png", "--kuri-base", "http://127.0.0.1:9999", "--format", "jpeg", "--quality", "90", "--full", "--compress" });
+    try std.testing.expectEqualStrings("https://example.com", screenshot_cmd.screenshot.url);
+    try std.testing.expectEqualStrings("shot.png", screenshot_cmd.screenshot.out_path.?);
+    try std.testing.expectEqualStrings("http://127.0.0.1:9999", screenshot_cmd.screenshot.kuri_base);
+    try std.testing.expectEqualStrings("jpeg", screenshot_cmd.screenshot.format);
+    try std.testing.expectEqual(@as(u8, 90), screenshot_cmd.screenshot.quality);
+    try std.testing.expect(screenshot_cmd.screenshot.full);
+    try std.testing.expect(screenshot_cmd.screenshot.compress);
 
     const render_cmd = try parseCommand(arena, &.{ "kuri-browser", "render", "https://example.com" });
     try std.testing.expectEqual(CommandTag.render, std.meta.activeTag(render_cmd));
@@ -627,6 +772,11 @@ test "parseCommand rejects unknown input" {
     try std.testing.expectError(error.MissingHostValue, parseCommand(arena, &.{ "kuri-browser", "serve-cdp", "--host" }));
     try std.testing.expectError(error.MissingPortValue, parseCommand(arena, &.{ "kuri-browser", "serve-cdp", "--port" }));
     try std.testing.expectError(error.InvalidPort, parseCommand(arena, &.{ "kuri-browser", "serve-cdp", "--port", "wat" }));
+    try std.testing.expectError(error.MissingUrl, parseCommand(arena, &.{ "kuri-browser", "screenshot" }));
+    try std.testing.expectError(error.MissingOutValue, parseCommand(arena, &.{ "kuri-browser", "screenshot", "https://example.com", "--out" }));
+    try std.testing.expectError(error.MissingKuriBaseValue, parseCommand(arena, &.{ "kuri-browser", "screenshot", "https://example.com", "--kuri-base" }));
+    try std.testing.expectError(error.InvalidScreenshotFormat, parseCommand(arena, &.{ "kuri-browser", "screenshot", "https://example.com", "--format", "webp" }));
+    try std.testing.expectError(error.InvalidQuality, parseCommand(arena, &.{ "kuri-browser", "screenshot", "https://example.com", "--quality", "101" }));
     try std.testing.expectError(error.MissingHarPathValue, parseCommand(arena, &.{ "kuri-browser", "render", "https://example.com", "--har" }));
     try std.testing.expectError(error.MissingFieldValue, parseCommand(arena, &.{ "kuri-browser", "submit", "https://example.com/login", "--field" }));
     try std.testing.expectError(error.InvalidFieldSyntax, parseCommand(arena, &.{ "kuri-browser", "submit", "https://example.com/login", "--field", "=admin" }));

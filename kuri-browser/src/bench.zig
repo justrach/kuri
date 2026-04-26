@@ -6,6 +6,7 @@ const fetch = @import("fetch.zig");
 const js_runtime = @import("js_runtime.zig");
 const model = @import("model.zig");
 const render = @import("render.zig");
+const screenshot = @import("screenshot.zig");
 const snapshot = @import("snapshot.zig");
 
 pub const Options = struct {
@@ -394,10 +395,20 @@ fn addChromeReplacementChecks(allocator: std.mem.Allocator, checks: *std.ArrayLi
         allocator,
         checks,
         .chrome_replacement,
+        "CDP fallback screenshot renderer",
+        6,
+        .pass,
+        "kuri-browser screenshot delegates to Kuri/CDP, adaptively picks smaller PNG/JPEG output, and reports byte savings.",
+        0,
+    );
+    try appendCheck(
+        allocator,
+        checks,
+        .chrome_replacement,
         "layout, paint, screenshot/PDF",
         14,
         .fail,
-        "No layout tree, CSS cascade/layout fidelity, paint, screenshot, or PDF path exists.",
+        "Native layout/paint/PDF still do not exist; screenshots require the CDP fallback server.",
         0,
     );
     try appendCheck(
@@ -422,6 +433,7 @@ fn addLiveChecks(allocator: std.mem.Allocator, checks: *std.ArrayList(Check), op
     try checks.append(allocator, checkLiveQuotesJs(allocator) catch |err| try skippedCheck(allocator, .js_runtime, "live quotes JS probe", 6, err));
     try checks.append(allocator, checkLiveTodoMvcWait(allocator) catch |err| try skippedCheck(allocator, .wait_semantics, "live TodoMVC wait probe", 6, err));
     try checks.append(allocator, checkLiveHar(allocator) catch |err| try skippedCheck(allocator, .chrome_replacement, "live HAR capture probe", 4, err));
+    try checks.append(allocator, checkLiveScreenshotFallback(allocator, options.kuri_base) catch |err| try skippedCheck(allocator, .chrome_replacement, "live CDP screenshot fallback probe", 6, err));
     try checks.append(allocator, checkKuriCdpHealth(allocator, options.kuri_base) catch |err| try skippedCheck(allocator, .cdp_surface, "live Kuri CDP baseline health", 4, err));
 }
 
@@ -430,6 +442,7 @@ fn appendSkippedLiveChecks(allocator: std.mem.Allocator, checks: *std.ArrayList(
     try appendCheck(allocator, checks, .js_runtime, "live quotes JS probe", 6, .skipped, reason, 0);
     try appendCheck(allocator, checks, .wait_semantics, "live TodoMVC wait probe", 6, .skipped, reason, 0);
     try appendCheck(allocator, checks, .chrome_replacement, "live HAR capture probe", 4, .skipped, reason, 0);
+    try appendCheck(allocator, checks, .chrome_replacement, "live CDP screenshot fallback probe", 6, .skipped, reason, 0);
     try appendCheck(allocator, checks, .cdp_surface, "live Kuri CDP baseline health", 4, .skipped, reason, 0);
 }
 
@@ -505,6 +518,36 @@ fn checkLiveHar(allocator: std.mem.Allocator) !Check {
         .weight = 4,
         .status = passFail(ok),
         .detail = try std.fmt.allocPrint(allocator, "har-bytes={d}; page-status={d}", .{ har_json.len, artifacts.page.status_code }),
+        .duration_ms = elapsedSince(started),
+    };
+}
+
+fn checkLiveScreenshotFallback(allocator: std.mem.Allocator, kuri_base: []const u8) !Check {
+    const started = milliTimestamp();
+    const path = ".zig-cache/kuri-browser-bench-screenshot.jpg";
+    std.Io.Dir.cwd().deleteFile(std.Io.Threaded.global_single_threaded.io(), path) catch {};
+    const result = try screenshot.captureUrl(allocator, "https://example.com", .{
+        .kuri_base = kuri_base,
+        .out_path = path,
+        .format = "png",
+        .quality = 50,
+        .full = false,
+        .compress = true,
+    });
+    const ok = result.bytes > 0;
+    std.Io.Dir.cwd().deleteFile(std.Io.Threaded.global_single_threaded.io(), path) catch {};
+    return .{
+        .area = .chrome_replacement,
+        .name = "live CDP screenshot fallback probe",
+        .weight = 6,
+        .status = passFail(ok),
+        .detail = try std.fmt.allocPrint(allocator, "backend={s}; format={s}; bytes={d}; saved={d}% vs png; path={s}", .{
+            result.backend,
+            result.format,
+            result.bytes,
+            result.saved_percent,
+            result.path,
+        }),
         .duration_ms = elapsedSince(started),
     };
 }

@@ -9,11 +9,11 @@ This score is meant to answer a narrower question:
 
 ## Current Score
 
-- Estimated feature parity: **63%**
+- Estimated feature parity: **66%**
 - Automated validation coverage: **63%** of the target surface
 - Live-validated parity: **depends on the current Kuri run**
 
-The `63%` figure is weighted, not a raw item count.
+The `66%` figure is weighted, not a raw item count.
 
 - `yes` = full weight
 - `partial` = half weight
@@ -51,17 +51,34 @@ curl http://127.0.0.1:9333/json/list
 
 This currently exposes Chrome-style HTTP discovery only. The advertised `webSocketDebuggerUrl` is a placeholder until the WebSocket protocol router lands.
 
+Capture screenshots through the existing Kuri/CDP renderer fallback:
+
+```sh
+zig build run -- screenshot https://example.com --out example.png --kuri-base http://127.0.0.1:8080
+zig build run -- screenshot https://example.com --out example.jpg --compress --kuri-base http://127.0.0.1:8080
+```
+
+This is intentionally a fallback renderer. It proves the screenshot path works by delegating to Kuri's current Chrome/CDP server; it does not mean `kuri-browser` has native layout or paint.
+
+`--compress` is token-oriented: it captures a PNG baseline, captures a JPEG candidate, keeps the smaller output, and reports `saved-bytes` plus `saved-percent`. The current default compression quality is JPEG 50 when `--quality` is not explicit.
+
+Measured on `https://example.com` through the local Kuri/CDP fallback:
+
+- PNG baseline: **20,523 bytes**
+- Compressed output: **18,183 bytes** as JPEG quality 50
+- Savings: **2,340 bytes**, **11%** smaller than PNG
+
 Current bench result from this branch:
 
-- Offline deterministic readiness: **49%**, not ready
-- Offline + live probes readiness: **55%**, not ready
+- Offline deterministic readiness: **51%**, not ready
+- Offline + live probes readiness: **58%**, not ready
 - JS/runtime completeness: **100%**
 - Wait semantics: **100%**
-- CDP automation surface: **41%**
+- CDP automation surface: **41-46%** depending on live Kuri availability
 - Playwright/Puppeteer compatibility: **11%**
-- Replace-headless-Chrome readiness: **32-38%** depending on live probes
+- Replace-headless-Chrome readiness: **41-52%** depending on live probes
 
-The live run passed Hacker News selector extraction, `quotes.toscrape.com/js/`, TodoMVC wait/eval, and HAR capture. The local Kuri CDP baseline was skipped because `http://127.0.0.1:8080/health` was not reachable.
+The live run passed Hacker News selector extraction, `quotes.toscrape.com/js/`, TodoMVC wait/eval, HAR capture, the CDP screenshot fallback, and the local Kuri health probe.
 
 The live suite currently probes:
 
@@ -90,7 +107,7 @@ The live suite currently probes:
 | SPA compatibility | 8 | partial | live | Representative React flow works; arbitrary SPAs do not |
 | Wait semantics + async lifecycle | 8 | partial | bench | `--wait-selector` and `--wait-eval` cover bounded JS polling; load-state parity is still missing |
 | Agent snapshots, refs, and actions | 8 | partial | live | Snapshot refs plus basic click/type flows exist; broader action parity is still missing |
-| Visual rendering + screenshots | 6 | no | none | No layout/paint/screenshot path |
+| Visual rendering + screenshots | 6 | partial | bench | Screenshot can delegate to Kuri/CDP fallback; native layout/paint/PDF are still missing |
 | CDP / automation compatibility | 4 | partial | bench | `serve-cdp` exposes Chrome-style HTTP discovery; WebSocket protocol routing is missing |
 
 ## Missing First
@@ -98,5 +115,5 @@ The live suite currently probes:
 1. Full load-state and auto-wait lifecycle hooks.
 2. Broader ref-driven actions plus keyboard/select/checkbox parity.
 3. More complete DOM events and mutation semantics.
-4. Rendered output or screenshot support.
+4. Native rendered output or screenshot support without the CDP fallback.
 5. Any CDP-compatibility layer after the native runtime is stable.
