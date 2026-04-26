@@ -34,6 +34,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--timeout", type=float, default=15.0)
     parser.add_argument("--out-dir")
     parser.add_argument("--keep-artifacts", action="store_true")
+    parser.add_argument("--direct-svg", action="store_true", help="rasterize the SVG file directly instead of through a no-margin HTML wrapper")
     parser.add_argument("--require-exact", type=float, default=None, help="fail if exact pixel match percent is below this threshold")
     return parser.parse_args()
 
@@ -86,6 +87,29 @@ def chrome_screenshot(chrome: Path, url: str, png_path: Path, profile_dir: Path,
     run_checked(cmd, timeout, png_path)
     if not png_path.exists() or png_path.stat().st_size == 0:
         raise SystemExit(f"Chrome did not write screenshot: {png_path}")
+
+
+def svg_background(svg_path: Path) -> str:
+    text = svg_path.read_text(errors="replace")
+    marker = 'fill="'
+    marker_pos = text.find(marker)
+    if marker_pos == -1:
+        return "#ffffff"
+    start = marker_pos + len(marker)
+    end = text.find('"', start)
+    if end == -1:
+        return "#ffffff"
+    return text[start:end]
+
+
+def write_svg_wrapper(svg_path: Path, wrapper_path: Path, width: int, height: int) -> None:
+    background = svg_background(svg_path)
+    wrapper_path.write_text(
+        "<!doctype html>"
+        f'<html><body style="margin:0;background:{background}">'
+        f'<img src="{svg_path.resolve().as_uri()}" style="display:block;width:{width}px;height:{height}px">'
+        "</body></html>"
+    )
 
 
 def read_png(path: Path) -> tuple[int, int, int, list[list[int]]]:
@@ -215,17 +239,25 @@ def main() -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     actual_png = out_dir / "actual-chrome.png"
     native_svg = out_dir / "native-paint.svg"
+    native_wrapper = out_dir / "native-paint-wrapper.html"
     native_png = out_dir / "native-paint-rasterized.png"
 
     try:
         run_checked([str(kuri_browser), "paint", args.url, "--out", str(native_svg)], args.timeout, native_svg)
         chrome_screenshot(chrome, args.url, actual_png, out_dir / "chrome-actual-profile", width, height, args.timeout)
-        chrome_screenshot(chrome, native_svg.resolve().as_uri(), native_png, out_dir / "chrome-native-profile", width, height, args.timeout)
+        native_url = native_svg.resolve().as_uri()
+        raster_mode = "direct-svg"
+        if not args.direct_svg:
+            write_svg_wrapper(native_svg, native_wrapper, width, height)
+            native_url = native_wrapper.resolve().as_uri()
+            raster_mode = "html-wrapper"
+        chrome_screenshot(chrome, native_url, native_png, out_dir / "chrome-native-profile", width, height, args.timeout)
         metrics = compare_pngs(actual_png, native_png)
 
         print("kuri-browser native paint pixel parity")
         print(f"url: {args.url}")
         print(f"viewport: {width}x{height}")
+        print(f"native-raster-mode: {raster_mode}")
         print(f"artifacts: {out_dir}")
         print(f"actual-png-bytes: {actual_png.stat().st_size}")
         print(f"native-svg-bytes: {native_svg.stat().st_size}")

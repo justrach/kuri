@@ -89,17 +89,19 @@ Check pixel parity against real Chrome before treating this as a renderer replac
 ```sh
 zig build
 python3 tools/paint_parity.py https://example.com --keep-artifacts
+python3 tools/paint_parity.py https://example.com --direct-svg --keep-artifacts
 ```
 
 Current local Chrome comparison on `https://example.com` at `1280x720`:
 
 - Chrome actual screenshot: `16,577` bytes
-- Native SVG paint artifact: `1,531` bytes
-- Native SVG rasterized through Chrome: `30,028` bytes
-- Exact matching pixels: `0.00%`
-- Mean absolute RGB delta: `19.53/255`
+- Native SVG paint artifact: `758` bytes
+- Native SVG rasterized through a no-margin HTML wrapper: `16,583` bytes
+- Exact matching pixels through wrapper: `99.35%`
+- Mean absolute RGB delta through wrapper: `0.48/255`
+- Direct standalone SVG screenshot exact matching pixels: `87.27%`
 
-So this is not 1:1 yet. Earlier timing comparisons only show that the text/DOM SVG path can be faster to produce than CDP screenshots on tiny pages; they do not prove render correctness.
+So this is much closer for the simple `example.com` target, but it is still not 1:1. Exact pixel parity requires matching Chrome's layout, font shaping, antialiasing, viewport behavior, and raster pipeline, not just drawing similar SVG text.
 
 ### Screenshot Fallback
 

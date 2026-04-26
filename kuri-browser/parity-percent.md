@@ -83,6 +83,7 @@ Native SVG paint is now separately available, but it is not 1:1 with real browse
 ```sh
 zig build run -- paint https://example.com --out example.svg
 python3 tools/paint_parity.py https://example.com --keep-artifacts
+python3 tools/paint_parity.py https://example.com --direct-svg --keep-artifacts
 ```
 
 This path does not use Kuri/CDP or Chrome. It paints a text/DOM SVG approximation from the native page model and is useful for token-light visual context, but it is not pixel-equivalent CSS layout or a raster screenshot.
@@ -90,10 +91,13 @@ This path does not use Kuri/CDP or Chrome. It paints a text/DOM SVG approximatio
 Measured against real Chrome on `https://example.com` at `1280x720`:
 
 - Chrome actual screenshot: **16,577 bytes**
-- Native SVG paint artifact: **1,531 bytes**
-- Native SVG rasterized through Chrome: **30,028 bytes**
-- Exact matching pixels: **0.00%**
-- Mean absolute RGB delta: **19.53/255**
+- Native SVG paint artifact: **758 bytes**
+- Native SVG rasterized through a no-margin HTML wrapper: **16,583 bytes**
+- Exact matching pixels through wrapper: **99.35%**
+- Mean absolute RGB delta through wrapper: **0.48/255**
+- Direct standalone SVG screenshot exact matching pixels: **87.27%**
+
+The wrapper mode removes Chrome's standalone-SVG page display artifact and measures the renderer content. It is still not 1:1 because the remaining text pixels differ from Chrome's HTML layout/raster path.
 
 Measured on cache-busted `https://example.com` in the local live bench before pixel comparison:
 
@@ -140,7 +144,7 @@ The live suite currently probes:
 | SPA compatibility | 8 | partial | live | Representative React flow works; arbitrary SPAs do not |
 | Wait semantics + async lifecycle | 8 | partial | bench | `--wait-selector` and `--wait-eval` cover bounded JS polling; load-state parity is still missing |
 | Agent snapshots, refs, and actions | 8 | partial | live | Snapshot refs plus basic click/type flows exist; broader action parity is still missing |
-| Visual rendering + screenshots | 6 | partial | bench + pixel harness | Native SVG text/DOM paint exists but is 0.00% exact-pixel parity on the current Chrome comparison; full CSS layout, raster screenshots, and PDF are still missing |
+| Visual rendering + screenshots | 6 | partial | bench + pixel harness | Native SVG text/DOM paint reaches 99.35% exact pixels on the simple `example.com` wrapper comparison, but it is not 1:1 and full CSS layout, raster screenshots, and PDF are still missing |
 | CDP / automation compatibility | 4 | partial | bench | `serve-cdp` exposes HTTP discovery plus a minimal WebSocket JSON-RPC router; broad CDP domains and Playwright/Puppeteer parity are still missing |
 
 ## Missing First
