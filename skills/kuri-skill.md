@@ -16,6 +16,14 @@ Use this when driving `kuri` over HTTP as an agent loop.
 5. Act with `/action`.
 6. After navigation or DOM changes, re-run `/page/info` and take a fresh snapshot.
 
+## Which browser path to use
+
+- Use `kuri` plus the HTTP API for real browser automation. This is the production path: Chrome/CDP, sessions, snapshots, actions, HAR, cookies, screenshots, and bot-detection handling.
+- Use `kuri-fetch` for standalone no-Chrome text extraction.
+- Use `kuri-browse` for an interactive terminal browser.
+- Use `kuri-agent` for scriptable CLI automation against the Kuri server.
+- Use `kuri-browser/` only when developing or evaluating the experimental Zig-native browser runtime. It is a separate build and is not wired into Kuri's root build.
+
 ## Session-first pattern
 
 ```bash
@@ -32,6 +40,32 @@ curl -s -H "X-Kuri-Session: $SESSION" "$BASE/action?action=click&ref=$MORE_REF"
 curl -s -H "X-Kuri-Session: $SESSION" "$BASE/page/info"
 ```
 
+## Experimental `kuri-browser` CLI
+
+Run these from the separate `kuri-browser/` workspace:
+
+```bash
+cd kuri-browser
+zig build run -- render https://news.ycombinator.com --selector ".titleline a" --dump text
+zig build run -- render https://todomvc.com/examples/react/dist/ --js --wait-eval "document.querySelectorAll('.todo-list li').length >= 1"
+zig build run -- bench --offline
+zig build run -- parity --offline
+```
+
+Screenshots currently use the existing Kuri/CDP renderer as a fallback, so start the normal Kuri server first:
+
+```bash
+# terminal 1, repo root
+zig build
+./zig-out/bin/kuri
+
+# terminal 2
+cd kuri-browser
+zig build run -- screenshot https://example.com --out example.jpg --compress --kuri-base http://127.0.0.1:8080
+```
+
+`--compress` captures a PNG baseline and a JPEG candidate, writes the smaller file, and reports `original-bytes`, `bytes`, `saved-bytes`, and `saved-percent`. Current local measurement on `https://example.com`: `20,523` bytes PNG to `18,183` bytes JPEG quality 50, saving `2,340` bytes or `11%`.
+
 ## Rules
 
 - Prefer `X-Kuri-Session` over repeating `tab_id`.
@@ -41,6 +75,7 @@ curl -s -H "X-Kuri-Session: $SESSION" "$BASE/page/info"
 - Read snapshot `state` before acting on controls. Examples: `checked=false`, `disabled`, `readonly`, `expanded=false`, `selected`.
 - Treat refs as snapshot-local. Refresh them after navigation or major DOM updates.
 - Use HAR only when you need network or API discovery.
+- Treat `kuri-browser` screenshots as fallback-rendered by Kuri/CDP, not proof of native layout or paint.
 
 ## Optional wrapper
 

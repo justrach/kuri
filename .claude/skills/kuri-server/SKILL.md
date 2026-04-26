@@ -61,6 +61,34 @@ If you already know a tab id, set it directly with:
 curl -s -H "X-Kuri-Session: $SESSION" "$BASE/tab/current?tab_id=ABC123"
 ```
 
+## Choosing the right Kuri browser path
+
+Use the main `kuri` server for production browser automation. It drives Chrome/CDP and exposes HTTP sessions, page info, snapshots, actions, HAR, cookies, and screenshots.
+
+Use the separate `kuri-browser/` workspace only for the experimental Zig-native browser runtime. It is not wired into the root build and cannot replace headless Chrome yet.
+
+```bash
+cd kuri-browser
+zig build run -- render https://news.ycombinator.com --selector ".titleline a" --dump text
+zig build run -- render https://todomvc.com/examples/react/dist/ --js --wait-eval "document.querySelectorAll('.todo-list li').length >= 1"
+zig build run -- bench --offline
+zig build run -- parity --offline
+```
+
+For screenshots, `kuri-browser` currently delegates to the main Kuri/CDP renderer:
+
+```bash
+# terminal 1, repo root
+zig build
+./zig-out/bin/kuri
+
+# terminal 2
+cd kuri-browser
+zig build run -- screenshot https://example.com --out example.jpg --compress --kuri-base http://127.0.0.1:8080
+```
+
+`--compress` captures a PNG baseline and JPEG candidate, writes the smaller file, and reports byte savings. Current local measurement on `https://example.com`: `20,523` bytes PNG to `18,183` bytes JPEG quality 50, saving `2,340` bytes or `11%`.
+
 ## Key endpoints
 
 ### Navigation & page control
@@ -161,3 +189,4 @@ curl -s 'https://target.com/api/v4/data' \
 5. **HAR for API discovery** — start HAR before navigating, then use `/har/replay?filter=api` to find the site's API endpoints.
 6. **Cookies transfer** — use `/cookies` to get browser session cookies, then make direct `curl` calls.
 7. **Refs persist per snapshot only** — take a new snapshot after any navigation or meaningful DOM change.
+8. **Native browser experiment is separate** — `kuri-browser` is useful for parity work and benchmarks, but screenshots still use the Kuri/CDP fallback and native layout/paint is not implemented.

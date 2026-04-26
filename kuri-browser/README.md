@@ -10,7 +10,12 @@ This folder is intentionally not wired into the root `build.zig`. It exists as a
 - `src/core.zig`: runtime shape plus page-loading orchestration
 - `src/dom.zig`: parsed DOM tree plus basic selector queries
 - `src/fetch.zig`: network acquisition, validation, redirects, and `curl` fallback
+- `src/js_engine.zig`: QuickJS-backed page execution plus browser API shims
 - `src/render.zig`: parsed-page extraction into the shared page model
+- `src/screenshot.zig`: screenshot fallback through Kuri's existing CDP server
+- `src/bench.zig`: replacement-readiness benchmark
+- `src/parity.zig`: weighted parity score against Kuri's current browser surface
+- `src/cdp_server.zig`: minimal Chrome-style HTTP discovery endpoints
 - `src/shell.zig`: CLI-facing usage, status, roadmap, and text rendering
 - `src/runtime.zig`: thin facade used by `src/main.zig`
 
@@ -30,20 +35,70 @@ zig build run -- render https://example.com
 
 - keep Kuri's existing managed-Chrome/CDP server untouched
 - prototype a Zig-native browser runtime in isolation
-- start with real HTTP fetch plus a parsed DOM tree and selector queries
+- use real HTTP fetch, redirects, cookies, parsed DOM, selector queries, and QuickJS-backed page evaluation
 - keep a stable `Page` model so future DOM/JS layers have a fixed handoff point
-- keep JS, layout, and CDP compatibility out of scope for the first slice
+- provide a small CDP-discovery shim while the native runtime evolves
+- keep native layout, paint, PDF, and full CDP WebSocket compatibility out of scope until the runtime is stable
+
+This is not wired into the root `zig build`, and it is not a production replacement for Kuri's managed Chrome path yet.
 
 ## Current Commands
 
 ```sh
 zig build run -- status
 zig build run -- roadmap
+zig build run -- parity --offline
+zig build run -- bench --offline
 zig build run -- render https://news.ycombinator.com
 zig build run -- render https://example.com --dump html
 zig build run -- render https://news.ycombinator.com --dump links
 zig build run -- render https://news.ycombinator.com --selector ".titleline a" --dump text
+zig build run -- render https://todomvc.com/examples/react/dist/ --js --wait-eval "document.querySelectorAll('.todo-list li').length >= 1"
+zig build run -- render https://example.com --har example.har
+zig build run -- serve-cdp --port 9333
 ```
+
+### Screenshot Fallback
+
+`kuri-browser` can capture screenshots through the existing Kuri/CDP renderer while native layout and paint are still missing.
+
+Start the normal Kuri server in another terminal:
+
+```sh
+cd ..
+zig build
+./zig-out/bin/kuri
+```
+
+Then run:
+
+```sh
+cd kuri-browser
+zig build run -- screenshot https://example.com --out example.png --kuri-base http://127.0.0.1:8080
+zig build run -- screenshot https://example.com --out example.jpg --compress --kuri-base http://127.0.0.1:8080
+```
+
+`--compress` is token-oriented. It captures a PNG baseline, captures a JPEG candidate, keeps whichever file is smaller, fixes the output extension to match the selected format, and prints:
+
+- `original-bytes`: PNG baseline size
+- `bytes`: selected output size
+- `saved-bytes`: byte delta versus PNG
+- `saved-percent`: rounded percentage saved versus PNG
+
+Current local measurement on `https://example.com`: PNG `20,523` bytes to JPEG quality 50 `18,183` bytes, saving `2,340` bytes or `11%`.
+
+### Readiness Checks
+
+Use these commands to keep the experiment honest:
+
+```sh
+zig build test
+zig build run -- parity --offline
+zig build run -- bench --offline
+zig build run -- bench --kuri-base http://127.0.0.1:8080
+```
+
+The current live bench is useful for tracking progress, but the answer is still "not ready to replace headless Chrome" until CDP WebSocket JSON-RPC, browser domains, native layout/paint, and Playwright/Puppeteer lifecycle support exist.
 
 ## Target Direction
 
