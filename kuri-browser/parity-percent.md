@@ -13,6 +13,7 @@ This score is meant to answer a narrower question:
 - Automated validation coverage: **63%** of the target surface
 - Offline replacement-readiness bench: **66%**, not ready
 - Last live replacement-readiness bench: **71%**, not ready, measured against local Kuri on 2026-04-26
+- Last live parity validation: **47%** of the full target surface, with all cache-busted live probes passing on 2026-04-26
 
 The `66%` figure is weighted, not a raw item count.
 
@@ -38,9 +39,17 @@ Run the broader replacement-readiness bench:
 
 ```sh
 zig build run -- bench --offline
+zig build run -- bench --kuri-base http://127.0.0.1:8080
 ```
 
 That bench covers JS/runtime completeness, wait semantics, CDP surface area, Playwright/Puppeteer compatibility, and whether this can replace headless Chrome yet.
+
+Benchmark and parity runs must disclose cache state:
+
+- Offline checks use in-memory fixtures and do not touch network or browser caches.
+- Live native probes create fresh `BrowserRuntime`/fetch sessions and use cache-busted top-level URLs.
+- Kuri comparison probes and screenshot fallback open fresh tabs, but they still delegate to the running Kuri/Chrome process. Chrome profile cache, subresource cache, service workers, cookies, and IndexedDB can still affect those fallback-backed probes if the server was already warm.
+- Do not use fallback-backed numbers as native-rendering proof.
 
 Run the minimal CDP server:
 
@@ -79,7 +88,7 @@ Current bench result from this branch:
 - Playwright/Puppeteer compatibility: **39%**
 - Replace-headless-Chrome readiness: **41-52%** depending on live probes
 
-The live run passed Hacker News selector extraction, `quotes.toscrape.com/js/`, TodoMVC wait/eval, HAR capture, the CDP screenshot fallback, the local Kuri health probe, and the minimal local CDP WebSocket dispatch smoke test.
+The latest cache-busted live run passed Hacker News selector extraction, `quotes.toscrape.com/js/`, TodoMVC wait/eval, HAR capture, the CDP screenshot fallback, the local Kuri health probe, and the minimal local CDP WebSocket dispatch smoke test.
 
 The live suite currently probes:
 

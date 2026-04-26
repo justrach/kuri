@@ -88,6 +88,15 @@ pub fn reportText(allocator: std.mem.Allocator, options: Options) ![]const u8 {
     try out.writer.print("overall readiness: {d}%\n", .{overall});
     try out.writer.print("replace headless Chrome: {s}\n", .{replacementVerdict(overall, cdp_score, pw_score)});
 
+    try out.writer.writeAll("\nBenchmark Methodology\n");
+    try out.writer.writeAll("- offline checks use in-memory fixtures and do not touch network or browser caches\n");
+    if (options.run_live) {
+        try out.writer.writeAll("- live native probes create fresh BrowserRuntime/fetch sessions and use cache-busted URLs\n");
+        try out.writer.writeAll("- live screenshot fallback uses a cache-busted top-level URL, but delegates to the running Kuri/Chrome process; Chrome profile or subresource cache can still affect that probe if the server was already warm\n");
+    } else {
+        try out.writer.writeAll("- live probes are skipped, so no live network or Chrome cache is involved\n");
+    }
+
     try out.writer.writeAll("\nArea Scores\n");
     inline for (std.meta.fields(Area)) |field| {
         const area: Area = @enumFromInt(field.value);
@@ -460,23 +469,25 @@ fn appendSkippedLiveChecks(allocator: std.mem.Allocator, checks: *std.ArrayList(
 
 fn checkLiveHnSelector(allocator: std.mem.Allocator) !Check {
     const started = milliTimestamp();
+    const url = try cacheBustedUrl(allocator, "https://news.ycombinator.com/");
     const runtime = core.BrowserRuntime.init(allocator);
-    const page = try runtime.loadPage("https://news.ycombinator.com");
+    const page = try runtime.loadPage(url);
     const matches = try page.dom.querySelectorAll(allocator, page.dom.root(), ".titleline a");
     return .{
         .area = .js_runtime,
         .name = "live Hacker News selector probe",
         .weight = 4,
         .status = passFail(matches.len > 0),
-        .detail = try std.fmt.allocPrint(allocator, "HN .titleline a matches={d}", .{matches.len}),
+        .detail = try std.fmt.allocPrint(allocator, "cache=cache-busted-url; HN .titleline a matches={d}", .{matches.len}),
         .duration_ms = elapsedSince(started),
     };
 }
 
 fn checkLiveQuotesJs(allocator: std.mem.Allocator) !Check {
     const started = milliTimestamp();
+    const url = try cacheBustedUrl(allocator, "https://quotes.toscrape.com/js/");
     const runtime = core.BrowserRuntime.init(allocator);
-    const page = try runtime.loadPageWithOptions("https://quotes.toscrape.com/js/", .{
+    const page = try runtime.loadPageWithOptions(url, .{
         .enabled = true,
         .eval_expression = "String(document.querySelectorAll('.quote').length)",
     });
@@ -485,7 +496,7 @@ fn checkLiveQuotesJs(allocator: std.mem.Allocator) !Check {
         .name = "live quotes JS probe",
         .weight = 6,
         .status = passFail(std.mem.eql(u8, page.js.eval_result, "10")),
-        .detail = try std.fmt.allocPrint(allocator, "quote count={s}; js_error={s}", .{
+        .detail = try std.fmt.allocPrint(allocator, "cache=cache-busted-url; quote count={s}; js_error={s}", .{
             if (page.js.eval_result.len > 0) page.js.eval_result else "(empty)",
             if (page.js.error_message.len > 0) page.js.error_message else "(none)",
         }),
@@ -495,8 +506,9 @@ fn checkLiveQuotesJs(allocator: std.mem.Allocator) !Check {
 
 fn checkLiveTodoMvcWait(allocator: std.mem.Allocator) !Check {
     const started = milliTimestamp();
+    const url = try cacheBustedUrl(allocator, "https://demo.playwright.dev/todomvc/");
     const runtime = core.BrowserRuntime.init(allocator);
-    const page = try runtime.loadPageWithOptions("https://demo.playwright.dev/todomvc/", .{
+    const page = try runtime.loadPageWithOptions(url, .{
         .wait_selector = ".todoapp",
         .eval_expression = "String(!!document.querySelector('.todoapp')) + '|' + String(!!document.querySelector('.new-todo'))",
         .wait_iterations = 24,
@@ -506,7 +518,7 @@ fn checkLiveTodoMvcWait(allocator: std.mem.Allocator) !Check {
         .name = "live TodoMVC wait probe",
         .weight = 6,
         .status = passFail(page.js.wait_satisfied and std.mem.eql(u8, page.js.eval_result, "true|true")),
-        .detail = try std.fmt.allocPrint(allocator, "wait={s}; polls={d}; eval={s}; js_error={s}", .{
+        .detail = try std.fmt.allocPrint(allocator, "cache=cache-busted-url; wait={s}; polls={d}; eval={s}; js_error={s}", .{
             if (page.js.wait_satisfied) "yes" else "no",
             page.js.wait_polls,
             if (page.js.eval_result.len > 0) page.js.eval_result else "(empty)",
@@ -518,18 +530,19 @@ fn checkLiveTodoMvcWait(allocator: std.mem.Allocator) !Check {
 
 fn checkLiveHar(allocator: std.mem.Allocator) !Check {
     const started = milliTimestamp();
-    const artifacts = try render.renderUrlArtifacts(allocator, "https://example.com", .{
+    const url = try cacheBustedUrl(allocator, "https://example.com/");
+    const artifacts = try render.renderUrlArtifacts(allocator, url, .{
         .capture_har = true,
     });
     const har_json = artifacts.har_json orelse "";
     const ok = std.mem.indexOf(u8, har_json, "\"entries\"") != null and
-        std.mem.indexOf(u8, har_json, "https://example.com") != null;
+        std.mem.indexOf(u8, har_json, "https://example.com/") != null;
     return .{
         .area = .chrome_replacement,
         .name = "live HAR capture probe",
         .weight = 4,
         .status = passFail(ok),
-        .detail = try std.fmt.allocPrint(allocator, "har-bytes={d}; page-status={d}", .{ har_json.len, artifacts.page.status_code }),
+        .detail = try std.fmt.allocPrint(allocator, "cache=cache-busted-url; har-bytes={d}; page-status={d}", .{ har_json.len, artifacts.page.status_code }),
         .duration_ms = elapsedSince(started),
     };
 }
@@ -538,7 +551,8 @@ fn checkLiveScreenshotFallback(allocator: std.mem.Allocator, kuri_base: []const 
     const started = milliTimestamp();
     const path = ".zig-cache/kuri-browser-bench-screenshot.jpg";
     std.Io.Dir.cwd().deleteFile(std.Io.Threaded.global_single_threaded.io(), path) catch {};
-    const result = try screenshot.captureUrl(allocator, "https://example.com", .{
+    const url = try cacheBustedUrl(allocator, "https://example.com/");
+    const result = try screenshot.captureUrl(allocator, url, .{
         .kuri_base = kuri_base,
         .out_path = path,
         .format = "png",
@@ -553,7 +567,7 @@ fn checkLiveScreenshotFallback(allocator: std.mem.Allocator, kuri_base: []const 
         .name = "live CDP screenshot fallback probe",
         .weight = 6,
         .status = passFail(ok),
-        .detail = try std.fmt.allocPrint(allocator, "backend={s}; format={s}; bytes={d}; saved={d}% vs png; path={s}", .{
+        .detail = try std.fmt.allocPrint(allocator, "cache=cache-busted-url+chrome-fallback-cache-possible; backend={s}; format={s}; bytes={d}; saved={d}% vs png; path={s}", .{
             result.backend,
             result.format,
             result.bytes,
@@ -573,9 +587,14 @@ fn checkKuriCdpHealth(allocator: std.mem.Allocator, base_url: []const u8) !Check
         .name = "live Kuri CDP baseline health",
         .weight = 4,
         .status = .pass,
-        .detail = try std.fmt.allocPrint(allocator, "{s} responded ({d} bytes)", .{ url, body.len }),
+        .detail = try std.fmt.allocPrint(allocator, "cache=not-applicable; {s} responded ({d} bytes)", .{ url, body.len }),
         .duration_ms = elapsedSince(started),
     };
+}
+
+fn cacheBustedUrl(allocator: std.mem.Allocator, url: []const u8) ![]const u8 {
+    const separator: u8 = if (std.mem.indexOfScalar(u8, url, '?') == null) '?' else '&';
+    return std.fmt.allocPrint(allocator, "{s}{c}kuri_bench={d}", .{ url, separator, milliTimestamp() });
 }
 
 fn evaluateSynthetic(allocator: std.mem.Allocator, html: []const u8, options: js_runtime.Options) !model.JsExecution {

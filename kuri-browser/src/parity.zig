@@ -385,6 +385,16 @@ pub fn reportText(allocator: std.mem.Allocator, options: Options) ![]const u8 {
         try out.writer.writeAll("live-validated parity: skipped (Kuri server unavailable)\n");
     }
 
+    try out.writer.writeAll("\nValidation Methodology\n");
+    if (options.run_live and liveChecksRan(live_results)) {
+        try out.writer.writeAll("- live native checks use fresh BrowserRuntime/fetch sessions and cache-busted top-level URLs\n");
+        try out.writer.writeAll("- Kuri comparison checks open fresh tabs, but the running Chrome process can still have warm profile or subresource cache unless Kuri was started fresh\n");
+    } else if (!options.run_live) {
+        try out.writer.writeAll("- offline mode skips live network and Chrome cache entirely\n");
+    } else {
+        try out.writer.writeAll("- live validation was skipped, so cache state did not affect this run\n");
+    }
+
     try out.writer.writeAll("\nFeature Matrix\n");
     for (features) |feature| {
         try out.writer.print("- [{s}] {d} pts: {s}\n", .{
@@ -502,7 +512,7 @@ fn skippedResults(allocator: std.mem.Allocator, reason: []const u8) ![]LiveCheck
 }
 
 fn checkExampleTitle(allocator: std.mem.Allocator, kuri: *KuriClient) !LiveCheckResult {
-    const url = "https://example.com";
+    const url = try cacheBustedUrl(allocator, "https://example.com/");
     const runtime = core.BrowserRuntime.init(allocator);
     const page = try runtime.loadPage(url);
     const tab_id = try kuri.openTab(url);
@@ -512,12 +522,12 @@ fn checkExampleTitle(allocator: std.mem.Allocator, kuri: *KuriClient) !LiveCheck
     return .{
         .id = .example_title,
         .state = if (passed) .pass else .fail,
-        .detail = try std.fmt.allocPrint(allocator, "native=\"{s}\" kuri=\"{s}\"", .{ page.title, info.title }),
+        .detail = try std.fmt.allocPrint(allocator, "cache=cache-busted-url+chrome-cache-possible; native=\"{s}\" kuri=\"{s}\"", .{ page.title, info.title }),
     };
 }
 
 fn checkExampleText(allocator: std.mem.Allocator, kuri: *KuriClient) !LiveCheckResult {
-    const url = "https://example.com";
+    const url = try cacheBustedUrl(allocator, "https://example.com/");
     const runtime = core.BrowserRuntime.init(allocator);
     const page = try runtime.loadPage(url);
     const tab_id = try kuri.openTab(url);
@@ -527,7 +537,7 @@ fn checkExampleText(allocator: std.mem.Allocator, kuri: *KuriClient) !LiveCheckR
     return .{
         .id = .example_text,
         .state = if (passed) .pass else .fail,
-        .detail = try std.fmt.allocPrint(allocator, "native_has_example={any} kuri_has_example={any}", .{
+        .detail = try std.fmt.allocPrint(allocator, "cache=cache-busted-url+chrome-cache-possible; native_has_example={any} kuri_has_example={any}", .{
             std.mem.indexOf(u8, page.text, "Example Domain") != null,
             std.mem.indexOf(u8, text, "Example Domain") != null,
         }),
@@ -535,7 +545,7 @@ fn checkExampleText(allocator: std.mem.Allocator, kuri: *KuriClient) !LiveCheckR
 }
 
 fn checkHnSelectorCount(allocator: std.mem.Allocator, kuri: *KuriClient) !LiveCheckResult {
-    const url = "https://news.ycombinator.com";
+    const url = try cacheBustedUrl(allocator, "https://news.ycombinator.com/");
     const selector = ".titleline > a";
     const runtime = core.BrowserRuntime.init(allocator);
     const page = try runtime.loadPage(url);
@@ -550,12 +560,12 @@ fn checkHnSelectorCount(allocator: std.mem.Allocator, kuri: *KuriClient) !LiveCh
     return .{
         .id = .hn_selector_count,
         .state = if (passed) .pass else .fail,
-        .detail = try std.fmt.allocPrint(allocator, "native={d} kuri={s}", .{ native_count, kuri_count }),
+        .detail = try std.fmt.allocPrint(allocator, "cache=cache-busted-url+chrome-cache-possible; native={d} kuri={s}", .{ native_count, kuri_count }),
     };
 }
 
 fn checkHttpbingoCookieRedirect(allocator: std.mem.Allocator, kuri: *KuriClient) !LiveCheckResult {
-    const url = "https://httpbingo.org/cookies/set?session=kuri-browser";
+    const url = try cacheBustedUrl(allocator, "https://httpbingo.org/cookies/set?session=kuri-browser");
     const runtime = core.BrowserRuntime.init(allocator);
     const page = try runtime.loadPage(url);
 
@@ -569,7 +579,7 @@ fn checkHttpbingoCookieRedirect(allocator: std.mem.Allocator, kuri: *KuriClient)
     return .{
         .id = .httpbingo_redirect_cookie,
         .state = if (native_ok and kuri_ok) .pass else .fail,
-        .detail = try std.fmt.allocPrint(allocator, "native_url={s} cookies={d}; kuri_url={s} body_has_session={any}", .{
+        .detail = try std.fmt.allocPrint(allocator, "cache=cache-busted-url+chrome-cache-possible; native_url={s} cookies={d}; kuri_url={s} body_has_session={any}", .{
             page.url,
             page.cookie_count,
             info.url,
@@ -579,7 +589,7 @@ fn checkHttpbingoCookieRedirect(allocator: std.mem.Allocator, kuri: *KuriClient)
 }
 
 fn checkQuotesJsCount(allocator: std.mem.Allocator, kuri: *KuriClient) !LiveCheckResult {
-    const url = "https://quotes.toscrape.com/js/";
+    const url = try cacheBustedUrl(allocator, "https://quotes.toscrape.com/js/");
     const expression = "String(document.querySelectorAll('.quote').length)";
     const runtime = core.BrowserRuntime.init(allocator);
     const page = try runtime.loadPageWithOptions(url, .{
@@ -594,12 +604,12 @@ fn checkQuotesJsCount(allocator: std.mem.Allocator, kuri: *KuriClient) !LiveChec
     return .{
         .id = .quotes_js_count,
         .state = if (passed) .pass else .fail,
-        .detail = try std.fmt.allocPrint(allocator, "native={s} kuri={s}", .{ page.js.eval_result, kuri_count }),
+        .detail = try std.fmt.allocPrint(allocator, "cache=cache-busted-url+chrome-cache-possible; native={s} kuri={s}", .{ page.js.eval_result, kuri_count }),
     };
 }
 
 fn checkTodoMvcShell(allocator: std.mem.Allocator, kuri: *KuriClient) !LiveCheckResult {
-    const url = "https://demo.playwright.dev/todomvc/";
+    const url = try cacheBustedUrl(allocator, "https://demo.playwright.dev/todomvc/");
     const expression = "String(!!document.querySelector('.todoapp')) + '|' + String(!!document.querySelector('.new-todo'))";
     const runtime = core.BrowserRuntime.init(allocator);
     const page = try runtime.loadPageWithOptions(url, .{
@@ -619,7 +629,7 @@ fn checkTodoMvcShell(allocator: std.mem.Allocator, kuri: *KuriClient) !LiveCheck
     return .{
         .id = .todomvc_shell,
         .state = if (passed) .pass else .fail,
-        .detail = try std.fmt.allocPrint(allocator, "native={s}|{s} kuri={any}|{any}|{s}", .{
+        .detail = try std.fmt.allocPrint(allocator, "cache=cache-busted-url+chrome-cache-possible; native={s}|{s} kuri={any}|{any}|{s}", .{
             page.js.eval_result,
             page.title,
             kuri_todoapp,
@@ -630,28 +640,30 @@ fn checkTodoMvcShell(allocator: std.mem.Allocator, kuri: *KuriClient) !LiveCheck
 }
 
 fn checkHarCapture(allocator: std.mem.Allocator, kuri: *KuriClient) !LiveCheckResult {
-    const native = try render.renderUrlArtifacts(allocator, "https://example.com", .{ .capture_har = true });
+    const url = try cacheBustedUrl(allocator, "https://example.com/");
+    const native = try render.renderUrlArtifacts(allocator, url, .{ .capture_har = true });
     const native_entries = countHarEntries(native.har_json orelse "{}") catch 0;
 
     const tab_id = try kuri.openTab("about:blank");
     defer kuri.closeTab(tab_id);
     try kuri.startHar(tab_id);
-    try kuri.navigate(tab_id, "https://example.com");
+    try kuri.navigate(tab_id, url);
     const kuri_entries = try kuri.stopHar(tab_id);
     const passed = native_entries > 0 and kuri_entries > 0;
     return .{
         .id = .har_capture,
         .state = if (passed) .pass else .fail,
-        .detail = try std.fmt.allocPrint(allocator, "native_entries={d} kuri_entries={d}", .{ native_entries, kuri_entries }),
+        .detail = try std.fmt.allocPrint(allocator, "cache=cache-busted-url+chrome-cache-possible; native_entries={d} kuri_entries={d}", .{ native_entries, kuri_entries }),
     };
 }
 
 fn checkExampleActionClick(allocator: std.mem.Allocator, kuri: *KuriClient) !LiveCheckResult {
-    const native = try agent.runUrlActions(allocator, "https://example.com", &.{
+    const url = try cacheBustedUrl(allocator, "https://example.com/");
+    const native = try agent.runUrlActions(allocator, url, &.{
         .{ .click = "e0" },
     }, false, .{});
 
-    const tab_id = try kuri.openTab("https://example.com");
+    const tab_id = try kuri.openTab(url);
     defer kuri.closeTab(tab_id);
     _ = try kuri.snapshotCount(tab_id);
     try kuri.action(tab_id, "click", "e0", null);
@@ -663,12 +675,12 @@ fn checkExampleActionClick(allocator: std.mem.Allocator, kuri: *KuriClient) !Liv
     return .{
         .id = .action_click,
         .state = if (native_ok and kuri_ok) .pass else .fail,
-        .detail = try std.fmt.allocPrint(allocator, "native=\"{s}\" kuri=\"{s}\"", .{ native.page.title, kuri_page.title }),
+        .detail = try std.fmt.allocPrint(allocator, "cache=cache-busted-url+chrome-cache-possible; native=\"{s}\" kuri=\"{s}\"", .{ native.page.title, kuri_page.title }),
     };
 }
 
 fn checkExampleSnapshotCount(allocator: std.mem.Allocator, kuri: *KuriClient) !LiveCheckResult {
-    const url = "https://example.com";
+    const url = try cacheBustedUrl(allocator, "https://example.com/");
     const runtime = core.BrowserRuntime.init(allocator);
     const page = try runtime.loadPage(url);
     const native_nodes = try snapshot.buildInteractiveSnapshot(allocator, &page.dom, page.dom.root());
@@ -681,8 +693,19 @@ fn checkExampleSnapshotCount(allocator: std.mem.Allocator, kuri: *KuriClient) !L
     return .{
         .id = .snapshot_count,
         .state = if (passed) .pass else .fail,
-        .detail = try std.fmt.allocPrint(allocator, "native={d} kuri={d}", .{ native_nodes.len, kuri_count }),
+        .detail = try std.fmt.allocPrint(allocator, "cache=cache-busted-url+chrome-cache-possible; native={d} kuri={d}", .{ native_nodes.len, kuri_count }),
     };
+}
+
+fn cacheBustedUrl(allocator: std.mem.Allocator, url: []const u8) ![]const u8 {
+    const separator: u8 = if (std.mem.indexOfScalar(u8, url, '?') == null) '?' else '&';
+    return std.fmt.allocPrint(allocator, "{s}{c}kuri_bench={d}", .{ url, separator, milliTimestamp() });
+}
+
+fn milliTimestamp() i64 {
+    var ts: std.c.timespec = undefined;
+    _ = std.c.clock_gettime(.REALTIME, &ts);
+    return @as(i64, ts.sec) * 1000 + @divTrunc(@as(i64, ts.nsec), 1_000_000);
 }
 
 fn countHarEntries(har_json: []const u8) !usize {
