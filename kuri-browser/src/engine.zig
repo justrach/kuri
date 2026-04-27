@@ -44,6 +44,8 @@ pub const Display = enum {
     inline_block,
     list_item,
     table,
+    table_row,
+    table_cell,
     none,
 };
 
@@ -340,6 +342,9 @@ fn parseWhiteSpace(value: []const u8, fallback: WhiteSpace) WhiteSpace {
 fn defaultDisplayForTag(tag: []const u8) Display {
     if (tag.len == 0) return .block;
     if (std.ascii.eqlIgnoreCase(tag, "li")) return .list_item;
+    if (std.ascii.eqlIgnoreCase(tag, "table")) return .table;
+    if (std.ascii.eqlIgnoreCase(tag, "tr")) return .table_row;
+    if (std.ascii.eqlIgnoreCase(tag, "td") or std.ascii.eqlIgnoreCase(tag, "th")) return .table_cell;
     if (std.ascii.eqlIgnoreCase(tag, "button") or
         std.ascii.eqlIgnoreCase(tag, "input") or
         std.ascii.eqlIgnoreCase(tag, "textarea") or
@@ -353,8 +358,8 @@ fn defaultDisplayForTag(tag: []const u8) Display {
         "article","nav",    "main",   "aside", "h1",     "h2",     "h3",
         "h4",     "h5",     "h6",     "ul",    "ol",                "dl",
         "dt",     "dd",     "blockquote","pre","figure","figcaption","form",
-        "fieldset","table", "thead",  "tbody", "tfoot",  "tr",     "td",
-        "th",     "address","center", "hr",
+        "fieldset","thead", "tbody",  "tfoot",
+        "address","center", "hr",
     };
     for (block_tags) |bt| if (std.ascii.eqlIgnoreCase(tag, bt)) return .block;
     if (std.ascii.eqlIgnoreCase(tag, "head") or std.ascii.eqlIgnoreCase(tag, "script") or
@@ -373,6 +378,8 @@ fn parseDisplay(v: []const u8) Display {
     if (std.ascii.eqlIgnoreCase(t, "inline-block")) return .inline_block;
     if (std.ascii.eqlIgnoreCase(t, "list-item")) return .list_item;
     if (std.ascii.eqlIgnoreCase(t, "table")) return .table;
+    if (std.ascii.eqlIgnoreCase(t, "table-row")) return .table_row;
+    if (std.ascii.eqlIgnoreCase(t, "table-cell")) return .table_cell;
     if (std.ascii.eqlIgnoreCase(t, "none")) return .none;
     return .inline_;
 }
@@ -630,6 +637,11 @@ fn layoutBlock(
         return makeEmptyBox(ctx, node_id, style, parent_x, parent_y);
     }
 
+    // Tables get their own layout algorithm: rows of cells with column-based widths.
+    if (style.display == .table) {
+        return try layoutTable(ctx, node_id, &style, parent_x, parent_y, available_width, parent);
+    }
+
     // Replaced / specialized elements: produce intrinsic boxes directly.
     if (node.kind == .element) {
         if (std.ascii.eqlIgnoreCase(node.name, "img")) {
@@ -788,6 +800,316 @@ fn layoutBlock(
         .height = explicit_height + style.padding.top + style.padding.bottom + style.border_width.top + style.border_width.bottom,
         .children = try children.toOwnedSlice(ctx.allocator),
         .text_runs = marker_runs,
+    };
+    return box;
+}
+
+// ---------------- Table layout ----------------
+//
+// Implements a small CSS-2.1 inspired table model:
+//   - The <table> element produces a table box.
+//   - Direct or nested <tr>s (inside <tbody>/<thead>/<tfoot>) become row boxes.
+//   - <td>/<th> children of a row become cell boxes.
+//   - Column widths are derived from each cell's natural content width
+//     (probe-layout with a large width, measure max descendant extent),
+//     then capped to fit the table's available width.
+//   - Each row's height = max cell height in that row.
+//
+// Punted for v1: colspan, rowspan, <caption>, border-collapse, automatic
+// border merging, percentage column widths, fixed table-layout.
+
+fn appendDescendantRows(
+    ctx: *LayoutCtx,
+    node_id: dom.NodeId,
+    out: *std.ArrayList(dom.NodeId),
+) !void {
+    const node = ctx.doc.getNode(node_id);
+    var child = node.first_child;
+    while (child) |cid| : (child = ctx.doc.nodes[cid].next_sibling) {
+        const cn = ctx.doc.getNode(cid);
+        if (cn.kind != .element) continue;
+        if (std.ascii.eqlIgnoreCase(cn.name, "tr")) {
+            try out.append(ctx.allocator, cid);
+            continue;
+        }
+        if (std.ascii.eqlIgnoreCase(cn.name, "tbody") or
+            std.ascii.eqlIgnoreCase(cn.name, "thead") or
+            std.ascii.eqlIgnoreCase(cn.name, "tfoot"))
+        {
+            // Recurse: their children's <tr>s belong to this table.
+            try appendDescendantRows(ctx, cid, out);
+        }
+    }
+}
+
+fn collectRowCells(
+    ctx: *LayoutCtx,
+    row_id: dom.NodeId,
+    out: *std.ArrayList(dom.NodeId),
+) !void {
+    const node = ctx.doc.getNode(row_id);
+    var child = node.first_child;
+    while (child) |cid| : (child = ctx.doc.nodes[cid].next_sibling) {
+        const cn = ctx.doc.getNode(cid);
+        if (cn.kind != .element) continue;
+        if (std.ascii.eqlIgnoreCase(cn.name, "td") or std.ascii.eqlIgnoreCase(cn.name, "th")) {
+            try out.append(ctx.allocator, cid);
+        }
+    }
+}
+
+// Measure the maximum extent (right-edge) of a layout subtree relative to its
+// origin x. Used to derive a cell's natural content width after a probe layout.
+// Measure the maximum extent (right-edge) of a layout subtree's *content*
+// relative to its origin x. We deliberately ignore the cell's own outer
+// box.width because layoutBlock always sets it to the available width — the
+// content extent comes from its descendant text runs and child boxes.
+fn measureBoxRight(box: *const LayoutBox) f64 {
+    var max_right: f64 = box.x;
+    for (box.text_runs) |run| {
+        const end = run.x + textWidth(run.text, run.font_family, run.font_size, run.font_weight, run.italic);
+        if (end > max_right) max_right = end;
+    }
+    for (box.children) |child| {
+        const cr = measureChildExtent(child);
+        if (cr > max_right) max_right = cr;
+    }
+    // Also include cell's own padding-right so cells with explicit padding
+    // get a wider natural width.
+    max_right += box.style.padding.right + box.style.border_width.right;
+    return max_right;
+}
+
+// Recursive child extent: this DOES include the child's own outer width
+// because nested non-cell child boxes (e.g. an inline-block <img>) have a
+// real intrinsic size we should respect.
+// Recursive child extent: includes the child's own outer width when it is a
+// real element (e.g. an inline-block <img>) because that's the intrinsic
+// size we need to respect. For anonymous inline boxes (node_id == null,
+// emitted by buildInlineBox) the box.width is just the available width
+// passed in — it has no intrinsic meaning, so we ignore it and use only
+// the actual text-run extents.
+fn measureChildExtent(box: *const LayoutBox) f64 {
+    var max_right: f64 = box.x;
+    if (box.node_id != null) {
+        max_right = box.x + box.width;
+    }
+    for (box.text_runs) |run| {
+        const end = run.x + textWidth(run.text, run.font_family, run.font_size, run.font_weight, run.italic);
+        if (end > max_right) max_right = end;
+    }
+    for (box.children) |child| {
+        const cr = measureChildExtent(child);
+        if (cr > max_right) max_right = cr;
+    }
+    return max_right;
+}
+
+fn layoutTable(
+    ctx: *LayoutCtx,
+    node_id: dom.NodeId,
+    style: *ComputedStyle,
+    parent_x: f64,
+    parent_y: f64,
+    available_width: f64,
+    parent: Inheritable,
+) anyerror!*LayoutBox {
+    _ = parent;
+
+    // Resolve auto-margins (best effort) the same way layoutBlock does.
+    if (style.margin.left < 0 and style.margin.right < 0) {
+        if (style.width) |w| {
+            const remaining = @max(0, available_width - w);
+            const half = remaining / 2.0;
+            style.margin.left = half;
+            style.margin.right = half;
+        } else {
+            style.margin.left = 0;
+            style.margin.right = 0;
+        }
+    } else {
+        if (style.margin.left < 0) style.margin.left = 0;
+        if (style.margin.right < 0) style.margin.right = 0;
+    }
+
+    const outer_width = if (style.width) |w|
+        w + style.padding.left + style.padding.right + style.border_width.left + style.border_width.right
+    else
+        available_width - style.margin.left - style.margin.right;
+    const content_x = parent_x + style.margin.left + style.border_width.left + style.padding.left;
+    const content_y = parent_y + style.margin.top + style.border_width.top + style.padding.top;
+    const content_width = @max(0, outer_width - style.padding.left - style.padding.right - style.border_width.left - style.border_width.right);
+
+    const inheritable: Inheritable = .{
+        .font_size = style.font_size,
+        .color = style.color,
+        .font_family = style.font_family,
+        .font_weight = style.font_weight,
+        .line_height = style.line_height,
+        .text_align = style.text_align,
+        .white_space = style.white_space,
+        .italic = style.italic,
+        .underline = style.text_decoration_underline,
+    };
+
+    // HTML table attributes that override defaults.
+    var override_cellpadding: ?f64 = null;
+    if (ctx.doc.getAttribute(node_id, "cellpadding")) |cp| {
+        if (parseIntAttr(cp)) |v| override_cellpadding = v;
+    }
+    var cellspacing: f64 = 0;
+    if (ctx.doc.getAttribute(node_id, "cellspacing")) |cs| {
+        if (parseIntAttr(cs)) |v| cellspacing = v;
+    }
+
+    // Collect all rows.
+    var rows: std.ArrayList(dom.NodeId) = .empty;
+    try appendDescendantRows(ctx, node_id, &rows);
+
+    if (rows.items.len == 0) {
+        const box = try ctx.allocator.create(LayoutBox);
+        box.* = .{
+            .node_id = node_id,
+            .style = style.*,
+            .x = parent_x + style.margin.left,
+            .y = parent_y + style.margin.top,
+            .width = outer_width,
+            .height = (style.height orelse 0) + style.padding.top + style.padding.bottom + style.border_width.top + style.border_width.bottom,
+        };
+        return box;
+    }
+
+    // Pass 1: collect cells per row + measure each cell's natural content width.
+    var rows_cells: std.ArrayList([]dom.NodeId) = .empty;
+    var col_count: usize = 0;
+    for (rows.items) |rid| {
+        var cells: std.ArrayList(dom.NodeId) = .empty;
+        try collectRowCells(ctx, rid, &cells);
+        if (cells.items.len > col_count) col_count = cells.items.len;
+        try rows_cells.append(ctx.allocator, try cells.toOwnedSlice(ctx.allocator));
+    }
+
+    if (col_count == 0) {
+        const box = try ctx.allocator.create(LayoutBox);
+        box.* = .{
+            .node_id = node_id,
+            .style = style.*,
+            .x = parent_x + style.margin.left,
+            .y = parent_y + style.margin.top,
+            .width = outer_width,
+            .height = (style.height orelse 0) + style.padding.top + style.padding.bottom + style.border_width.top + style.border_width.bottom,
+        };
+        return box;
+    }
+
+    // Per-column natural width tracker: the maximum natural outer width of any
+    // cell in that column.
+    var col_widths = try ctx.allocator.alloc(f64, col_count);
+    for (col_widths) |*w| w.* = 0;
+
+    // Probe-layout every cell at a wide width to learn its natural content
+    // extent. The probe boxes are kept attached to the arena so we don't need
+    // to free them — they're discarded by skipping references.
+    const probe_width: f64 = @max(content_width * 8, 100000);
+    for (rows_cells.items) |cells_slice| {
+        for (cells_slice, 0..) |cid, col_idx| {
+            const probe = try layoutBlock(ctx, cid, 0, 0, probe_width, inheritable);
+            const natural_right = measureBoxRight(probe);
+            // natural_right is the absolute x of the rightmost glyph/box.
+            // Since we laid out at parent_x = 0, that's also the cell's
+            // natural outer width.
+            var natural_w = natural_right;
+            // Apply cellpadding override: widen if the override exceeds CSS padding.
+            if (override_cellpadding) |cp| {
+                const pad_l = @max(probe.style.padding.left, cp);
+                const pad_r = @max(probe.style.padding.right, cp);
+                const css_pad = probe.style.padding.left + probe.style.padding.right;
+                const new_pad = pad_l + pad_r;
+                natural_w = natural_w - css_pad + new_pad;
+            }
+            if (natural_w > col_widths[col_idx]) col_widths[col_idx] = natural_w;
+        }
+    }
+
+    // Pass 2: distribute column widths to fit content_width.
+    var total_natural: f64 = 0;
+    for (col_widths) |w| total_natural += w;
+    const total_spacing = cellspacing * @as(f64, @floatFromInt(col_count + 1));
+    const usable_width = @max(0, content_width - total_spacing);
+    if (total_natural > usable_width and total_natural > 0) {
+        const scale = usable_width / total_natural;
+        for (col_widths) |*w| w.* *= scale;
+    }
+
+    // Build row + cell boxes at final widths.
+    var row_boxes: std.ArrayList(*LayoutBox) = .empty;
+    var current_y = content_y + cellspacing;
+    var i: usize = 0;
+    while (i < rows.items.len) : (i += 1) {
+        const rid = rows.items[i];
+        const cells_slice = rows_cells.items[i];
+
+        const row_style = try computeStyle(ctx, rid, inheritable);
+        if (row_style.display == .none) continue;
+
+        var cell_boxes: std.ArrayList(*LayoutBox) = .empty;
+        var row_max_height: f64 = 0;
+        var cell_x = content_x + cellspacing;
+        var col: usize = 0;
+        while (col < col_count) : (col += 1) {
+            const col_w = col_widths[col];
+            if (col >= cells_slice.len) {
+                cell_x += col_w + cellspacing;
+                continue;
+            }
+            const cid = cells_slice[col];
+            const cell_box = try layoutBlock(ctx, cid, cell_x, current_y, col_w, inheritable);
+            // Force cell width to column width for clean column alignment.
+            cell_box.width = col_w;
+            if (override_cellpadding) |cp| {
+                cell_box.style.padding.left = cp;
+                cell_box.style.padding.right = cp;
+                cell_box.style.padding.top = cp;
+                cell_box.style.padding.bottom = cp;
+            }
+            if (cell_box.height > row_max_height) row_max_height = cell_box.height;
+            try cell_boxes.append(ctx.allocator, cell_box);
+            cell_x += col_w + cellspacing;
+        }
+        // Equalize cell heights to the row's tallest cell.
+        for (cell_boxes.items) |cb| cb.height = row_max_height;
+
+        var row_inner_width: f64 = cellspacing;
+        for (col_widths) |w| row_inner_width += w + cellspacing;
+
+        const row_box = try ctx.allocator.create(LayoutBox);
+        row_box.* = .{
+            .node_id = rid,
+            .style = row_style,
+            .x = content_x,
+            .y = current_y,
+            .width = row_inner_width,
+            .height = row_max_height,
+            .children = try cell_boxes.toOwnedSlice(ctx.allocator),
+            .text_runs = &.{},
+        };
+        try row_boxes.append(ctx.allocator, row_box);
+        current_y += row_max_height + cellspacing;
+    }
+
+    const content_height = current_y - content_y;
+    const explicit_height = style.height orelse content_height;
+
+    const box = try ctx.allocator.create(LayoutBox);
+    box.* = .{
+        .node_id = node_id,
+        .style = style.*,
+        .x = parent_x + style.margin.left,
+        .y = parent_y + style.margin.top,
+        .width = outer_width,
+        .height = explicit_height + style.padding.top + style.padding.bottom + style.border_width.top + style.border_width.bottom,
+        .children = try row_boxes.toOwnedSlice(ctx.allocator),
+        .text_runs = &.{},
     };
     return box;
 }
@@ -2460,4 +2782,88 @@ test "parseEdgeShorthand handles auto" {
     try std.testing.expectEqual(@as(f64, -1), e.right);
     try std.testing.expectEqual(@as(f64, 108), e.bottom);
     try std.testing.expectEqual(@as(f64, -1), e.left);
+}
+
+// ---------------- Tests for table layout (Team Beta) ----------------
+
+fn testCountRowsAndCells(box: *const LayoutBox, doc: *const dom.Document) struct { rows: usize, cells: usize } {
+    var rows: usize = 0;
+    var cells: usize = 0;
+    if (box.node_id) |nid| {
+        const n = doc.getNode(nid);
+        if (n.kind == .element) {
+            if (std.ascii.eqlIgnoreCase(n.name, "tr")) rows += 1;
+            if (std.ascii.eqlIgnoreCase(n.name, "td") or std.ascii.eqlIgnoreCase(n.name, "th")) cells += 1;
+        }
+    }
+    for (box.children) |c| {
+        const sub = testCountRowsAndCells(c, doc);
+        rows += sub.rows;
+        cells += sub.cells;
+    }
+    return .{ .rows = rows, .cells = cells };
+}
+
+fn testFindAllRows(box: *const LayoutBox, doc: *const dom.Document, out: *std.ArrayList(*const LayoutBox), alloc: std.mem.Allocator) !void {
+    if (box.node_id) |nid| {
+        const n = doc.getNode(nid);
+        if (n.kind == .element and std.ascii.eqlIgnoreCase(n.name, "tr")) {
+            try out.append(alloc, box);
+        }
+    }
+    for (box.children) |c| try testFindAllRows(c, doc, out, alloc);
+}
+
+test "table layout produces row and cell boxes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const doc = try dom.Document.parse(a, "<html><body><table><tr><td>a</td><td>b</td></tr><tr><td>c</td><td>d</td></tr></table></body></html>");
+    var page = testMakePage(doc);
+    var result = try layoutPage(std.testing.allocator, &page, .{ .width = 800, .height = 600 });
+    defer result.deinit();
+
+    // Find the table.
+    const table_box = testFindBoxByTag(result.root, result.doc, "table") orelse return error.MissingTable;
+    try std.testing.expectEqual(@as(usize, 2), table_box.children.len);
+
+    // Each row should have exactly 2 cell children.
+    for (table_box.children) |row| {
+        // row's node should be <tr>.
+        const rid = row.node_id orelse return error.RowMissingNodeId;
+        const row_node = result.doc.getNode(rid);
+        try std.testing.expect(std.ascii.eqlIgnoreCase(row_node.name, "tr"));
+        try std.testing.expectEqual(@as(usize, 2), row.children.len);
+    }
+
+    // Second column's cells should start at x = first column's width (i.e.
+    // adjacent to first column's right edge with cellspacing=0).
+    const row0 = table_box.children[0];
+    const c0 = row0.children[0];
+    const c1 = row0.children[1];
+    try std.testing.expectApproxEqAbs(c0.x + c0.width, c1.x, 0.001);
+
+    // Same alignment for the second row.
+    const row1 = table_box.children[1];
+    const r1c0 = row1.children[0];
+    const r1c1 = row1.children[1];
+    try std.testing.expectApproxEqAbs(r1c0.x + r1c0.width, r1c1.x, 0.001);
+}
+
+test "table cells size to content width" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const doc = try dom.Document.parse(a, "<html><body><table><tr><td>x</td><td>longerlonger</td></tr></table></body></html>");
+    var page = testMakePage(doc);
+    var result = try layoutPage(std.testing.allocator, &page, .{ .width = 800, .height = 600 });
+    defer result.deinit();
+
+    const table_box = testFindBoxByTag(result.root, result.doc, "table") orelse return error.MissingTable;
+    try std.testing.expectEqual(@as(usize, 1), table_box.children.len);
+    const row = table_box.children[0];
+    try std.testing.expectEqual(@as(usize, 2), row.children.len);
+    const cell_a = row.children[0];
+    const cell_b = row.children[1];
+    try std.testing.expect(cell_b.width > cell_a.width);
 }
