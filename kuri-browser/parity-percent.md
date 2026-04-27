@@ -15,7 +15,7 @@ This score is meant to answer a narrower question:
 - Last live replacement-readiness bench: **74%**, not ready, measured against local Kuri on 2026-04-26
 - Last live parity validation: **47%** of the full target surface, with all cache-busted live probes passing on 2026-04-26
 - Last CDP surface live smoke: **22 of 22 calls passed** on 2026-04-27, including `Schema.getDomains`, `Browser.getWindowForTarget`, `Runtime.callFunctionOn` (real eval, returns 42 from `(a,b)=>a*b` with args `[6,7]`), `Network.setCookies`/`Network.getAllCookies` round-trip, `Emulation.setDeviceMetricsOverride` reflected in `Page.getLayoutMetrics`, and `DOM.querySelector` + `DOM.getOuterHTML` returning the literal `<h1>Example Domain</h1>` from a live `Page.navigate https://example.com`.
-- Last engine + paint live smoke: `Page.captureSnapshot` on `https://example.com` (viewport 800×600) returns 2857 bytes of real CSS-aware SVG via the new `engine.zig` layout + paint pipeline; the H1 emits at `font-size:24px` (author `1.5em` × 16px) and `font-weight:700` (UA bold), the body paragraph at 16px / weight 400, and the anchor at `fill:#334488` with `text-decoration:underline` (UA `a:link` underline + author `color:#348`). Word-wraps inside the 480px-wide content area. The same engine drives the CLI: `kuri-browser paint https://example.com` produces a 2931-byte engine SVG; `native_paint.zig` shrunk 934 → 500 lines once `resolvePageStyle`/`firstStyleText`/`cssRule`/`cssProperty`/`parseCssLength`/`applyBodyMargin`/`drawFlowChildren`/`drawFlowNode`/`writeFlowText`/`PageStyle` and the dead `collectPaintBlocks`/`drawBlock`/`drawTextBlock` helpers were removed. The Hacker News and Quotes-to-Scrape special-case branches stay because they beat the generic engine on pixel parity.
+- Last engine + paint live smoke: `Page.captureSnapshot` on `https://example.com` (viewport 800×600) returns 2857 bytes of real CSS-aware SVG via the `engine.zig` layout + paint pipeline; the H1 emits at `font-size:24px` (author `1.5em` × 16px) and `font-weight:700` (UA bold), the body paragraph at 16px / weight 400, and the anchor at `fill:#334488` with `text-decoration:underline` (UA `a:link` underline + author `color:#348`). Word-wraps inside the 480px-wide content area. The same engine drives the CLI: `kuri-browser paint https://example.com` produces a 2,955-byte engine SVG. The unified renderer at commit `8c9d8a9` adds per-character glyph width tables (sans/serif/mono with bold scaling), CSS `white-space` collapsing + `<br>` + `text-indent`, replaced-element rendering for `<img>`/`<hr>`/`<input>`/`<button>`/`<textarea>`, list-item markers (`•` for ul, decimal counters for ol), CSS `border-radius`/`opacity`/`box-shadow` paint, and adjacent-sibling vertical margin collapsing per CSS 2.1 §8.3.1. Engine tests are now wired into `zig build test` (count: 47 → 65; +18 engine tests). The Hacker News and Quotes-to-Scrape special-case branches stay because they beat the generic engine on pixel parity (HN: special-case 88.94% engine wrapper, quotes: 90.32%).
 - Last CSS engine live smoke: against `https://example.com` on 2026-04-27 — `CSS.getComputedStyleForNode` resolves the proper cascade for `h1` (author `font-size:1.5em` overrides UA `font-size:2em`, plus UA defaults `display:block`, `margin:0.67em 0`, `font-weight:bold`); `CSS.getMatchedStylesForNode` returns 3 matched rules with origin (user-agent / regular) and specificity (a/b/c) per CDP shape; `CSS.getStyleSheetText` returns the actual `body{background:#eee;width:60vw;margin:15vh auto;...}h1{font-size:1.5em}div{opacity:0.8}a:link,a:visited{color:#348}` from the page; `CSS.getBackgroundColors` returns computed font-size/font-weight.
 - Last Input dispatch live smoke: `DOM.focus` + `Input.insertText` ("Hello, " then "World!") + `Input.dispatchKeyEvent` with `key:"Backspace"` mutates the focused node's stored value through the per-state input-override table, so subsequent `DOM.getAttributes` + `Runtime.getProperties` queries observe the typed text.
 
@@ -94,32 +94,37 @@ python3 tools/paint_parity.py https://quotes.toscrape.com/js/ --paint-js --keep-
 
 This path does not use Kuri/CDP or Chrome. It paints a text/DOM SVG approximation from the native page model. With `--js`, it serializes the QuickJS-mutated DOM before paint. It is useful for token-light visual context, but it is not pixel-equivalent CSS layout or a raster screenshot.
 
-Measured against real Chrome on `https://example.com` at `1280x720`:
+Measured against real Chrome on `https://example.com` at `1280x720` on 2026-04-27 with the unified renderer at commit `8c9d8a9`:
 
 - Chrome actual screenshot: **16,577 bytes**
-- Native SVG paint artifact: **758 bytes**
-- Native SVG rasterized through a no-margin HTML wrapper: **16,583 bytes**
-- Exact matching pixels through wrapper: **99.35%**
-- Mean absolute RGB delta through wrapper: **0.48/255**
-- Direct standalone SVG screenshot exact matching pixels: **87.27%**
+- Native SVG paint artifact: **2,955 bytes**
+- Native SVG rasterized through a no-margin HTML wrapper: **16,549 bytes**
+- Exact matching pixels through wrapper: **0.00%** (17/921,600)
+- Mean absolute RGB delta through wrapper: **18.62/255**
+- Direct standalone SVG screenshot exact matching pixels: **0.00%** (17/921,600)
+- Direct mean absolute RGB delta: **18.62/255**
 
-The wrapper mode removes Chrome's standalone-SVG page display artifact and measures the renderer content. It is still not 1:1 because the remaining text pixels differ from Chrome's HTML layout/raster path.
+A previous entry in this file claimed `99.35%` exact wrapper pixels and `87.27%` exact direct pixels for `example.com`. Re-measuring at the pre-team baseline `04dc45e` produced `0.01%` exact / `18.86` mean delta — the historical numbers do not reproduce on this machine and are not used as a comparison baseline. The unified renderer nudges mean delta from `18.86 → 18.62` (slightly closer to Chrome). example.com renders dim because the page's CSS has `div { opacity: 0.8 }` which the renderer now honors, and the body background falls back to white instead of the page's `#eee` (a separate cascade bug with the `background` shorthand still to investigate).
 
-Measured against real Chrome on the JS-rendered `https://quotes.toscrape.com/js/` with `--paint-js` at `1280x720`:
+Measured against real Chrome on the JS-rendered `https://quotes.toscrape.com/js/` with `--paint-js` at `1280x720` on 2026-04-27:
 
 - Chrome actual screenshot: **71,989 bytes**
 - Native SVG paint artifact: **8,457 bytes**
 - Native SVG rasterized through a no-margin HTML wrapper: **68,496 bytes**
-- Exact matching pixels through wrapper: **90.32%**
+- Exact matching pixels through wrapper: **90.32%** (832,415/921,600)
 - Mean absolute RGB delta through wrapper: **7.47/255**
 
-Measured against real Chrome on `https://news.ycombinator.com` at `1280x720`:
+This URL still routes through the Quotes-to-Scrape special-case path in `native_paint.zig` (`paintQuotesToScrapeSvg`) because the special case beats the generic engine on pixel parity for that page. Engine-only parity for this URL is not yet measured separately.
+
+Measured against real Chrome on `https://news.ycombinator.com` at `1280x720` on 2026-04-27 with commit `8c9d8a9`:
 
 - Chrome actual screenshot: **159,387 bytes**
-- Native SVG paint artifact: **10,127 bytes**
-- Native SVG rasterized through a no-margin HTML wrapper: **146,370 bytes**
-- Exact matching pixels through wrapper: **88.06%**
-- Mean absolute RGB delta through wrapper: **10.58/255**
+- Native SVG paint artifact: **10,072 bytes**
+- Native SVG rasterized through a no-margin HTML wrapper: **142,243 bytes**
+- Exact matching pixels through wrapper: **88.94%** (819,690/921,600)
+- Mean absolute RGB delta through wrapper: **9.44/255**
+
+This URL also routes through the Hacker News special-case path (`paintHackerNewsSvg`); the unified renderer's text-width tables and decoration paint nonetheless improved this score from the previous **88.06% / 10.58 mean** to **88.94% / 9.44 mean** on the same fixture. The improvement is attributable to better-tuned text widths in `textWidth` (per-char tables) and tighter colorToHex output paths in the merged `paintBoxInner`.
 
 ## Heavier JS Smoke Tests
 
