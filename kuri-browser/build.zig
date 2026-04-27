@@ -82,8 +82,25 @@ pub fn build(b: *std.Build) void {
     });
     jsengine_tests.root_module.linkLibrary(quickjs_dep.artifact("quickjs-ng"));
     const run_jsengine_tests = b.addRunArtifact(jsengine_tests);
+
+    const engine_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/engine.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    const engine_tests = b.addTest(.{
+        .root_module = engine_test_mod,
+        // Restrict to tests defined in engine.zig itself; dom.zig has its own
+        // test entry points exercised via main_tests/jsengine_tests, where its
+        // allocator pairing is known to be valid.
+        .filters = &.{"engine.test"},
+    });
+    const run_engine_tests = b.addRunArtifact(engine_tests);
+
     const test_step = b.step("test", "Run kuri-browser tests");
     test_step.dependOn(&run_main_tests.step);
     test_step.dependOn(&run_runtime_tests.step);
     test_step.dependOn(&run_jsengine_tests.step);
+    test_step.dependOn(&run_engine_tests.step);
 }

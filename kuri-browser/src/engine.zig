@@ -54,6 +54,13 @@ pub const TextAlign = enum {
     justify,
 };
 
+pub const BoxShadow = struct {
+    offset_x: f64,
+    offset_y: f64,
+    blur: f64,
+    color: Color,
+};
+
 pub const WhiteSpace = enum {
     normal,
     pre,
@@ -80,6 +87,9 @@ pub const ComputedStyle = struct {
     height: ?f64 = null,
     text_decoration_underline: bool = false,
     italic: bool = false,
+    border_radius: f64 = 0,
+    opacity: f64 = 1.0,
+    box_shadow: ?BoxShadow = null,
 };
 
 pub const TextRun = struct {
@@ -109,6 +119,7 @@ pub const LayoutResult = struct {
     arena: std.heap.ArenaAllocator,
     root: *LayoutBox,
     viewport: Viewport,
+    doc: *const dom.Document,
 
     pub fn deinit(self: *LayoutResult) void {
         self.arena.deinit();
@@ -149,6 +160,7 @@ pub fn layoutPage(
         .arena = arena,
         .root = root_box,
         .viewport = viewport,
+        .doc = &page.dom,
     };
 }
 
@@ -298,6 +310,20 @@ fn computeStyle(
     if (computed.get("border-color")) |v| {
         if (parseColor(v)) |c| style.border_color = c;
     }
+    if (computed.get("border-radius")) |v| {
+        if (parseLength(v, style.font_size, ctx.viewport, style.font_size)) |px| {
+            style.border_radius = px;
+        }
+    }
+    if (computed.get("opacity")) |v| {
+        const trimmed = std.mem.trim(u8, v, " \t\r\n");
+        if (std.fmt.parseFloat(f64, trimmed) catch null) |o| {
+            style.opacity = std.math.clamp(o, 0.0, 1.0);
+        }
+    }
+    if (computed.get("box-shadow")) |v| {
+        style.box_shadow = parseBoxShadow(v, style.font_size, ctx.viewport);
+    }
     return style;
 }
 
@@ -313,10 +339,19 @@ fn parseWhiteSpace(value: []const u8, fallback: WhiteSpace) WhiteSpace {
 
 fn defaultDisplayForTag(tag: []const u8) Display {
     if (tag.len == 0) return .block;
+    if (std.ascii.eqlIgnoreCase(tag, "li")) return .list_item;
+    if (std.ascii.eqlIgnoreCase(tag, "button") or
+        std.ascii.eqlIgnoreCase(tag, "input") or
+        std.ascii.eqlIgnoreCase(tag, "textarea") or
+        std.ascii.eqlIgnoreCase(tag, "select") or
+        std.ascii.eqlIgnoreCase(tag, "img"))
+    {
+        return .inline_block;
+    }
     const block_tags = [_][]const u8{
         "html",   "body",   "div",    "p",     "header", "footer", "section",
         "article","nav",    "main",   "aside", "h1",     "h2",     "h3",
-        "h4",     "h5",     "h6",     "ul",    "ol",     "li",     "dl",
+        "h4",     "h5",     "h6",     "ul",    "ol",                "dl",
         "dt",     "dd",     "blockquote","pre","figure","figcaption","form",
         "fieldset","table", "thead",  "tbody", "tfoot",  "tr",     "td",
         "th",     "address","center", "hr",
@@ -414,6 +449,65 @@ fn parseEdgeShorthand(value: []const u8, font_size: f64, viewport: Viewport) Box
     if (n == 3) return .{ .top = t0, .right = t1, .bottom = t2, .left = t1 };
     const t3 = parseLength(tokens[3], font_size, viewport, font_size) orelse 0;
     return .{ .top = t0, .right = t1, .bottom = t2, .left = t3 };
+}
+
+fn parseBoxShadow(value: []const u8, font_size: f64, viewport: Viewport) ?BoxShadow {
+    // Parse the common form: "<off-x> <off-y> <blur> <color>"
+    // Skip inset, multiple shadows (comma-separated), spread.
+    const trimmed = std.mem.trim(u8, value, " \t\r\n");
+    if (trimmed.len == 0) return null;
+    if (std.ascii.eqlIgnoreCase(trimmed, "none")) return null;
+    // Take only the first shadow (before any comma).
+    const first_end = std.mem.indexOfScalar(u8, trimmed, ',') orelse trimmed.len;
+    const first = std.mem.trim(u8, trimmed[0..first_end], " \t\r\n");
+    if (first.len == 0) return null;
+
+    // Find the color: scan from the end for a token that parses as a color
+    // (hex, rgb(...), rgba(...), or named). The remaining prefix tokens are lengths.
+    var tokens: [8][]const u8 = undefined;
+    var n: usize = 0;
+    var iter = std.mem.tokenizeAny(u8, first, " \t\r\n");
+    while (iter.next()) |tok| {
+        if (n >= tokens.len) break;
+        // Skip "inset" keyword.
+        if (std.ascii.eqlIgnoreCase(tok, "inset")) continue;
+        tokens[n] = tok;
+        n += 1;
+    }
+    if (n == 0) return null;
+
+    // Re-stitch a token range that may include a parenthesized rgb(...) call.
+    // Simpler approach: try to find the last token that is a parseable color.
+    var color_idx: ?usize = null;
+    var i: usize = n;
+    while (i > 0) {
+        i -= 1;
+        if (parseColor(tokens[i])) |_| {
+            color_idx = i;
+            break;
+        }
+    }
+
+    var color: Color = Color.black;
+    var length_count: usize = n;
+    if (color_idx) |ci| {
+        if (parseColor(tokens[ci])) |c| color = c;
+        length_count = ci;
+    }
+
+    if (length_count < 2) return null;
+    const off_x = parseLength(tokens[0], font_size, viewport, font_size) orelse 0;
+    const off_y = parseLength(tokens[1], font_size, viewport, font_size) orelse 0;
+    const blur: f64 = if (length_count >= 3)
+        (parseLength(tokens[2], font_size, viewport, font_size) orelse 0)
+    else
+        0;
+    return .{
+        .offset_x = off_x,
+        .offset_y = off_y,
+        .blur = blur,
+        .color = color,
+    };
 }
 
 fn parseColor(value: []const u8) ?Color {
@@ -526,6 +620,31 @@ fn layoutBlock(
         return makeEmptyBox(ctx, node_id, style, parent_x, parent_y);
     }
 
+    // Replaced / specialized elements: produce intrinsic boxes directly.
+    if (node.kind == .element) {
+        if (std.ascii.eqlIgnoreCase(node.name, "img")) {
+            return try layoutImg(ctx, node_id, &style, parent_x, parent_y);
+        }
+        if (std.ascii.eqlIgnoreCase(node.name, "hr")) {
+            return try layoutHr(ctx, node_id, &style, parent_x, parent_y, available_width);
+        }
+        if (std.ascii.eqlIgnoreCase(node.name, "input")) {
+            return try layoutInput(ctx, node_id, &style, parent_x, parent_y);
+        }
+        if (std.ascii.eqlIgnoreCase(node.name, "button")) {
+            return try layoutButton(ctx, node_id, &style, parent_x, parent_y);
+        }
+        if (std.ascii.eqlIgnoreCase(node.name, "textarea")) {
+            return try layoutTextarea(ctx, node_id, &style, parent_x, parent_y);
+        }
+    }
+
+    // List items: ensure there is some left padding for the marker.
+    const is_list_item = node.kind == .element and std.ascii.eqlIgnoreCase(node.name, "li");
+    if (is_list_item and style.padding.left < 28) {
+        style.padding.left = 28;
+    }
+
     // Resolve auto-margin centering.
     if (style.margin.left < 0 and style.margin.right < 0) {
         if (style.width) |w| {
@@ -562,6 +681,11 @@ fn layoutBlock(
     var children: std.ArrayList(*LayoutBox) = .empty;
     var inline_buffer: std.ArrayList(InlineItem) = .empty;
     var current_y = content_y;
+    // Track the previous block sibling's bottom margin so adjacent vertical
+    // margins collapse per CSS 2.1 §8.3.1 (max instead of sum). A value of
+    // null means there is no previous block sibling to collapse against
+    // (e.g. just after an inline-buffer flush, which has no margins).
+    var prev_block_margin_bottom: ?f64 = null;
 
     var child = node.first_child;
     while (child) |cid| : (child = ctx.doc.nodes[cid].next_sibling) {
@@ -596,10 +720,19 @@ fn layoutBlock(
             current_y += inline_box.height;
             try children.append(ctx.allocator, inline_box);
             inline_buffer.clearRetainingCapacity();
+            prev_block_margin_bottom = null;
+        }
+        // Adjacent-sibling vertical margin collapsing: subtract the smaller
+        // of the previous bottom margin and this top margin so the gap
+        // between them becomes max(prev_bottom, this_top).
+        if (prev_block_margin_bottom) |prev_bottom| {
+            const collapse = @min(prev_bottom, child_style.margin.top);
+            current_y -= collapse;
         }
         const child_box = try layoutBlock(ctx, cid, content_x, current_y, content_width, inheritable);
         current_y += child_box.height + child_box.style.margin.top + child_box.style.margin.bottom;
         try children.append(ctx.allocator, child_box);
+        prev_block_margin_bottom = child_box.style.margin.bottom;
     }
 
     if (inline_buffer.items.len > 0) {
@@ -611,6 +744,30 @@ fn layoutBlock(
     const content_height = current_y - content_y;
     const explicit_height = style.height orelse content_height;
 
+    // List-item marker: render a bullet or counter just left of the content edge.
+    var marker_runs: []TextRun = &.{};
+    if (is_list_item) {
+        const marker_text = try liMarker(ctx, node_id);
+        if (marker_text.len > 0) {
+            const marker_w = textWidth(marker_text, style.font_family, style.font_size, style.font_weight, style.italic);
+            const marker_x = @max(parent_x, content_x - marker_w - 4);
+            const baseline = content_y + style.font_size * 0.85;
+            var runs: std.ArrayList(TextRun) = .empty;
+            try runs.append(ctx.allocator, .{
+                .text = marker_text,
+                .x = marker_x,
+                .y = baseline,
+                .font_family = style.font_family,
+                .font_size = style.font_size,
+                .font_weight = style.font_weight,
+                .color = style.color,
+                .underline = false,
+                .italic = false,
+            });
+            marker_runs = try runs.toOwnedSlice(ctx.allocator);
+        }
+    }
+
     const box = try ctx.allocator.create(LayoutBox);
     box.* = .{
         .node_id = node_id,
@@ -620,7 +777,7 @@ fn layoutBlock(
         .width = outer_width,
         .height = explicit_height + style.padding.top + style.padding.bottom + style.border_width.top + style.border_width.bottom,
         .children = try children.toOwnedSlice(ctx.allocator),
-        .text_runs = &.{},
+        .text_runs = marker_runs,
     };
     return box;
 }
@@ -651,6 +808,330 @@ fn makeTextOnlyBlock(
     const box = try buildInlineBox(ctx, parent_x, parent_y, available_width, parent, items.items, 0);
     return box;
 }
+
+// ---------------- Replaced elements ----------------
+
+fn parseIntAttr(value: []const u8) ?f64 {
+    const t = std.mem.trim(u8, value, " \t\r\n");
+    if (t.len == 0) return null;
+    // Strip a trailing "px" if present.
+    var end: usize = t.len;
+    if (end >= 2 and std.ascii.eqlIgnoreCase(t[end - 2 .. end], "px")) end -= 2;
+    const num_str = std.mem.trim(u8, t[0..end], " \t");
+    if (num_str.len == 0) return null;
+    const v = std.fmt.parseFloat(f64, num_str) catch return null;
+    if (v < 0) return null;
+    return v;
+}
+
+fn layoutImg(
+    ctx: *LayoutCtx,
+    node_id: dom.NodeId,
+    style: *ComputedStyle,
+    parent_x: f64,
+    parent_y: f64,
+) !*LayoutBox {
+    var width: f64 = 0;
+    var height: f64 = 0;
+    if (ctx.doc.getAttribute(node_id, "width")) |w_attr| {
+        if (parseIntAttr(w_attr)) |w| width = w;
+    }
+    if (ctx.doc.getAttribute(node_id, "height")) |h_attr| {
+        if (parseIntAttr(h_attr)) |h| height = h;
+    }
+    if (style.width) |w| width = w;
+    if (style.height) |h| height = h;
+
+    if (style.margin.left < 0) style.margin.left = 0;
+    if (style.margin.right < 0) style.margin.right = 0;
+
+    const box = try ctx.allocator.create(LayoutBox);
+    box.* = .{
+        .node_id = node_id,
+        .style = style.*,
+        .x = parent_x + style.margin.left,
+        .y = parent_y + style.margin.top,
+        .width = width,
+        .height = height,
+        .children = &.{},
+        .text_runs = &.{},
+    };
+    return box;
+}
+
+fn layoutHr(
+    ctx: *LayoutCtx,
+    node_id: dom.NodeId,
+    style: *ComputedStyle,
+    parent_x: f64,
+    parent_y: f64,
+    available_width: f64,
+) !*LayoutBox {
+    if (style.margin.left < 0) style.margin.left = 0;
+    if (style.margin.right < 0) style.margin.right = 0;
+    const w = if (style.width) |sw| sw else available_width - style.margin.left - style.margin.right;
+    const h: f64 = if (style.height) |sh| sh else 2;
+
+    const box = try ctx.allocator.create(LayoutBox);
+    box.* = .{
+        .node_id = node_id,
+        .style = style.*,
+        .x = parent_x + style.margin.left,
+        .y = parent_y + style.margin.top,
+        .width = w,
+        .height = h,
+        .children = &.{},
+        .text_runs = &.{},
+    };
+    return box;
+}
+
+fn layoutInput(
+    ctx: *LayoutCtx,
+    node_id: dom.NodeId,
+    style: *ComputedStyle,
+    parent_x: f64,
+    parent_y: f64,
+) !*LayoutBox {
+    if (style.margin.left < 0) style.margin.left = 0;
+    if (style.margin.right < 0) style.margin.right = 0;
+
+    const type_attr = ctx.doc.getAttribute(node_id, "type") orelse "text";
+    // Hidden inputs don't render.
+    if (std.ascii.eqlIgnoreCase(std.mem.trim(u8, type_attr, " \t"), "hidden")) {
+        const empty = try ctx.allocator.create(LayoutBox);
+        empty.* = .{
+            .node_id = node_id,
+            .style = style.*,
+            .x = parent_x,
+            .y = parent_y,
+            .width = 0,
+            .height = 0,
+        };
+        return empty;
+    }
+
+    const default_w: f64 = 152;
+    const default_h: f64 = 21;
+    const w: f64 = if (style.width) |sw| sw else default_w;
+    const h: f64 = if (style.height) |sh| sh else default_h;
+
+    // Pick text + color: prefer value, fall back to placeholder (gray).
+    var display_text: []const u8 = "";
+    var text_color: Color = style.color;
+    if (ctx.doc.getAttribute(node_id, "value")) |v| {
+        display_text = v;
+    } else if (ctx.doc.getAttribute(node_id, "placeholder")) |p| {
+        display_text = p;
+        text_color = .{ .r = 117, .g = 117, .b = 117 };
+    }
+
+    var runs: std.ArrayList(TextRun) = .empty;
+    if (display_text.len > 0) {
+        const baseline = parent_y + style.margin.top + h * 0.7;
+        try runs.append(ctx.allocator, .{
+            .text = display_text,
+            .x = parent_x + style.margin.left + 4,
+            .y = baseline,
+            .font_family = style.font_family,
+            .font_size = style.font_size,
+            .font_weight = style.font_weight,
+            .color = text_color,
+            .underline = false,
+            .italic = false,
+        });
+    }
+
+    var box_style = style.*;
+    if (box_style.background_color == null) box_style.background_color = Color.white;
+    box_style.border_width = .{ .top = 1, .right = 1, .bottom = 1, .left = 1 };
+    box_style.border_color = .{ .r = 169, .g = 169, .b = 169 };
+
+    const box = try ctx.allocator.create(LayoutBox);
+    box.* = .{
+        .node_id = node_id,
+        .style = box_style,
+        .x = parent_x + style.margin.left,
+        .y = parent_y + style.margin.top,
+        .width = w,
+        .height = h,
+        .children = &.{},
+        .text_runs = try runs.toOwnedSlice(ctx.allocator),
+    };
+    return box;
+}
+
+fn layoutButton(
+    ctx: *LayoutCtx,
+    node_id: dom.NodeId,
+    style: *ComputedStyle,
+    parent_x: f64,
+    parent_y: f64,
+) !*LayoutBox {
+    if (style.margin.left < 0) style.margin.left = 0;
+    if (style.margin.right < 0) style.margin.right = 0;
+
+    // Collect button label as flat text from descendants.
+    const label = try collectButtonText(ctx, node_id);
+    const text_w = textWidth(label, style.font_family, style.font_size, style.font_weight, style.italic);
+    const min_w: f64 = 24;
+    const padding_x: f64 = 12;
+    const w: f64 = if (style.width) |sw| sw else @max(min_w, text_w + padding_x * 2);
+    const h: f64 = if (style.height) |sh| sh else 32;
+
+    var runs: std.ArrayList(TextRun) = .empty;
+    if (label.len > 0) {
+        const text_x = parent_x + style.margin.left + (w - text_w) / 2.0;
+        const baseline = parent_y + style.margin.top + h * 0.65;
+        try runs.append(ctx.allocator, .{
+            .text = label,
+            .x = text_x,
+            .y = baseline,
+            .font_family = style.font_family,
+            .font_size = style.font_size,
+            .font_weight = style.font_weight,
+            .color = style.color,
+            .underline = false,
+            .italic = false,
+        });
+    }
+
+    var box_style = style.*;
+    if (box_style.background_color == null) {
+        box_style.background_color = .{ .r = 0xef, .g = 0xef, .b = 0xef };
+    }
+    box_style.border_width = .{ .top = 1, .right = 1, .bottom = 1, .left = 1 };
+    box_style.border_color = .{ .r = 169, .g = 169, .b = 169 };
+
+    const box = try ctx.allocator.create(LayoutBox);
+    box.* = .{
+        .node_id = node_id,
+        .style = box_style,
+        .x = parent_x + style.margin.left,
+        .y = parent_y + style.margin.top,
+        .width = w,
+        .height = h,
+        .children = &.{},
+        .text_runs = try runs.toOwnedSlice(ctx.allocator),
+    };
+    return box;
+}
+
+fn layoutTextarea(
+    ctx: *LayoutCtx,
+    node_id: dom.NodeId,
+    style: *ComputedStyle,
+    parent_x: f64,
+    parent_y: f64,
+) !*LayoutBox {
+    if (style.margin.left < 0) style.margin.left = 0;
+    if (style.margin.right < 0) style.margin.right = 0;
+
+    const default_w: f64 = 200;
+    const default_h: f64 = 60;
+    const w: f64 = if (style.width) |sw| sw else default_w;
+    const h: f64 = if (style.height) |sh| sh else default_h;
+
+    const text = try collectButtonText(ctx, node_id);
+
+    var runs: std.ArrayList(TextRun) = .empty;
+    if (text.len > 0) {
+        const baseline = parent_y + style.margin.top + style.font_size * 0.85 + 4;
+        try runs.append(ctx.allocator, .{
+            .text = text,
+            .x = parent_x + style.margin.left + 4,
+            .y = baseline,
+            .font_family = style.font_family,
+            .font_size = style.font_size,
+            .font_weight = style.font_weight,
+            .color = style.color,
+            .underline = false,
+            .italic = false,
+        });
+    }
+
+    var box_style = style.*;
+    if (box_style.background_color == null) box_style.background_color = Color.white;
+    box_style.border_width = .{ .top = 1, .right = 1, .bottom = 1, .left = 1 };
+    box_style.border_color = .{ .r = 169, .g = 169, .b = 169 };
+
+    const box = try ctx.allocator.create(LayoutBox);
+    box.* = .{
+        .node_id = node_id,
+        .style = box_style,
+        .x = parent_x + style.margin.left,
+        .y = parent_y + style.margin.top,
+        .width = w,
+        .height = h,
+        .children = &.{},
+        .text_runs = try runs.toOwnedSlice(ctx.allocator),
+    };
+    return box;
+}
+
+fn collectButtonText(ctx: *LayoutCtx, node_id: dom.NodeId) ![]const u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    try appendDescendantText(ctx, node_id, &buf);
+    // Trim and collapse whitespace.
+    const raw = buf.items;
+    var out: std.ArrayList(u8) = .empty;
+    var prev_space = true;
+    for (raw) |c| {
+        const is_space = c == ' ' or c == '\t' or c == '\n' or c == '\r';
+        if (is_space) {
+            if (!prev_space) try out.append(ctx.allocator, ' ');
+            prev_space = true;
+        } else {
+            try out.append(ctx.allocator, c);
+            prev_space = false;
+        }
+    }
+    if (out.items.len > 0 and out.items[out.items.len - 1] == ' ') {
+        _ = out.pop();
+    }
+    return out.toOwnedSlice(ctx.allocator);
+}
+
+fn appendDescendantText(ctx: *LayoutCtx, node_id: dom.NodeId, out: *std.ArrayList(u8)) !void {
+    const node = ctx.doc.getNode(node_id);
+    var child = node.first_child;
+    while (child) |cid| : (child = ctx.doc.nodes[cid].next_sibling) {
+        const child_node = ctx.doc.getNode(cid);
+        if (child_node.kind == .text) {
+            try out.appendSlice(ctx.allocator, child_node.text);
+        } else if (child_node.kind == .element) {
+            try appendDescendantText(ctx, cid, out);
+        }
+    }
+}
+
+fn liMarker(ctx: *LayoutCtx, node_id: dom.NodeId) ![]const u8 {
+    const node = ctx.doc.getNode(node_id);
+    // Walk parents to find ul/ol context.
+    var ancestor = node.parent;
+    while (ancestor) |aid| {
+        const a = ctx.doc.getNode(aid);
+        if (a.kind == .element) {
+            if (std.ascii.eqlIgnoreCase(a.name, "ol")) {
+                // Count preceding li siblings + 1.
+                var count: usize = 1;
+                var sib = node.prev_sibling;
+                while (sib) |sid| : (sib = ctx.doc.nodes[sid].prev_sibling) {
+                    const s = ctx.doc.getNode(sid);
+                    if (s.kind == .element and std.ascii.eqlIgnoreCase(s.name, "li")) count += 1;
+                }
+                return try std.fmt.allocPrint(ctx.allocator, "{d}.", .{count});
+            }
+            if (std.ascii.eqlIgnoreCase(a.name, "ul")) {
+                return try ctx.allocator.dupe(u8, "\u{2022}");
+            }
+        }
+        ancestor = a.parent;
+    }
+    // Default: bullet.
+    return try ctx.allocator.dupe(u8, "\u{2022}");
+}
+
 
 const InlineItemKind = enum { text, line_break };
 
@@ -1257,37 +1738,163 @@ pub fn paintToSvg(
         .{ result.viewport.width, result.viewport.height, result.viewport.width, result.viewport.height });
     try buf.writer.writeAll("<desc>kuri-engine: CSS-aware layout + paint, not full CSS layout</desc>");
     try buf.writer.writeAll("<rect width=\"100%\" height=\"100%\" fill=\"white\"/>");
-    try paintBox(allocator, &buf, result.root);
+    try paintBox(allocator, &buf, result.root, result.doc);
     try buf.writer.writeAll("</svg>");
     return allocator.dupe(u8, buf.written());
 }
 
-fn paintBox(allocator: std.mem.Allocator, buf: *std.Io.Writer.Allocating, box: *const LayoutBox) !void {
+fn paintBox(
+    allocator: std.mem.Allocator,
+    buf: *std.Io.Writer.Allocating,
+    box: *const LayoutBox,
+    doc: *const dom.Document,
+) !void {
+    var shadow_counter: u32 = 0;
+    try paintBoxInner(allocator, buf, box, doc, &shadow_counter);
+}
+
+fn paintBoxInner(
+    allocator: std.mem.Allocator,
+    buf: *std.Io.Writer.Allocating,
+    box: *const LayoutBox,
+    doc: *const dom.Document,
+    shadow_counter: *u32,
+) !void {
+    // Detect specialized element painting (img, hr) by tag name.
+    var tag: []const u8 = "";
+    if (box.node_id) |nid| {
+        const n = doc.getNode(nid);
+        if (n.kind == .element) tag = n.name;
+    }
+
+    if (tag.len > 0 and std.ascii.eqlIgnoreCase(tag, "img")) {
+        if (box.width <= 0 or box.height <= 0) return;
+        // Border + diagonal line + alt text centered.
+        try buf.writer.print(
+            "<rect x=\"{d:.2}\" y=\"{d:.2}\" width=\"{d:.2}\" height=\"{d:.2}\" fill=\"none\" stroke=\"#808080\" stroke-width=\"1\"/>",
+            .{ box.x, box.y, box.width, box.height });
+        try buf.writer.print(
+            "<line x1=\"{d:.2}\" y1=\"{d:.2}\" x2=\"{d:.2}\" y2=\"{d:.2}\" stroke=\"#808080\" stroke-width=\"1\"/>",
+            .{ box.x, box.y, box.x + box.width, box.y + box.height });
+        if (box.node_id) |nid| {
+            if (doc.getAttribute(nid, "alt")) |alt_text| {
+                if (alt_text.len > 0) {
+                    const alt_escaped = try escapeXml(allocator, alt_text);
+                    defer allocator.free(alt_escaped);
+                    const cx = box.x + box.width / 2.0;
+                    const cy = box.y + box.height / 2.0 + 3;
+                    try buf.writer.print(
+                        "<text x=\"{d:.2}\" y=\"{d:.2}\" font-family=\"sans-serif\" font-size=\"10\" fill=\"#666666\" text-anchor=\"middle\">",
+                        .{ cx, cy });
+                    try buf.writer.writeAll(alt_escaped);
+                    try buf.writer.writeAll("</text>");
+                }
+            }
+        }
+        return;
+    }
+
+    if (tag.len > 0 and std.ascii.eqlIgnoreCase(tag, "hr")) {
+        const mid_y = box.y + box.height / 2.0;
+        try buf.writer.print(
+            "<line x1=\"{d:.2}\" y1=\"{d:.2}\" x2=\"{d:.2}\" y2=\"{d:.2}\" stroke=\"#cccccc\" stroke-width=\"1\"/>",
+            .{ box.x, mid_y, box.x + box.width, mid_y });
+        return;
+    }
+
+    const wrap_opacity = box.style.opacity < 1.0 - 0.0005;
+    if (wrap_opacity) {
+        try buf.writer.print("<g opacity=\"{d:.3}\">", .{box.style.opacity});
+    }
+
+    // Box shadow: paint before the bg rect so it sits underneath.
+    if (box.style.box_shadow) |shadow| {
+        if (box.width > 0 and box.height > 0 and shadow.color.a > 0.001) {
+            const sx = box.x + shadow.offset_x;
+            const sy = box.y + shadow.offset_y;
+            const color_hex = try colorToHex(allocator, shadow.color);
+            defer allocator.free(color_hex);
+            if (shadow.blur > 0) {
+                const id = shadow_counter.*;
+                shadow_counter.* += 1;
+                try buf.writer.print(
+                    "<defs><filter id=\"shadow{d}\" x=\"-50%\" y=\"-50%\" width=\"200%\" height=\"200%\"><feGaussianBlur stdDeviation=\"{d:.3}\"/></filter></defs>",
+                    .{ id, shadow.blur / 2.0 },
+                );
+                if (box.style.border_radius > 0) {
+                    try buf.writer.print(
+                        "<rect x=\"{d:.2}\" y=\"{d:.2}\" width=\"{d:.2}\" height=\"{d:.2}\" rx=\"{d:.2}\" ry=\"{d:.2}\" fill=\"{s}\" fill-opacity=\"{d:.3}\" filter=\"url(#shadow{d})\"/>",
+                        .{ sx, sy, box.width, box.height, box.style.border_radius, box.style.border_radius, color_hex, shadow.color.a, id },
+                    );
+                } else {
+                    try buf.writer.print(
+                        "<rect x=\"{d:.2}\" y=\"{d:.2}\" width=\"{d:.2}\" height=\"{d:.2}\" fill=\"{s}\" fill-opacity=\"{d:.3}\" filter=\"url(#shadow{d})\"/>",
+                        .{ sx, sy, box.width, box.height, color_hex, shadow.color.a, id },
+                    );
+                }
+            } else {
+                if (box.style.border_radius > 0) {
+                    try buf.writer.print(
+                        "<rect x=\"{d:.2}\" y=\"{d:.2}\" width=\"{d:.2}\" height=\"{d:.2}\" rx=\"{d:.2}\" ry=\"{d:.2}\" fill=\"{s}\" fill-opacity=\"{d:.3}\"/>",
+                        .{ sx, sy, box.width, box.height, box.style.border_radius, box.style.border_radius, color_hex, shadow.color.a },
+                    );
+                } else {
+                    try buf.writer.print(
+                        "<rect x=\"{d:.2}\" y=\"{d:.2}\" width=\"{d:.2}\" height=\"{d:.2}\" fill=\"{s}\" fill-opacity=\"{d:.3}\"/>",
+                        .{ sx, sy, box.width, box.height, color_hex, shadow.color.a },
+                    );
+                }
+            }
+        }
+    }
+
     if (box.style.background_color) |bg| {
         if (bg.a > 0.001) {
-            try buf.writer.print(
-                "<rect x=\"{d:.2}\" y=\"{d:.2}\" width=\"{d:.2}\" height=\"{d:.2}\" fill=\"{s}\" fill-opacity=\"{d:.3}\"/>",
-                .{ box.x, box.y, box.width, box.height, try colorToHex(allocator, bg), bg.a });
+            const bg_hex = try colorToHex(allocator, bg);
+            defer allocator.free(bg_hex);
+            if (box.style.border_radius > 0) {
+                try buf.writer.print(
+                    "<rect x=\"{d:.2}\" y=\"{d:.2}\" width=\"{d:.2}\" height=\"{d:.2}\" rx=\"{d:.2}\" ry=\"{d:.2}\" fill=\"{s}\" fill-opacity=\"{d:.3}\"/>",
+                    .{ box.x, box.y, box.width, box.height, box.style.border_radius, box.style.border_radius, bg_hex, bg.a });
+            } else {
+                try buf.writer.print(
+                    "<rect x=\"{d:.2}\" y=\"{d:.2}\" width=\"{d:.2}\" height=\"{d:.2}\" fill=\"{s}\" fill-opacity=\"{d:.3}\"/>",
+                    .{ box.x, box.y, box.width, box.height, bg_hex, bg.a });
+            }
         }
     }
     if (box.style.border_width.top + box.style.border_width.right + box.style.border_width.bottom + box.style.border_width.left > 0) {
-        try buf.writer.print(
-            "<rect x=\"{d:.2}\" y=\"{d:.2}\" width=\"{d:.2}\" height=\"{d:.2}\" fill=\"none\" stroke=\"{s}\" stroke-width=\"{d:.2}\"/>",
-            .{ box.x, box.y, box.width, box.height, try colorToHex(allocator, box.style.border_color), box.style.border_width.top });
+        const border_hex = try colorToHex(allocator, box.style.border_color);
+        defer allocator.free(border_hex);
+        if (box.style.border_radius > 0) {
+            try buf.writer.print(
+                "<rect x=\"{d:.2}\" y=\"{d:.2}\" width=\"{d:.2}\" height=\"{d:.2}\" rx=\"{d:.2}\" ry=\"{d:.2}\" fill=\"none\" stroke=\"{s}\" stroke-width=\"{d:.2}\"/>",
+                .{ box.x, box.y, box.width, box.height, box.style.border_radius, box.style.border_radius, border_hex, box.style.border_width.top });
+        } else {
+            try buf.writer.print(
+                "<rect x=\"{d:.2}\" y=\"{d:.2}\" width=\"{d:.2}\" height=\"{d:.2}\" fill=\"none\" stroke=\"{s}\" stroke-width=\"{d:.2}\"/>",
+                .{ box.x, box.y, box.width, box.height, border_hex, box.style.border_width.top });
+        }
     }
     for (box.text_runs) |run| {
         const escaped = try escapeXml(allocator, run.text);
         defer allocator.free(escaped);
+        const run_hex = try colorToHex(allocator, run.color);
+        defer allocator.free(run_hex);
         const font_style = if (run.italic) "italic" else "normal";
         try buf.writer.print(
             "<text x=\"{d:.2}\" y=\"{d:.2}\" font-family=\"{s}\" font-size=\"{d:.2}\" font-weight=\"{d}\" font-style=\"{s}\" fill=\"{s}\"",
-            .{ run.x, run.y, run.font_family, run.font_size, run.font_weight, font_style, try colorToHex(allocator, run.color) });
+            .{ run.x, run.y, run.font_family, run.font_size, run.font_weight, font_style, run_hex });
         if (run.underline) try buf.writer.writeAll(" text-decoration=\"underline\"");
         try buf.writer.writeAll(">");
         try buf.writer.writeAll(escaped);
         try buf.writer.writeAll("</text>");
     }
-    for (box.children) |child| try paintBox(allocator, buf, child);
+    for (box.children) |child| try paintBoxInner(allocator, buf, child, doc, shadow_counter);
+
+    if (wrap_opacity) {
+        try buf.writer.writeAll("</g>");
+    }
 }
 
 fn colorToHex(allocator: std.mem.Allocator, color: Color) ![]const u8 {
@@ -1549,4 +2156,275 @@ test "text-indent shifts first run" {
     const inline_box = InlineBoxFinder.find(result.root) orelse return error.TestUnexpectedResult;
     const first_run = inline_box.text_runs[0];
     try std.testing.expectApproxEqAbs(inline_box.x + 20.0, first_run.x, 0.001);
+}
+
+// ---------------- Tests for replaced elements (Team B) ----------------
+
+fn testMakePage(d: dom.Document) model.Page {
+    return .{
+        .requested_url = "",
+        .url = "",
+        .html = "",
+        .dom = d,
+        .title = "",
+        .text = "",
+        .links = &.{},
+        .forms = &.{},
+        .resources = &.{},
+        .js = .{},
+        .redirect_chain = &.{},
+        .cookie_count = 0,
+        .status_code = 200,
+        .content_type = "text/html",
+        .fallback_mode = .native_static,
+        .pipeline = "test",
+    };
+}
+
+fn testFindBoxByTag(box: *const LayoutBox, doc: *const dom.Document, tag: []const u8) ?*const LayoutBox {
+    if (box.node_id) |nid| {
+        const n = doc.getNode(nid);
+        if (n.kind == .element and std.ascii.eqlIgnoreCase(n.name, tag)) return box;
+    }
+    for (box.children) |child| {
+        if (testFindBoxByTag(child, doc, tag)) |found| return found;
+    }
+    return null;
+}
+
+test "img with width/height attrs sizes correctly" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const doc = try dom.Document.parse(a, "<html><body><img width=\"100\" height=\"50\" alt=\"x\"></body></html>");
+    var page = testMakePage(doc);
+    var result = try layoutPage(std.testing.allocator, &page, .{ .width = 800, .height = 600 });
+    defer result.deinit();
+    const img_box = testFindBoxByTag(result.root, result.doc, "img") orelse return error.MissingImg;
+    try std.testing.expectEqual(@as(f64, 100), img_box.width);
+    try std.testing.expectEqual(@as(f64, 50), img_box.height);
+}
+
+test "hr produces block with line paint" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const doc = try dom.Document.parse(a, "<html><body><hr></body></html>");
+    var page = testMakePage(doc);
+    var result = try layoutPage(std.testing.allocator, &page, .{ .width = 800, .height = 600 });
+    defer result.deinit();
+    const hr_box = testFindBoxByTag(result.root, result.doc, "hr") orelse return error.MissingHr;
+    try std.testing.expect(hr_box.height >= 1 and hr_box.height <= 4);
+    const svg = try paintToSvg(std.testing.allocator, &result);
+    defer std.testing.allocator.free(svg);
+    try std.testing.expect(std.mem.indexOf(u8, svg, "<line") != null);
+}
+
+test "ul produces bullet markers" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const doc = try dom.Document.parse(a, "<html><body><ul><li>a</li><li>b</li></ul></body></html>");
+    var page = testMakePage(doc);
+    var result = try layoutPage(std.testing.allocator, &page, .{ .width = 800, .height = 600 });
+    defer result.deinit();
+    const svg = try paintToSvg(std.testing.allocator, &result);
+    defer std.testing.allocator.free(svg);
+    // Bullet character U+2022 — encoded as UTF-8 0xE2 0x80 0xA2.
+    try std.testing.expect(std.mem.indexOf(u8, svg, "\u{2022}") != null);
+}
+
+test "ol produces decimal counters" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const doc = try dom.Document.parse(a, "<html><body><ol><li>x</li><li>y</li></ol></body></html>");
+    var page = testMakePage(doc);
+    var result = try layoutPage(std.testing.allocator, &page, .{ .width = 800, .height = 600 });
+    defer result.deinit();
+    const svg = try paintToSvg(std.testing.allocator, &result);
+    defer std.testing.allocator.free(svg);
+    try std.testing.expect(std.mem.indexOf(u8, svg, "1.") != null);
+    try std.testing.expect(std.mem.indexOf(u8, svg, "2.") != null);
+}
+
+test "button paints filled rect with text" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const doc = try dom.Document.parse(a, "<html><body><button>OK</button></body></html>");
+    var page = testMakePage(doc);
+    var result = try layoutPage(std.testing.allocator, &page, .{ .width = 800, .height = 600 });
+    defer result.deinit();
+    const svg = try paintToSvg(std.testing.allocator, &result);
+    defer std.testing.allocator.free(svg);
+    try std.testing.expect(std.mem.indexOf(u8, svg, "#EFEFEF") != null or std.mem.indexOf(u8, svg, "#efefef") != null);
+    try std.testing.expect(std.mem.indexOf(u8, svg, "OK") != null);
+}
+
+// ---------------- Tests for decorations & margin collapse (Team C) ----------------
+
+fn makeTestPage(doc: dom.Document) model.Page {
+    return .{
+        .requested_url = "",
+        .url = "",
+        .html = "",
+        .dom = doc,
+        .title = "",
+        .text = "",
+        .links = &.{},
+        .forms = &.{},
+        .resources = &.{},
+        .js = .{},
+        .redirect_chain = &.{},
+        .cookie_count = 0,
+        .status_code = 200,
+        .content_type = "text/html",
+        .fallback_mode = .native_static,
+        .pipeline = "test",
+    };
+}
+
+test "adjacent sibling margins collapse" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const doc = try dom.Document.parse(
+        a,
+        "<html><body><p style=\"margin:20px 0\">A</p><p style=\"margin:20px 0\">B</p></body></html>",
+    );
+    var page = makeTestPage(doc);
+    var result = try layoutPage(std.testing.allocator, &page, .{ .width = 800, .height = 600 });
+    defer result.deinit();
+
+    // Find the body box (root) and grab its first two block children, which
+    // should be the two <p> elements.
+    const body = result.root;
+    try std.testing.expect(body.children.len >= 2);
+    var first: ?*LayoutBox = null;
+    var second: ?*LayoutBox = null;
+    for (body.children) |child| {
+        if (child.node_id == null) continue; // anonymous inline boxes
+        if (first == null) {
+            first = child;
+        } else if (second == null) {
+            second = child;
+            break;
+        }
+    }
+    try std.testing.expect(first != null);
+    try std.testing.expect(second != null);
+    const f = first.?;
+    const s = second.?;
+    // With collapsing the gap between f.bottom and s.top should be 20px,
+    // not 40px. s.y == f.y + f.height + 20.
+    const expected_y = f.y + f.height + 20.0;
+    const diff = @abs(s.y - expected_y);
+    try std.testing.expect(diff < 0.5);
+}
+
+test "border-radius emits rx in svg" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const doc = try dom.Document.parse(
+        a,
+        "<html><body><div style=\"background:#f00; border-radius:8px; width:100px; height:50px\"></div></body></html>",
+    );
+    var page = makeTestPage(doc);
+    var result = try layoutPage(std.testing.allocator, &page, .{ .width = 800, .height = 600 });
+    defer result.deinit();
+    // Use the arena to absorb small interior allocations done by paintBox
+    // (e.g. colorToHex), since the arena gets freed at end of test.
+    const svg = try paintToSvg(a, &result);
+    try std.testing.expect(std.mem.indexOf(u8, svg, "rx=\"8") != null);
+}
+
+test "opacity wraps box in g" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const doc = try dom.Document.parse(
+        a,
+        "<html><body><div style=\"opacity:0.5; background:#000; width:50px; height:50px\"></div></body></html>",
+    );
+    var page = makeTestPage(doc);
+    var result = try layoutPage(std.testing.allocator, &page, .{ .width = 800, .height = 600 });
+    defer result.deinit();
+    const svg = try paintToSvg(a, &result);
+    try std.testing.expect(std.mem.indexOf(u8, svg, "<g opacity=\"0.500") != null);
+}
+
+test "box-shadow emits shadow rect" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const doc = try dom.Document.parse(
+        a,
+        "<html><body><div style=\"box-shadow: 4px 4px 0 #000; background:#fff; width:50px; height:50px\"></div></body></html>",
+    );
+    var page = makeTestPage(doc);
+    var result = try layoutPage(std.testing.allocator, &page, .{ .width = 800, .height = 600 });
+    defer result.deinit();
+    const svg = try paintToSvg(a, &result);
+    // Count <rect occurrences with fills (background + shadow).
+    var fill_rect_count: usize = 0;
+    var idx: usize = 0;
+    while (std.mem.indexOfPos(u8, svg, idx, "<rect ")) |pos| {
+        // Find the end of the rect tag.
+        const end = std.mem.indexOfPos(u8, svg, pos, "/>") orelse break;
+        const tag = svg[pos..end];
+        if (std.mem.indexOf(u8, tag, "fill=\"#") != null) {
+            fill_rect_count += 1;
+        }
+        idx = end + 2;
+    }
+    // Expect at least: shadow rect (#000) + bg rect (#FFF). The painter also
+    // emits a top-level white background rect, so fill_rect_count >= 3 is OK,
+    // but the shadow + bg pair must contribute >= 2 here.
+    try std.testing.expect(fill_rect_count >= 2);
+    // The shadow rect must be offset from the bg rect by (4,4). Find a black
+    // (#000000) rect and a white (#FFFFFF) rect for our 50x50 div, and assert
+    // the black one's x/y are exactly 4 greater.
+    var bg_x: ?f64 = null;
+    var bg_y: ?f64 = null;
+    var sh_x: ?f64 = null;
+    var sh_y: ?f64 = null;
+    idx = 0;
+    while (std.mem.indexOfPos(u8, svg, idx, "<rect ")) |pos| {
+        const end = std.mem.indexOfPos(u8, svg, pos, "/>") orelse break;
+        const tag = svg[pos..end];
+        idx = end + 2;
+        // Only consider 50x50 rects (our test div).
+        if (std.mem.indexOf(u8, tag, "width=\"50.00\" height=\"50.00\"") == null) continue;
+        const x = parseRectAttr(tag, "x") orelse continue;
+        const y = parseRectAttr(tag, "y") orelse continue;
+        if (std.mem.indexOf(u8, tag, "fill=\"#000000\"") != null) {
+            sh_x = x;
+            sh_y = y;
+        } else if (std.mem.indexOf(u8, tag, "fill=\"#FFFFFF\"") != null) {
+            bg_x = x;
+            bg_y = y;
+        }
+    }
+    try std.testing.expect(bg_x != null);
+    try std.testing.expect(sh_x != null);
+    try std.testing.expectApproxEqAbs(bg_x.? + 4.0, sh_x.?, 0.01);
+    try std.testing.expectApproxEqAbs(bg_y.? + 4.0, sh_y.?, 0.01);
+}
+
+fn parseRectAttr(tag: []const u8, attr: []const u8) ?f64 {
+    // Look for ` <attr>="..."` (with leading space to avoid matching e.g. `x` inside `rx`).
+    var pat_buf: [16]u8 = undefined;
+    if (attr.len + 2 > pat_buf.len) return null;
+    pat_buf[0] = ' ';
+    @memcpy(pat_buf[1 .. 1 + attr.len], attr);
+    pat_buf[1 + attr.len] = '=';
+    const pat = pat_buf[0 .. 2 + attr.len];
+    const start = std.mem.indexOf(u8, tag, pat) orelse return null;
+    const after = start + pat.len;
+    if (after >= tag.len or tag[after] != '"') return null;
+    const val_start = after + 1;
+    const val_end = std.mem.indexOfScalarPos(u8, tag, val_start, '"') orelse return null;
+    return std.fmt.parseFloat(f64, tag[val_start..val_end]) catch null;
 }
