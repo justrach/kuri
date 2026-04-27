@@ -441,14 +441,24 @@ fn parseEdgeShorthand(value: []const u8, font_size: f64, viewport: Viewport) Box
         tokens[n] = t;
     }
     if (n == 0) return .{};
-    const t0 = parseLength(tokens[0], font_size, viewport, font_size) orelse 0;
+    const t0 = parseEdgeToken(tokens[0], font_size, viewport);
     if (n == 1) return .{ .top = t0, .right = t0, .bottom = t0, .left = t0 };
-    const t1 = parseLength(tokens[1], font_size, viewport, font_size) orelse 0;
+    const t1 = parseEdgeToken(tokens[1], font_size, viewport);
     if (n == 2) return .{ .top = t0, .right = t1, .bottom = t0, .left = t1 };
-    const t2 = parseLength(tokens[2], font_size, viewport, font_size) orelse 0;
+    const t2 = parseEdgeToken(tokens[2], font_size, viewport);
     if (n == 3) return .{ .top = t0, .right = t1, .bottom = t2, .left = t1 };
-    const t3 = parseLength(tokens[3], font_size, viewport, font_size) orelse 0;
+    const t3 = parseEdgeToken(tokens[3], font_size, viewport);
     return .{ .top = t0, .right = t1, .bottom = t2, .left = t3 };
+}
+
+// Parse a single token within an edge shorthand. Recognizes the literal
+// keyword `auto` (case-insensitive) and encodes it as `-1`, the sentinel that
+// `layoutBlock` interprets as auto-margin (e.g. for centering). Falls back to
+// `parseLength`, returning 0 when the token is unrecognized.
+fn parseEdgeToken(token: []const u8, font_size: f64, viewport: Viewport) f64 {
+    const trimmed = std.mem.trim(u8, token, " \t\r\n");
+    if (std.ascii.eqlIgnoreCase(trimmed, "auto")) return -1;
+    return parseLength(trimmed, font_size, viewport, font_size) orelse 0;
 }
 
 fn parseBoxShadow(value: []const u8, font_size: f64, viewport: Viewport) ?BoxShadow {
@@ -2427,4 +2437,27 @@ fn parseRectAttr(tag: []const u8, attr: []const u8) ?f64 {
     const val_start = after + 1;
     const val_end = std.mem.indexOfScalarPos(u8, tag, val_start, '"') orelse return null;
     return std.fmt.parseFloat(f64, tag[val_start..val_end]) catch null;
+}
+
+test "body background shorthand cascades over UA background-color" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const doc = try dom.Document.parse(a, "<html><head><style>body{background:#eee}</style></head><body><h1>hi</h1></body></html>");
+    var page = testMakePage(doc);
+    var result = try layoutPage(std.testing.allocator, &page, .{ .width = 768, .height = 1024 });
+    defer result.deinit();
+    const body_box = testFindBoxByTag(result.root, result.doc, "body") orelse result.root;
+    try std.testing.expect(body_box.style.background_color != null);
+    try std.testing.expectEqual(@as(u8, 238), body_box.style.background_color.?.r);
+    try std.testing.expectEqual(@as(u8, 238), body_box.style.background_color.?.g);
+    try std.testing.expectEqual(@as(u8, 238), body_box.style.background_color.?.b);
+}
+
+test "parseEdgeShorthand handles auto" {
+    const e = parseEdgeShorthand("15vh auto", 16, .{ .width = 1280, .height = 720 });
+    try std.testing.expectEqual(@as(f64, 108), e.top);
+    try std.testing.expectEqual(@as(f64, -1), e.right);
+    try std.testing.expectEqual(@as(f64, 108), e.bottom);
+    try std.testing.expectEqual(@as(f64, -1), e.left);
 }

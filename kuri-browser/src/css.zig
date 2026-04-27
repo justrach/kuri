@@ -556,6 +556,23 @@ pub fn computeStyleForNode(
                         .rule_index = idx,
                         .decl_index = decl_idx,
                     });
+                    // Expand `background` shorthand to a synthetic `background-color`
+                    // longhand so the cascade can resolve it against any explicit
+                    // `background-color` declarations from other origins/rules.
+                    if (std.mem.eql(u8, decl.name, "background")) {
+                        try values.append(allocator, .{
+                            .name = "background-color",
+                            .value = decl.value,
+                            .important = decl.important,
+                        });
+                        try keys.append(allocator, .{
+                            .origin_rank = @intFromEnum(sheet.origin),
+                            .important = decl.important,
+                            .specificity = spec,
+                            .rule_index = idx,
+                            .decl_index = decl_idx,
+                        });
+                    }
                 }
             }
         }
@@ -573,6 +590,21 @@ pub fn computeStyleForNode(
                 .rule_index = std.math.maxInt(usize),
                 .decl_index = idx,
             });
+            // Same shorthand expansion as for sheet rules above.
+            if (std.mem.eql(u8, decl.name, "background")) {
+                try values.append(allocator, .{
+                    .name = "background-color",
+                    .value = decl.value,
+                    .important = decl.important,
+                });
+                try keys.append(allocator, .{
+                    .origin_rank = @intFromEnum(Origin.inline_style),
+                    .important = decl.important,
+                    .specificity = 0xFFFFFFFF,
+                    .rule_index = std.math.maxInt(usize),
+                    .decl_index = idx,
+                });
+            }
         }
     }
 
