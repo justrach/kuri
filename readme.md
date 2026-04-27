@@ -160,6 +160,10 @@ zig build test         # run 252+ tests
 
 # Interactive browser — browse from your terminal
 ./zig-out/bin/kuri-browse https://example.com
+
+# Experimental standalone browser runtime — separate build, not production
+(cd kuri-browser && zig build run -- render https://example.com)
+(cd kuri-browser && zig build run -- bench --offline)
 ```
 
 ### First run, shortest path
@@ -327,6 +331,36 @@ The repo includes a user-extensible skill area:
 - `skills/custom/` is reserved for your own project-specific skills
 - `skills/custom/hackernews-page-2.md` is a concrete example custom skill
 - `.claude/skills/kuri-server/SKILL.md` stays in sync for Claude-style repo skills
+
+The base skill now also explains which browser path to use:
+
+- `kuri` HTTP API: production Chrome/CDP automation with sessions, snapshots, actions, HAR, cookies, and screenshots
+- `kuri-fetch`: standalone no-Chrome fetch/text extraction
+- `kuri-browse`: interactive terminal browsing
+- `kuri-agent`: scriptable CLI automation against the Kuri server
+- `kuri-browser/`: experimental separate Zig-native browser runtime for parity work
+
+For the experimental browser CLI:
+
+```bash
+cd kuri-browser
+zig build run -- render https://news.ycombinator.com --selector ".titleline a" --dump text
+zig build run -- render https://todomvc.com/examples/react/dist/ --js --wait-eval "document.querySelectorAll('.todo-list li').length >= 1"
+zig build run -- parity --offline
+zig build run -- bench --offline
+zig build run -- serve-cdp --port 9333
+```
+
+`kuri-browser serve-cdp` exposes Chrome-style HTTP discovery plus a minimal WebSocket JSON-RPC router for protocol smoke tests. Runtime eval returns V8-shaped CDP remote objects backed by QuickJS; this does not add a V8 dependency and is not full Playwright/Puppeteer compatibility yet.
+
+Screenshots in `kuri-browser` currently delegate to the main Kuri/CDP renderer. Start `./zig-out/bin/kuri` first, then:
+
+```bash
+cd kuri-browser
+zig build run -- screenshot https://example.com --out example.jpg --compress --kuri-base http://127.0.0.1:8080
+```
+
+`--compress` captures a PNG baseline and JPEG candidate, writes the smaller file, and reports byte savings. Current local measurement on `https://example.com`: `20,523` bytes PNG to `18,183` bytes JPEG quality 50, saving `2,340` bytes or `11%`.
 
 ### Advanced
 
