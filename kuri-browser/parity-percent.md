@@ -94,17 +94,26 @@ python3 tools/paint_parity.py https://quotes.toscrape.com/js/ --paint-js --keep-
 
 This path does not use Kuri/CDP or Chrome. It paints a text/DOM SVG approximation from the native page model. With `--js`, it serializes the QuickJS-mutated DOM before paint. It is useful for token-light visual context, but it is not pixel-equivalent CSS layout or a raster screenshot.
 
-Measured against real Chrome on `https://example.com` at `1280x720` on 2026-04-27 with the cascade-fix commit `71578b0`:
+Measured against real Chrome on `https://example.com` at `1280x720` on 2026-04-27 with the canvas-bg-propagation commit `a0542cb`:
 
 - Chrome actual screenshot: **16,577 bytes**
-- Native SVG paint artifact: **2,966 bytes**
-- Native SVG rasterized through a no-margin HTML wrapper: **16,709 bytes**
-- Exact matching pixels through wrapper: **6.76%** (62,332/921,600)
-- Mean absolute RGB delta through wrapper: **17.39/255**
-- Direct standalone SVG screenshot exact matching pixels: **6.76%** (62,332/921,600)
-- Direct mean absolute RGB delta: **17.39/255**
+- Native SVG paint artifact: **3,002 bytes**
+- Native SVG rasterized through a no-margin HTML wrapper: **16,565 bytes**
+- Exact matching pixels through wrapper: **98.45%** (907,304/921,600)
+- Mean absolute RGB delta through wrapper: **1.80/255**
+- Direct standalone SVG screenshot exact matching pixels: **86.37%** (795,944/921,600)
+- Direct mean absolute RGB delta: **3.85/255**
 
-A previous entry in this file claimed `99.35%` exact wrapper pixels and `87.27%` exact direct pixels for `example.com`. Re-measuring at the pre-team baseline `04dc45e` produced `0.01%` exact / `18.86` mean delta — the historical numbers do not reproduce on this machine and are not used as a comparison baseline. The unified renderer at `8c9d8a9` nudged mean delta from `18.86 → 18.62`. The cascade-fix commit `71578b0` then resolved two narrow rendering bugs on this page — (a) the `background` shorthand was being shadowed by the UA `background-color: white` longhand because the cascade kept them under separate names, and (b) `parseEdgeShorthand` did not recognize the `auto` keyword so `body { margin: 15vh auto }` rendered with `margin-left/right = 0` instead of centering. With both fixes the body now paints as `#EEEEEE` at `x=256` (was `#FFFFFF` at `x=0`), pushing exact pixels from `0.00% → 6.76%` and mean delta from `18.62 → 17.39` in both wrapper and direct-svg modes.
+Session timeline for `example.com` exact pixels (wrapper mode), reproducible on this machine:
+
+| Commit | Exact | Mean delta | Why |
+|---|---:|---:|---|
+| `04dc45e` (pre-session baseline) | 0.01% | 18.86 | starting point |
+| `8c9d8a9` (unified renderer) | 0.00% | 18.62 | text widths shifted, opacity now applied |
+| `71578b0` (bg shorthand + auto-margin) | 6.76% | 17.39 | body bg `#eee` and `margin: 15vh auto` now correct |
+| `a0542cb` (canvas-bg propagation) | **98.45%** | **1.80** | body bg paints viewport per CSS 2.1 §14.2 |
+
+The previously-claimed `99.35% / 87.27%` figures from before this session do not reproduce on the current Chrome version on this machine. Re-measuring at any commit prior to `a0542cb` produced numbers in the `0–7%` range. The current numbers (`98.45%` wrapper / `86.37%` direct) are reproducible with `python3 tools/paint_parity.py https://example.com [--direct-svg]` against the local Chrome at `/Applications/Google Chrome.app/Contents/MacOS/Google Chrome`. The remaining ~1.5% wrapper delta is text-rasterization differences (Chrome's font hinting vs SVG's `<text>` rasterization at slightly different sub-pixel offsets even though the per-char advance widths are now Chrome-calibrated).
 
 Measured against real Chrome on the JS-rendered `https://quotes.toscrape.com/js/` with `--paint-js` at `1280x720` on 2026-04-27:
 
@@ -114,17 +123,17 @@ Measured against real Chrome on the JS-rendered `https://quotes.toscrape.com/js/
 - Exact matching pixels through wrapper: **90.32%** (832,415/921,600)
 - Mean absolute RGB delta through wrapper: **7.47/255**
 
-This URL still routes through the Quotes-to-Scrape special-case path in `native_paint.zig` (`paintQuotesToScrapeSvg`) because the special case beats the generic engine on pixel parity for that page. Engine-only parity for this URL is not yet measured separately.
+This URL still routes through the Quotes-to-Scrape special-case path in `native_paint.zig` (`paintQuotesToScrapeSvg`) because the special case beats the generic engine on pixel parity for that page. Engine-only parity for this URL is not yet measured separately. Now that the engine has CSS table layout (`fb63f11`) and Chrome-calibrated text widths (`df9f35f`), removing the special case is viable as future work.
 
-Measured against real Chrome on `https://news.ycombinator.com` at `1280x720` on 2026-04-27 with commit `8c9d8a9`:
+Measured against real Chrome on `https://news.ycombinator.com` at `1280x720` on 2026-04-27 with commit `a0542cb`:
 
 - Chrome actual screenshot: **159,387 bytes**
-- Native SVG paint artifact: **10,072 bytes**
-- Native SVG rasterized through a no-margin HTML wrapper: **142,243 bytes**
-- Exact matching pixels through wrapper: **88.94%** (819,690/921,600)
-- Mean absolute RGB delta through wrapper: **9.44/255**
+- Native SVG paint artifact: **10,121 bytes**
+- Native SVG rasterized through a no-margin HTML wrapper: **142,212 bytes**
+- Exact matching pixels through wrapper: **88.86%** (818,944/921,600)
+- Mean absolute RGB delta through wrapper: **9.47/255**
 
-This URL also routes through the Hacker News special-case path (`paintHackerNewsSvg`); the unified renderer's text-width tables and decoration paint nonetheless improved this score from the previous **88.06% / 10.58 mean** to **88.94% / 9.44 mean** on the same fixture. The improvement is attributable to better-tuned text widths in `textWidth` (per-char tables) and tighter colorToHex output paths in the merged `paintBoxInner`.
+HN routes through `paintHackerNewsSvg`; the unified renderer's text-width tables, decoration paint, and shorthand cascade improved this score from the previous **88.06% / 10.58 mean** baseline. The Hacker News and Quotes-to-Scrape special-cases will eventually be removable now that the engine supports table layout, calibrated text widths, full shorthand cascade, replaced elements, and decorations — but the special-cases are kept on `kuri-browser` until a single bench cycle confirms the engine path matches or beats them.
 
 ## Heavier JS Smoke Tests
 
