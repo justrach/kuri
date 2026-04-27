@@ -524,6 +524,338 @@ fn sortKeyLessThan(_: void, a: SortKey, b: SortKey) bool {
     if (a.rule_index != b.rule_index) return a.rule_index < b.rule_index;
     return a.decl_index < b.decl_index;
 }
+// ---------------- Shorthand expansion helpers ----------------
+//
+// These helpers turn a CSS shorthand value into its longhand `(name, value)`
+// pairs. The returned `value` slices point into the input `value` string —
+// no allocation happens for the value strings themselves. Names are static
+// string literals.
+//
+// Callers (computeStyleForNode) push each expanded pair into the cascade
+// alongside the original shorthand, with the same SortKey priority. That way
+// an author shorthand like `body { font: 14px Verdana }` properly overrides
+// a UA `body { font-family: Times }` longhand instead of being masked by it.
+
+const LonghandPair = struct {
+    name: []const u8,
+    value: []const u8,
+};
+
+fn isLengthOrPercentToken(token: []const u8) bool {
+    if (token.len == 0) return false;
+    var i: usize = 0;
+    if (token[0] == '+' or token[0] == '-') i += 1;
+    var saw_digit = false;
+    while (i < token.len and (std.ascii.isDigit(token[i]) or token[i] == '.')) : (i += 1) {
+        if (std.ascii.isDigit(token[i])) saw_digit = true;
+    }
+    if (!saw_digit) return false;
+    // Trailing unit (px, em, rem, %, vh, vw, etc.) — we only require a non-empty unit
+    // OR no unit at all (bare number, e.g. line-height factor) is rejected by this
+    // helper; callers that want bare numbers handle them separately.
+    return i < token.len;
+}
+
+fn isBareNumberToken(token: []const u8) bool {
+    if (token.len == 0) return false;
+    var i: usize = 0;
+    if (token[0] == '+' or token[0] == '-') i += 1;
+    var saw_digit = false;
+    while (i < token.len) : (i += 1) {
+        const c = token[i];
+        if (std.ascii.isDigit(c)) {
+            saw_digit = true;
+        } else if (c == '.') {
+            // ok
+        } else {
+            return false;
+        }
+    }
+    return saw_digit;
+}
+
+fn isFontStyleKeyword(token: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(token, "italic") or
+        std.ascii.eqlIgnoreCase(token, "oblique");
+}
+
+fn isFontWeightKeyword(token: []const u8) bool {
+    if (std.ascii.eqlIgnoreCase(token, "bold")) return true;
+    if (std.ascii.eqlIgnoreCase(token, "bolder")) return true;
+    if (std.ascii.eqlIgnoreCase(token, "lighter")) return true;
+    // numeric weights like 100, 200, ..., 900
+    if (isBareNumberToken(token)) {
+        const n = std.fmt.parseFloat(f64, token) catch return false;
+        if (n >= 1 and n <= 1000) return true;
+    }
+    return false;
+}
+
+fn isFontVariantKeyword(token: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(token, "small-caps");
+}
+
+fn isBorderStyleKeyword(token: []const u8) bool {
+    const styles = [_][]const u8{
+        "none",   "hidden", "dotted", "dashed", "solid",
+        "double", "groove", "ridge",  "inset",  "outset",
+    };
+    for (styles) |s| {
+        if (std.ascii.eqlIgnoreCase(token, s)) return true;
+    }
+    return false;
+}
+
+fn isBorderWidthKeyword(token: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(token, "thin") or
+        std.ascii.eqlIgnoreCase(token, "medium") or
+        std.ascii.eqlIgnoreCase(token, "thick");
+}
+
+fn isListStylePositionKeyword(token: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(token, "inside") or
+        std.ascii.eqlIgnoreCase(token, "outside");
+}
+
+fn isListStyleTypeKeyword(token: []const u8) bool {
+    const types = [_][]const u8{
+        "disc",                 "circle",       "square",
+        "decimal",              "decimal-leading-zero",
+        "lower-roman",          "upper-roman",
+        "lower-greek",          "lower-alpha",  "lower-latin",
+        "upper-alpha",          "upper-latin",
+        "armenian",             "georgian",
+        "none",
+    };
+    for (types) |t| {
+        if (std.ascii.eqlIgnoreCase(token, t)) return true;
+    }
+    return false;
+}
+
+/// Expand `padding` / `margin` 1/2/3/4-token shorthand into four longhand
+/// pairs. `prefix` is "padding" or "margin". Returns the number of pairs
+/// written (always 4 on success, 0 if input has no tokens).
+fn expandEdgeShorthand(prefix_top: []const u8, prefix_right: []const u8, prefix_bottom: []const u8, prefix_left: []const u8, value: []const u8, out: *[4]LonghandPair) usize {
+    var iter = std.mem.tokenizeAny(u8, value, " \t\r\n");
+    var tokens: [4][]const u8 = .{ "", "", "", "" };
+    var n: usize = 0;
+    while (iter.next()) |t| : (n += 1) {
+        if (n >= 4) break;
+        tokens[n] = t;
+    }
+    if (n == 0) return 0;
+    const t0 = tokens[0];
+    const t1 = if (n >= 2) tokens[1] else t0;
+    const t2 = if (n >= 3) tokens[2] else t0;
+    const t3 = if (n >= 4) tokens[3] else t1;
+    out[0] = .{ .name = prefix_top, .value = t0 };
+    out[1] = .{ .name = prefix_right, .value = t1 };
+    out[2] = .{ .name = prefix_bottom, .value = t2 };
+    out[3] = .{ .name = prefix_left, .value = t3 };
+    return 4;
+}
+
+/// Expand `border: <width> <style> <color>` (in any order) into up to three
+/// longhand pairs. Returns the number of pairs written. Tokens that do not
+/// match any classification are silently dropped — but we keep going so that
+/// e.g. `border: solid red` still produces border-style + border-color.
+fn expandBorderShorthand(value: []const u8, out: *[3]LonghandPair) usize {
+    var n: usize = 0;
+    var have_width = false;
+    var have_style = false;
+    var have_color = false;
+    var iter = std.mem.tokenizeAny(u8, value, " \t\r\n");
+    while (iter.next()) |t| {
+        if (!have_width and (isLengthOrPercentToken(t) or isBorderWidthKeyword(t))) {
+            out[n] = .{ .name = "border-width", .value = t };
+            n += 1;
+            have_width = true;
+            continue;
+        }
+        if (!have_style and isBorderStyleKeyword(t)) {
+            out[n] = .{ .name = "border-style", .value = t };
+            n += 1;
+            have_style = true;
+            continue;
+        }
+        if (!have_color) {
+            // Anything else is treated as a color (named, hex, rgb(), etc.).
+            // For multi-token color values like `rgb(0, 0, 0)`, this naive
+            // tokenizer would split — but kuri's tokenizer uses whitespace
+            // only, so `rgb(0,0,0)` (no spaces) survives as one token.
+            // Spaces inside parens would break this; we skip such cases.
+            out[n] = .{ .name = "border-color", .value = t };
+            n += 1;
+            have_color = true;
+            continue;
+        }
+        if (n >= 3) break;
+    }
+    return n;
+}
+
+/// Expand `font` shorthand. Common forms supported:
+///   font: 14px sans-serif
+///   font: bold 14px/1.2 Helvetica, Arial, sans-serif
+///   font: italic bold 16px Georgia
+/// Returns the number of pairs written.
+fn expandFontShorthand(value: []const u8, out: *[5]LonghandPair) usize {
+    var n: usize = 0;
+    var size_idx_in_value: ?usize = null;
+    var size_token_end_in_value: usize = 0;
+
+    // Walk tokens, classifying pre-size keywords until we hit the size token.
+    var have_style = false;
+    var have_weight = false;
+    var have_variant = false;
+
+    // Track byte offsets inside `value` so we can preserve the family slice
+    // (which may contain commas + spaces) verbatim.
+    var i: usize = 0;
+    while (i < value.len) {
+        // Skip whitespace
+        while (i < value.len and (value[i] == ' ' or value[i] == '\t' or value[i] == '\r' or value[i] == '\n')) i += 1;
+        if (i >= value.len) break;
+        const tok_start = i;
+        while (i < value.len and value[i] != ' ' and value[i] != '\t' and value[i] != '\r' and value[i] != '\n') i += 1;
+        const tok = value[tok_start..i];
+        if (tok.len == 0) continue;
+
+        // Is this the size token? It either contains '/' (e.g. "14px/1.2") or
+        // is a length (e.g. "14px", "1.2em").
+        const slash = std.mem.indexOfScalar(u8, tok, '/');
+        if (slash != null or isLengthOrPercentToken(tok)) {
+            // Split out font-size and possibly line-height.
+            if (slash) |s| {
+                const size_part = tok[0..s];
+                const lh_part = tok[s + 1 ..];
+                if (size_part.len > 0 and (isLengthOrPercentToken(size_part) or isBareNumberToken(size_part))) {
+                    out[n] = .{ .name = "font-size", .value = size_part };
+                    n += 1;
+                }
+                if (lh_part.len > 0) {
+                    out[n] = .{ .name = "line-height", .value = lh_part };
+                    n += 1;
+                }
+            } else {
+                out[n] = .{ .name = "font-size", .value = tok };
+                n += 1;
+            }
+            size_idx_in_value = tok_start;
+            size_token_end_in_value = i;
+            break;
+        }
+
+        // Pre-size keyword
+        if (!have_style and isFontStyleKeyword(tok)) {
+            out[n] = .{ .name = "font-style", .value = tok };
+            n += 1;
+            have_style = true;
+            continue;
+        }
+        if (!have_weight and isFontWeightKeyword(tok)) {
+            out[n] = .{ .name = "font-weight", .value = tok };
+            n += 1;
+            have_weight = true;
+            continue;
+        }
+        if (!have_variant and isFontVariantKeyword(tok)) {
+            out[n] = .{ .name = "font-variant", .value = tok };
+            n += 1;
+            have_variant = true;
+            continue;
+        }
+        // Unknown pre-size token — bail. Without a size we can't reliably split.
+        return 0;
+    }
+
+    if (size_idx_in_value == null) {
+        // No size found — malformed shorthand; do not synthesize anything.
+        return 0;
+    }
+
+    // Family is everything after the size token, trimmed.
+    if (size_token_end_in_value < value.len) {
+        const family = std.mem.trim(u8, value[size_token_end_in_value..], " \t\r\n");
+        if (family.len > 0) {
+            out[n] = .{ .name = "font-family", .value = family };
+            n += 1;
+        }
+    }
+
+    return n;
+}
+
+/// Expand `list-style: <type> <position> <image>`. Just classifies known
+/// keywords. `none` is ambiguous (could be type or image) — we map it to
+/// list-style-type.
+fn expandListStyleShorthand(value: []const u8, out: *[3]LonghandPair) usize {
+    var n: usize = 0;
+    var have_type = false;
+    var have_position = false;
+    var have_image = false;
+    var iter = std.mem.tokenizeAny(u8, value, " \t\r\n");
+    while (iter.next()) |t| {
+        if (!have_position and isListStylePositionKeyword(t)) {
+            out[n] = .{ .name = "list-style-position", .value = t };
+            n += 1;
+            have_position = true;
+            continue;
+        }
+        if (!have_type and isListStyleTypeKeyword(t)) {
+            out[n] = .{ .name = "list-style-type", .value = t };
+            n += 1;
+            have_type = true;
+            continue;
+        }
+        if (!have_image and (std.mem.startsWith(u8, t, "url(") or std.mem.startsWith(u8, t, "URL("))) {
+            out[n] = .{ .name = "list-style-image", .value = t };
+            n += 1;
+            have_image = true;
+            continue;
+        }
+        if (n >= 3) break;
+    }
+    return n;
+}
+
+/// Dispatch on the shorthand `name`. Writes up to `out.len` longhand pairs
+/// into `out` and returns the number written. `out` must be at least 5 wide.
+fn expandShorthand(name: []const u8, value: []const u8, out: *[5]LonghandPair) usize {
+    if (std.ascii.eqlIgnoreCase(name, "background")) {
+        out[0] = .{ .name = "background-color", .value = value };
+        return 1;
+    }
+    if (std.ascii.eqlIgnoreCase(name, "padding")) {
+        var buf: [4]LonghandPair = undefined;
+        const k = expandEdgeShorthand("padding-top", "padding-right", "padding-bottom", "padding-left", value, &buf);
+        for (0..k) |i| out[i] = buf[i];
+        return k;
+    }
+    if (std.ascii.eqlIgnoreCase(name, "margin")) {
+        var buf: [4]LonghandPair = undefined;
+        const k = expandEdgeShorthand("margin-top", "margin-right", "margin-bottom", "margin-left", value, &buf);
+        for (0..k) |i| out[i] = buf[i];
+        return k;
+    }
+    if (std.ascii.eqlIgnoreCase(name, "border")) {
+        var buf: [3]LonghandPair = undefined;
+        const k = expandBorderShorthand(value, &buf);
+        for (0..k) |i| out[i] = buf[i];
+        return k;
+    }
+    if (std.ascii.eqlIgnoreCase(name, "font")) {
+        return expandFontShorthand(value, out);
+    }
+    if (std.ascii.eqlIgnoreCase(name, "list-style")) {
+        var buf: [3]LonghandPair = undefined;
+        const k = expandListStyleShorthand(value, &buf);
+        for (0..k) |i| out[i] = buf[i];
+        return k;
+    }
+    return 0;
+}
 
 pub fn computeStyleForNode(
     allocator: std.mem.Allocator,
@@ -556,13 +888,17 @@ pub fn computeStyleForNode(
                         .rule_index = idx,
                         .decl_index = decl_idx,
                     });
-                    // Expand `background` shorthand to a synthetic `background-color`
-                    // longhand so the cascade can resolve it against any explicit
-                    // `background-color` declarations from other origins/rules.
-                    if (std.mem.eql(u8, decl.name, "background")) {
+                    // Expand any known CSS shorthand into synthetic longhand
+                    // declarations at the same priority. This lets author
+                    // shorthands like `body { font: 14px Verdana }` properly
+                    // override UA longhands like `body { font-family: Times }`
+                    // instead of being masked by them.
+                    var longhands: [5]LonghandPair = undefined;
+                    const lh_count = expandShorthand(decl.name, decl.value, &longhands);
+                    for (longhands[0..lh_count]) |lh| {
                         try values.append(allocator, .{
-                            .name = "background-color",
-                            .value = decl.value,
+                            .name = lh.name,
+                            .value = lh.value,
                             .important = decl.important,
                         });
                         try keys.append(allocator, .{
@@ -591,10 +927,12 @@ pub fn computeStyleForNode(
                 .decl_index = idx,
             });
             // Same shorthand expansion as for sheet rules above.
-            if (std.mem.eql(u8, decl.name, "background")) {
+            var longhands: [5]LonghandPair = undefined;
+            const lh_count = expandShorthand(decl.name, decl.value, &longhands);
+            for (longhands[0..lh_count]) |lh| {
                 try values.append(allocator, .{
-                    .name = "background-color",
-                    .value = decl.value,
+                    .name = lh.name,
+                    .value = lh.value,
                     .important = decl.important,
                 });
                 try keys.append(allocator, .{
@@ -779,4 +1117,132 @@ test "extractAllStyleText collects style blocks" {
     defer std.testing.allocator.free(text);
     try std.testing.expect(std.mem.indexOf(u8, text, "color: red") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "font-size: 14px") != null);
+}
+
+test "font shorthand cascades to font-size and font-family" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var doc = try dom.Document.parse(a, "<html><body><p>hi</p></body></html>");
+    const body_id = (try doc.querySelector(a, "body")).?;
+
+    var ua = try Stylesheet.fromText(a, "body { font-family: Times; font-size: 16px; }", .user_agent);
+    var author = try Stylesheet.fromText(a, "body { font: 14px Verdana }", .author);
+
+    const sheets: []const *const Stylesheet = &.{ &ua, &author };
+    const style = try computeStyleForNode(a, sheets, &doc, body_id, "");
+
+    try std.testing.expect(std.mem.eql(u8, style.get("font-size").?, "14px"));
+    try std.testing.expect(std.mem.eql(u8, style.get("font-family").?, "Verdana"));
+}
+
+test "border shorthand cascades to border-width" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var doc = try dom.Document.parse(a, "<html><body><div>x</div></body></html>");
+    const div_id = (try doc.querySelector(a, "div")).?;
+
+    var author = try Stylesheet.fromText(a, "div { border: 2px solid red }", .author);
+
+    const sheets: []const *const Stylesheet = &.{&author};
+    const style = try computeStyleForNode(a, sheets, &doc, div_id, "");
+
+    try std.testing.expect(std.mem.eql(u8, style.get("border-width").?, "2px"));
+    try std.testing.expect(std.mem.eql(u8, style.get("border-style").?, "solid"));
+    try std.testing.expect(std.mem.eql(u8, style.get("border-color").?, "red"));
+}
+
+test "padding shorthand expands to four longhands" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var doc = try dom.Document.parse(a, "<html><body><p>hi</p></body></html>");
+    const p_id = (try doc.querySelector(a, "p")).?;
+
+    var author = try Stylesheet.fromText(a, "p { padding: 10px 20px }", .author);
+
+    const sheets: []const *const Stylesheet = &.{&author};
+    const style = try computeStyleForNode(a, sheets, &doc, p_id, "");
+
+    try std.testing.expect(std.mem.eql(u8, style.get("padding-top").?, "10px"));
+    try std.testing.expect(std.mem.eql(u8, style.get("padding-right").?, "20px"));
+    try std.testing.expect(std.mem.eql(u8, style.get("padding-bottom").?, "10px"));
+    try std.testing.expect(std.mem.eql(u8, style.get("padding-left").?, "20px"));
+}
+
+test "margin shorthand expands to four longhands with 4-token rule" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var doc = try dom.Document.parse(a, "<html><body><p>hi</p></body></html>");
+    const p_id = (try doc.querySelector(a, "p")).?;
+
+    var author = try Stylesheet.fromText(a, "p { margin: 1px 2px 3px 4px }", .author);
+
+    const sheets: []const *const Stylesheet = &.{&author};
+    const style = try computeStyleForNode(a, sheets, &doc, p_id, "");
+
+    try std.testing.expect(std.mem.eql(u8, style.get("margin-top").?, "1px"));
+    try std.testing.expect(std.mem.eql(u8, style.get("margin-right").?, "2px"));
+    try std.testing.expect(std.mem.eql(u8, style.get("margin-bottom").?, "3px"));
+    try std.testing.expect(std.mem.eql(u8, style.get("margin-left").?, "4px"));
+}
+
+test "font shorthand with line-height splits font-size and line-height" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var doc = try dom.Document.parse(a, "<html><body><p>hi</p></body></html>");
+    const p_id = (try doc.querySelector(a, "p")).?;
+
+    var author = try Stylesheet.fromText(a, "p { font: bold 14px/1.2 Helvetica, Arial, sans-serif }", .author);
+
+    const sheets: []const *const Stylesheet = &.{&author};
+    const style = try computeStyleForNode(a, sheets, &doc, p_id, "");
+
+    try std.testing.expect(std.mem.eql(u8, style.get("font-weight").?, "bold"));
+    try std.testing.expect(std.mem.eql(u8, style.get("font-size").?, "14px"));
+    try std.testing.expect(std.mem.eql(u8, style.get("line-height").?, "1.2"));
+    try std.testing.expect(std.mem.eql(u8, style.get("font-family").?, "Helvetica, Arial, sans-serif"));
+}
+
+test "list-style shorthand cascades to list-style-type" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var doc = try dom.Document.parse(a, "<html><body><ul><li>x</li></ul></body></html>");
+    const ul_id = (try doc.querySelector(a, "ul")).?;
+
+    var ua = try Stylesheet.fromText(a, "ul { list-style-type: disc; }", .user_agent);
+    var author = try Stylesheet.fromText(a, "ul { list-style: square inside }", .author);
+
+    const sheets: []const *const Stylesheet = &.{ &ua, &author };
+    const style = try computeStyleForNode(a, sheets, &doc, ul_id, "");
+
+    try std.testing.expect(std.mem.eql(u8, style.get("list-style-type").?, "square"));
+    try std.testing.expect(std.mem.eql(u8, style.get("list-style-position").?, "inside"));
+}
+
+test "background shorthand still synthesizes background-color" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var doc = try dom.Document.parse(a, "<html><body><p>hi</p></body></html>");
+    const body_id = (try doc.querySelector(a, "body")).?;
+
+    var ua = try Stylesheet.fromText(a, "body { background-color: white; }", .user_agent);
+    var author = try Stylesheet.fromText(a, "body { background: #f0f0f2 }", .author);
+
+    const sheets: []const *const Stylesheet = &.{ &ua, &author };
+    const style = try computeStyleForNode(a, sheets, &doc, body_id, "");
+
+    try std.testing.expect(std.mem.eql(u8, style.get("background-color").?, "#f0f0f2"));
 }
