@@ -54,6 +54,13 @@ pub const TextAlign = enum {
     justify,
 };
 
+pub const WhiteSpace = enum {
+    normal,
+    pre,
+    pre_wrap,
+    nowrap,
+};
+
 pub const ComputedStyle = struct {
     display: Display = .inline_,
     background_color: ?Color = null,
@@ -63,6 +70,8 @@ pub const ComputedStyle = struct {
     font_weight: u16 = 400,
     line_height: f64 = 1.2,
     text_align: TextAlign = .start,
+    white_space: WhiteSpace = .normal,
+    text_indent: f64 = 0,
     padding: BoxEdge = .{},
     margin: BoxEdge = .{},
     border_width: BoxEdge = .{},
@@ -157,6 +166,7 @@ const Inheritable = struct {
     font_weight: u16 = 400,
     line_height: f64 = 1.2,
     text_align: TextAlign = .start,
+    white_space: WhiteSpace = .normal,
     italic: bool = false,
     underline: bool = false,
 };
@@ -187,10 +197,17 @@ fn computeStyle(
         .font_weight = parent.font_weight,
         .line_height = parent.line_height,
         .text_align = parent.text_align,
+        .white_space = parent.white_space,
         .italic = parent.italic,
         .text_decoration_underline = parent.underline,
         .display = defaultDisplayForTag(ctx.doc.getNode(node_id).name),
     };
+
+    // <pre> defaults to white-space: pre
+    const tag_name = ctx.doc.getNode(node_id).name;
+    if (std.ascii.eqlIgnoreCase(tag_name, "pre")) {
+        style.white_space = .pre;
+    }
 
     if (computed.get("display")) |v| style.display = parseDisplay(v);
     if (computed.get("color")) |v| {
@@ -223,6 +240,12 @@ fn computeStyle(
         }
     }
     if (computed.get("text-align")) |v| style.text_align = parseTextAlign(v);
+    if (computed.get("white-space")) |v| style.white_space = parseWhiteSpace(v, style.white_space);
+    if (computed.get("text-indent")) |v| {
+        if (parseLength(v, style.font_size, ctx.viewport, style.font_size)) |px| {
+            style.text_indent = px;
+        }
+    }
     if (computed.get("text-decoration") orelse computed.get("text-decoration-line")) |v| {
         style.text_decoration_underline = std.mem.indexOf(u8, v, "underline") != null;
     }
@@ -276,6 +299,16 @@ fn computeStyle(
         if (parseColor(v)) |c| style.border_color = c;
     }
     return style;
+}
+
+fn parseWhiteSpace(value: []const u8, fallback: WhiteSpace) WhiteSpace {
+    const t = std.mem.trim(u8, value, " \t\r\n");
+    if (std.ascii.eqlIgnoreCase(t, "normal")) return .normal;
+    if (std.ascii.eqlIgnoreCase(t, "pre")) return .pre;
+    if (std.ascii.eqlIgnoreCase(t, "pre-wrap")) return .pre_wrap;
+    if (std.ascii.eqlIgnoreCase(t, "pre-line")) return .normal; // simplified
+    if (std.ascii.eqlIgnoreCase(t, "nowrap")) return .nowrap;
+    return fallback;
 }
 
 fn defaultDisplayForTag(tag: []const u8) Display {
@@ -521,6 +554,7 @@ fn layoutBlock(
         .font_weight = style.font_weight,
         .line_height = style.line_height,
         .text_align = style.text_align,
+        .white_space = style.white_space,
         .italic = style.italic,
         .underline = style.text_decoration_underline,
     };
@@ -541,6 +575,15 @@ fn layoutBlock(
             continue;
         }
         if (child_node.kind != .element) continue;
+        // <br> as a direct child of this block: emit a line break into the inline buffer.
+        if (std.ascii.eqlIgnoreCase(child_node.name, "br")) {
+            try inline_buffer.append(ctx.allocator, .{
+                .kind = .line_break,
+                .text = "",
+                .style = inheritable,
+            });
+            continue;
+        }
         const child_style = try computeStyle(ctx, cid, inheritable);
         if (child_style.display == .none) continue;
         if (child_style.display == .inline_) {
@@ -549,7 +592,7 @@ fn layoutBlock(
         }
         // Flush any inline buffer as an anonymous box first.
         if (inline_buffer.items.len > 0) {
-            const inline_box = try buildInlineBox(ctx, content_x, current_y, content_width, inheritable, inline_buffer.items);
+            const inline_box = try buildInlineBox(ctx, content_x, current_y, content_width, inheritable, inline_buffer.items, style.text_indent);
             current_y += inline_box.height;
             try children.append(ctx.allocator, inline_box);
             inline_buffer.clearRetainingCapacity();
@@ -560,7 +603,7 @@ fn layoutBlock(
     }
 
     if (inline_buffer.items.len > 0) {
-        const inline_box = try buildInlineBox(ctx, content_x, current_y, content_width, inheritable, inline_buffer.items);
+        const inline_box = try buildInlineBox(ctx, content_x, current_y, content_width, inheritable, inline_buffer.items, style.text_indent);
         current_y += inline_box.height;
         try children.append(ctx.allocator, inline_box);
     }
@@ -605,11 +648,11 @@ fn makeTextOnlyBlock(
 ) !*LayoutBox {
     var items: std.ArrayList(InlineItem) = .empty;
     try items.append(ctx.allocator, .{ .kind = .text, .text = node.text, .style = parent });
-    const box = try buildInlineBox(ctx, parent_x, parent_y, available_width, parent, items.items);
+    const box = try buildInlineBox(ctx, parent_x, parent_y, available_width, parent, items.items, 0);
     return box;
 }
 
-const InlineItemKind = enum { text };
+const InlineItemKind = enum { text, line_break };
 
 const InlineItem = struct {
     kind: InlineItemKind,
@@ -630,6 +673,7 @@ fn collectInline(
         .font_weight = self_style.font_weight,
         .line_height = self_style.line_height,
         .text_align = self_style.text_align,
+        .white_space = self_style.white_space,
         .italic = self_style.italic,
         .underline = self_style.text_decoration_underline,
     };
@@ -644,6 +688,15 @@ fn collectInline(
                 .style = inheritable,
             });
         } else if (child_node.kind == .element) {
+            // <br> emits a forced line break sentinel.
+            if (std.ascii.eqlIgnoreCase(child_node.name, "br")) {
+                try out.append(ctx.allocator, .{
+                    .kind = .line_break,
+                    .text = "",
+                    .style = inheritable,
+                });
+                continue;
+            }
             const child_style = try computeStyle(ctx, cid, inheritable);
             if (child_style.display == .none) continue;
             if (child_style.display == .inline_ or child_style.display == .inline_block) {
@@ -661,28 +714,192 @@ fn buildInlineBox(
     width: f64,
     parent: Inheritable,
     items: []const InlineItem,
+    text_indent: f64,
 ) !*LayoutBox {
     var runs: std.ArrayList(TextRun) = .empty;
-    var current_x: f64 = x;
+    var current_x: f64 = x + text_indent;
     var current_y: f64 = y;
     var line_height: f64 = parent.font_size * parent.line_height;
     var total_height: f64 = 0;
+    var first_line: bool = true;
+
+    // pending_space: a collapsible space carried over from a previous run
+    // that we should emit *before* the next non-space content (unless we're
+    // at the start of a line, in which case it's suppressed).
+    var pending_space: bool = false;
+    // line_has_content: have we placed any glyph on the current line yet?
+    var line_has_content: bool = false;
+
+    const lineStart = struct {
+        fn call(cur_x: *f64, base_x: f64, indent: f64, is_first: bool) void {
+            cur_x.* = base_x + (if (is_first) indent else 0);
+        }
+    }.call;
 
     for (items) |item| {
-        if (item.kind != .text) continue;
-        const trimmed = item.text;
-        if (trimmed.len == 0) continue;
         const font_size = item.style.font_size;
         const lh = font_size * item.style.line_height;
         if (lh > line_height) line_height = lh;
 
-        var word_iter = std.mem.tokenizeAny(u8, trimmed, " \t\n\r");
+        if (item.kind == .line_break) {
+            // Forced line break: commit a line and reset.
+            total_height += line_height;
+            current_y += line_height;
+            first_line = false;
+            lineStart(&current_x, x, text_indent, first_line);
+            pending_space = false;
+            line_has_content = false;
+            continue;
+        }
+
+        if (item.kind != .text) continue;
+        const text = item.text;
+        if (text.len == 0) continue;
+
+        const ws = item.style.white_space;
+        const space_w = textWidth(" ", item.style.font_family, font_size, item.style.font_weight, item.style.italic);
+
+        if (ws == .pre or ws == .pre_wrap) {
+            // Preserve whitespace and newlines.
+            // Walk the text emitting runs split by newlines and (for pre_wrap) wrap on whitespace.
+            var i: usize = 0;
+            // For pre/pre_wrap we don't carry pending_space across — the run text itself contains literal spaces.
+            pending_space = false;
+            while (i < text.len) {
+                // Find next newline.
+                var j = i;
+                while (j < text.len and text[j] != '\n') : (j += 1) {}
+                const segment = text[i..j];
+                if (segment.len > 0) {
+                    if (ws == .pre) {
+                        // No wrapping. Emit the segment as a single run.
+                        const seg_w = textWidth(segment, item.style.font_family, font_size, item.style.font_weight, item.style.italic);
+                        const baseline = current_y + font_size * 0.85;
+                        try runs.append(ctx.allocator, .{
+                            .text = segment,
+                            .x = current_x,
+                            .y = baseline,
+                            .font_family = item.style.font_family,
+                            .font_size = font_size,
+                            .font_weight = item.style.font_weight,
+                            .color = item.style.color,
+                            .underline = item.style.underline,
+                            .italic = item.style.italic,
+                        });
+                        current_x += seg_w;
+                        line_has_content = true;
+                    } else {
+                        // pre_wrap: split on whitespace boundaries but preserve them.
+                        var k: usize = 0;
+                        while (k < segment.len) {
+                            // Group of whitespace
+                            var ws_end = k;
+                            while (ws_end < segment.len and isAsciiSpace(segment[ws_end]) and segment[ws_end] != '\n') : (ws_end += 1) {}
+                            if (ws_end > k) {
+                                const ws_chunk = segment[k..ws_end];
+                                const ws_chunk_w = textWidth(ws_chunk, item.style.font_family, font_size, item.style.font_weight, item.style.italic);
+                                // Wrap before whitespace if the whitespace plus a soft break would cross? Standard pre-wrap wraps after the whitespace if the next word doesn't fit.
+                                // Simpler: emit whitespace inline, then check word fit before emitting word.
+                                const baseline = current_y + font_size * 0.85;
+                                try runs.append(ctx.allocator, .{
+                                    .text = ws_chunk,
+                                    .x = current_x,
+                                    .y = baseline,
+                                    .font_family = item.style.font_family,
+                                    .font_size = font_size,
+                                    .font_weight = item.style.font_weight,
+                                    .color = item.style.color,
+                                    .underline = item.style.underline,
+                                    .italic = item.style.italic,
+                                });
+                                current_x += ws_chunk_w;
+                                line_has_content = true;
+                                k = ws_end;
+                                continue;
+                            }
+                            // Word
+                            var word_end = k;
+                            while (word_end < segment.len and !isAsciiSpace(segment[word_end])) : (word_end += 1) {}
+                            const word = segment[k..word_end];
+                            const word_w = textWidth(word, item.style.font_family, font_size, item.style.font_weight, item.style.italic);
+                            // Wrap if needed
+                            if (line_has_content and current_x + word_w > x + width) {
+                                total_height += line_height;
+                                current_y += line_height;
+                                first_line = false;
+                                lineStart(&current_x, x, text_indent, first_line);
+                                line_has_content = false;
+                            }
+                            const baseline = current_y + font_size * 0.85;
+                            try runs.append(ctx.allocator, .{
+                                .text = word,
+                                .x = current_x,
+                                .y = baseline,
+                                .font_family = item.style.font_family,
+                                .font_size = font_size,
+                                .font_weight = item.style.font_weight,
+                                .color = item.style.color,
+                                .underline = item.style.underline,
+                                .italic = item.style.italic,
+                            });
+                            current_x += word_w;
+                            line_has_content = true;
+                            k = word_end;
+                        }
+                    }
+                }
+                if (j < text.len) {
+                    // newline -> forced break
+                    total_height += line_height;
+                    current_y += line_height;
+                    first_line = false;
+                    lineStart(&current_x, x, text_indent, first_line);
+                    line_has_content = false;
+                    i = j + 1;
+                } else {
+                    i = j;
+                }
+            }
+            continue;
+        }
+
+        // white-space: normal or nowrap. Collapse runs of whitespace to a
+        // single space; suppress leading whitespace at line start.
+        const starts_with_ws = isAsciiSpace(text[0]);
+        const ends_with_ws = isAsciiSpace(text[text.len - 1]);
+
+        if (starts_with_ws) {
+            // The boundary between previous run and this run already collapses to
+            // at most one space. If a previous run ended with whitespace, we don't
+            // also accept whitespace from this run — pending_space suffices.
+            if (line_has_content) pending_space = true;
+        }
+
+        var word_iter = std.mem.tokenizeAny(u8, text, " \t\n\r\x0c\x0b");
         while (word_iter.next()) |word| {
-            const word_w = approxTextWidth(word, font_size);
-            if (current_x > x and current_x + word_w > x + width) {
-                current_x = x;
-                current_y += line_height;
+            const word_w = textWidth(word, item.style.font_family, font_size, item.style.font_weight, item.style.italic);
+            // Decide if we need to emit pending_space.
+            var prefix_space_w: f64 = 0;
+            if (pending_space and line_has_content) {
+                prefix_space_w = space_w;
+            }
+            // Wrap before word if it doesn't fit (only if not the first content on the line).
+            if (ws != .nowrap and line_has_content and current_x + prefix_space_w + word_w > x + width) {
+                // wrap: drop the pending space, move to next line.
                 total_height += line_height;
+                current_y += line_height;
+                first_line = false;
+                lineStart(&current_x, x, text_indent, first_line);
+                line_has_content = false;
+                pending_space = false;
+                prefix_space_w = 0;
+            }
+            if (prefix_space_w > 0) {
+                current_x += prefix_space_w;
+                pending_space = false;
+            } else if (pending_space and !line_has_content) {
+                // Suppress leading whitespace at line start.
+                pending_space = false;
             }
             const baseline = current_y + font_size * 0.85;
             try runs.append(ctx.allocator, .{
@@ -696,10 +913,19 @@ fn buildInlineBox(
                 .underline = item.style.underline,
                 .italic = item.style.italic,
             });
-            current_x += word_w + approxTextWidth(" ", font_size);
+            current_x += word_w;
+            line_has_content = true;
+            // After each word, mark a pending space — collapsed multiple spaces
+            // and the gap between subsequent words/items both resolve to one space.
+            pending_space = true;
         }
+        // The pending_space carried beyond the loop is correct only if the text
+        // ends in whitespace; otherwise drop it so adjacent runs without a real
+        // boundary don't gain a phantom space.
+        if (!ends_with_ws) pending_space = false;
+        if (ends_with_ws and line_has_content) pending_space = true;
     }
-    if (runs.items.len > 0) total_height += line_height;
+    if (line_has_content or runs.items.len > 0) total_height += line_height;
 
     const box = try ctx.allocator.create(LayoutBox);
     box.* = .{
@@ -712,6 +938,7 @@ fn buildInlineBox(
             .font_weight = parent.font_weight,
             .line_height = parent.line_height,
             .text_align = parent.text_align,
+            .white_space = parent.white_space,
         },
         .x = x,
         .y = y,
@@ -723,13 +950,297 @@ fn buildInlineBox(
     return box;
 }
 
-fn approxTextWidth(text: []const u8, font_size: f64) f64 {
-    // Quick approximation for sans-serif: average glyph ~ 0.55 of font size.
-    var visible: usize = 0;
-    for (text) |c| {
-        if (c >= 0x20 and c != 0x7F) visible += 1;
+fn isAsciiSpace(c: u8) bool {
+    return c == ' ' or c == '\t' or c == '\n' or c == '\r' or c == 0x0c or c == 0x0b;
+}
+
+// Per-character glyph width tables tuned to Chrome's macOS UA fonts.
+// Widths are in units of font_size. Bold adds ~6%. Italic does not widen
+// (real italic fonts have the same advance widths as upright).
+//
+// Three families:
+//   - sans-serif (Helvetica/Arial-style proportions, default)
+//   - serif      (Times-style, slightly narrower lowercase, wider some uppercase)
+//   - monospace  (every char same width, ~0.60)
+
+const FONT_SANS: [128]f64 = blk: {
+    var t: [128]f64 = undefined;
+    var i: usize = 0;
+    while (i < 128) : (i += 1) t[i] = 0.55;
+    // Control / non-printable
+    i = 0;
+    while (i < 0x20) : (i += 1) t[i] = 0;
+    t[0x7F] = 0;
+    // Punctuation / spacing
+    t[' '] = 0.28;
+    t['!'] = 0.28;
+    t['"'] = 0.36;
+    t['#'] = 0.56;
+    t['$'] = 0.56;
+    t['%'] = 0.89;
+    t['&'] = 0.67;
+    t['\''] = 0.19;
+    t['('] = 0.33;
+    t[')'] = 0.33;
+    t['*'] = 0.39;
+    t['+'] = 0.58;
+    t[','] = 0.28;
+    t['-'] = 0.33;
+    t['.'] = 0.28;
+    t['/'] = 0.28;
+    // Digits ~0.55
+    t['0'] = 0.56;
+    t['1'] = 0.56;
+    t['2'] = 0.56;
+    t['3'] = 0.56;
+    t['4'] = 0.56;
+    t['5'] = 0.56;
+    t['6'] = 0.56;
+    t['7'] = 0.56;
+    t['8'] = 0.56;
+    t['9'] = 0.56;
+    t[':'] = 0.28;
+    t[';'] = 0.28;
+    t['<'] = 0.58;
+    t['='] = 0.58;
+    t['>'] = 0.58;
+    t['?'] = 0.56;
+    t['@'] = 1.02;
+    // Uppercase
+    t['A'] = 0.67;
+    t['B'] = 0.67;
+    t['C'] = 0.72;
+    t['D'] = 0.72;
+    t['E'] = 0.67;
+    t['F'] = 0.61;
+    t['G'] = 0.78;
+    t['H'] = 0.72;
+    t['I'] = 0.28;
+    t['J'] = 0.50;
+    t['K'] = 0.67;
+    t['L'] = 0.56;
+    t['M'] = 0.83;
+    t['N'] = 0.72;
+    t['O'] = 0.78;
+    t['P'] = 0.67;
+    t['Q'] = 0.78;
+    t['R'] = 0.72;
+    t['S'] = 0.67;
+    t['T'] = 0.61;
+    t['U'] = 0.72;
+    t['V'] = 0.67;
+    t['W'] = 0.94;
+    t['X'] = 0.67;
+    t['Y'] = 0.67;
+    t['Z'] = 0.61;
+    t['['] = 0.28;
+    t['\\'] = 0.28;
+    t[']'] = 0.28;
+    t['^'] = 0.47;
+    t['_'] = 0.56;
+    t['`'] = 0.33;
+    // Lowercase
+    t['a'] = 0.56;
+    t['b'] = 0.56;
+    t['c'] = 0.50;
+    t['d'] = 0.56;
+    t['e'] = 0.56;
+    t['f'] = 0.28;
+    t['g'] = 0.56;
+    t['h'] = 0.56;
+    t['i'] = 0.22;
+    t['j'] = 0.22;
+    t['k'] = 0.50;
+    t['l'] = 0.22;
+    t['m'] = 0.83;
+    t['n'] = 0.56;
+    t['o'] = 0.56;
+    t['p'] = 0.56;
+    t['q'] = 0.56;
+    t['r'] = 0.33;
+    t['s'] = 0.50;
+    t['t'] = 0.28;
+    t['u'] = 0.56;
+    t['v'] = 0.50;
+    t['w'] = 0.72;
+    t['x'] = 0.50;
+    t['y'] = 0.50;
+    t['z'] = 0.50;
+    t['{'] = 0.33;
+    t['|'] = 0.26;
+    t['}'] = 0.33;
+    t['~'] = 0.58;
+    break :blk t;
+};
+
+const FONT_SERIF: [128]f64 = blk: {
+    var t: [128]f64 = undefined;
+    var i: usize = 0;
+    while (i < 128) : (i += 1) t[i] = 0.50;
+    i = 0;
+    while (i < 0x20) : (i += 1) t[i] = 0;
+    t[0x7F] = 0;
+    t[' '] = 0.25;
+    t['!'] = 0.33;
+    t['"'] = 0.41;
+    t['#'] = 0.50;
+    t['$'] = 0.50;
+    t['%'] = 0.83;
+    t['&'] = 0.78;
+    t['\''] = 0.33;
+    t['('] = 0.33;
+    t[')'] = 0.33;
+    t['*'] = 0.50;
+    t['+'] = 0.56;
+    t[','] = 0.25;
+    t['-'] = 0.33;
+    t['.'] = 0.25;
+    t['/'] = 0.28;
+    t['0'] = 0.50;
+    t['1'] = 0.50;
+    t['2'] = 0.50;
+    t['3'] = 0.50;
+    t['4'] = 0.50;
+    t['5'] = 0.50;
+    t['6'] = 0.50;
+    t['7'] = 0.50;
+    t['8'] = 0.50;
+    t['9'] = 0.50;
+    t[':'] = 0.28;
+    t[';'] = 0.28;
+    t['<'] = 0.56;
+    t['='] = 0.56;
+    t['>'] = 0.56;
+    t['?'] = 0.44;
+    t['@'] = 0.92;
+    t['A'] = 0.72;
+    t['B'] = 0.67;
+    t['C'] = 0.67;
+    t['D'] = 0.72;
+    t['E'] = 0.61;
+    t['F'] = 0.56;
+    t['G'] = 0.72;
+    t['H'] = 0.72;
+    t['I'] = 0.33;
+    t['J'] = 0.39;
+    t['K'] = 0.72;
+    t['L'] = 0.61;
+    t['M'] = 0.89;
+    t['N'] = 0.72;
+    t['O'] = 0.72;
+    t['P'] = 0.56;
+    t['Q'] = 0.72;
+    t['R'] = 0.67;
+    t['S'] = 0.56;
+    t['T'] = 0.61;
+    t['U'] = 0.72;
+    t['V'] = 0.72;
+    t['W'] = 0.94;
+    t['X'] = 0.72;
+    t['Y'] = 0.72;
+    t['Z'] = 0.61;
+    t['['] = 0.33;
+    t['\\'] = 0.28;
+    t[']'] = 0.33;
+    t['^'] = 0.47;
+    t['_'] = 0.50;
+    t['`'] = 0.33;
+    t['a'] = 0.44;
+    t['b'] = 0.50;
+    t['c'] = 0.44;
+    t['d'] = 0.50;
+    t['e'] = 0.44;
+    t['f'] = 0.33;
+    t['g'] = 0.50;
+    t['h'] = 0.50;
+    t['i'] = 0.28;
+    t['j'] = 0.28;
+    t['k'] = 0.50;
+    t['l'] = 0.28;
+    t['m'] = 0.78;
+    t['n'] = 0.50;
+    t['o'] = 0.50;
+    t['p'] = 0.50;
+    t['q'] = 0.50;
+    t['r'] = 0.33;
+    t['s'] = 0.39;
+    t['t'] = 0.28;
+    t['u'] = 0.50;
+    t['v'] = 0.50;
+    t['w'] = 0.72;
+    t['x'] = 0.50;
+    t['y'] = 0.50;
+    t['z'] = 0.44;
+    t['{'] = 0.48;
+    t['|'] = 0.20;
+    t['}'] = 0.48;
+    t['~'] = 0.54;
+    break :blk t;
+};
+
+const FontKind = enum { sans, serif, mono };
+
+fn detectFontKind(family: []const u8) FontKind {
+    // Case-insensitive substring matching.
+    if (asciiContainsIgnoreCase(family, "mono") or
+        asciiContainsIgnoreCase(family, "courier") or
+        asciiContainsIgnoreCase(family, "consolas") or
+        asciiContainsIgnoreCase(family, "menlo"))
+    {
+        return .mono;
     }
-    return @as(f64, @floatFromInt(visible)) * font_size * 0.55;
+    if (asciiContainsIgnoreCase(family, "serif") and !asciiContainsIgnoreCase(family, "sans")) {
+        return .serif;
+    }
+    // Common serif fonts that don't have "serif" in the name.
+    if (asciiContainsIgnoreCase(family, "times") or
+        asciiContainsIgnoreCase(family, "georgia") or
+        asciiContainsIgnoreCase(family, "garamond") or
+        asciiContainsIgnoreCase(family, "palatino") or
+        asciiContainsIgnoreCase(family, "cambria"))
+    {
+        return .serif;
+    }
+    return .sans;
+}
+
+fn asciiContainsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
+    if (needle.len == 0) return true;
+    if (needle.len > haystack.len) return false;
+    var i: usize = 0;
+    while (i + needle.len <= haystack.len) : (i += 1) {
+        if (std.ascii.eqlIgnoreCase(haystack[i .. i + needle.len], needle)) return true;
+    }
+    return false;
+}
+
+fn glyphWidthRatio(c: u8, kind: FontKind) f64 {
+    return switch (kind) {
+        .mono => if (c == 0 or c == 0x7F or (c < 0x20)) 0.0 else 0.60,
+        .sans => if (c < 128) FONT_SANS[c] else 0.55,
+        .serif => if (c < 128) FONT_SERIF[c] else 0.50,
+    };
+}
+
+fn textWidth(
+    text: []const u8,
+    font_family: []const u8,
+    font_size: f64,
+    font_weight: u16,
+    italic: bool,
+) f64 {
+    _ = italic; // italic uses the same advance widths as upright in real fonts
+    const kind = detectFontKind(font_family);
+    var sum: f64 = 0;
+    for (text) |c| sum += glyphWidthRatio(c, kind);
+    var w = sum * font_size;
+    if (font_weight >= 600) w *= 1.06; // bold ~6% wider
+    return w;
+}
+
+// Backwards-compatible thin wrapper used by older callers / tests.
+fn approxTextWidth(text: []const u8, font_size: f64) f64 {
+    return textWidth(text, "sans-serif", font_size, 400, false);
 }
 
 // ---------------- SVG Paint ----------------
@@ -881,4 +1392,161 @@ test "parseEdgeShorthand 1/2/3/4 tokens" {
     try std.testing.expectEqual(@as(f64, 20), e2.left);
     const e4 = parseEdgeShorthand("1px 2px 3px 4px", 16, .{});
     try std.testing.expectEqual(@as(f64, 4), e4.left);
+}
+
+// ---------------- Tests for text width / whitespace / br / text-indent ----------------
+
+fn collectAllTextRuns(box: *const LayoutBox, out: *std.ArrayList(TextRun), allocator: std.mem.Allocator) !void {
+    for (box.text_runs) |r| try out.append(allocator, r);
+    for (box.children) |c| try collectAllTextRuns(c, out, allocator);
+}
+
+test "text width table differs by char" {
+    const fs: f64 = 16;
+    const w_i = textWidth("i", "sans-serif", fs, 400, false);
+    const w_M = textWidth("M", "sans-serif", fs, 400, false);
+    try std.testing.expect(w_i < w_M);
+    // Mono font: every char is the same width.
+    const w_mi = textWidth("i", "Courier", fs, 400, false);
+    const w_mM = textWidth("M", "Courier", fs, 400, false);
+    try std.testing.expectEqual(w_mi, w_mM);
+    // Bold widens.
+    const w_bold = textWidth("hello", "sans-serif", fs, 700, false);
+    const w_norm = textWidth("hello", "sans-serif", fs, 400, false);
+    try std.testing.expect(w_bold > w_norm);
+    // Italic does not change advance width.
+    const w_italic = textWidth("hello", "sans-serif", fs, 400, true);
+    try std.testing.expectEqual(w_norm, w_italic);
+    // Serif vs sans differ.
+    const w_serif = textWidth("M", "Times", fs, 400, false);
+    try std.testing.expect(w_serif != w_M);
+}
+
+test "whitespace collapses to single space" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const doc = try dom.Document.parse(a, "<html><body><p>  hello   world  </p></body></html>");
+    var page: model.Page = .{
+        .requested_url = "",
+        .url = "",
+        .html = "",
+        .dom = doc,
+        .title = "",
+        .text = "",
+        .links = &.{},
+        .forms = &.{},
+        .resources = &.{},
+        .js = .{},
+        .redirect_chain = &.{},
+        .cookie_count = 0,
+        .status_code = 200,
+        .content_type = "text/html",
+        .fallback_mode = .native_static,
+        .pipeline = "test",
+    };
+    var result = try layoutPage(std.testing.allocator, &page, .{ .width = 800, .height = 600 });
+    defer result.deinit();
+
+    var runs: std.ArrayList(TextRun) = .empty;
+    defer runs.deinit(std.testing.allocator);
+    try collectAllTextRuns(result.root, &runs, std.testing.allocator);
+
+    // Expect exactly two runs: "hello" and "world".
+    try std.testing.expectEqual(@as(usize, 2), runs.items.len);
+    try std.testing.expectEqualStrings("hello", runs.items[0].text);
+    try std.testing.expectEqualStrings("world", runs.items[1].text);
+
+    // Verify the gap between the two runs is exactly one space wide.
+    const fs = runs.items[0].font_size;
+    const family = runs.items[0].font_family;
+    const w_hello = textWidth("hello", family, fs, runs.items[0].font_weight, runs.items[0].italic);
+    const w_space = textWidth(" ", family, fs, runs.items[0].font_weight, runs.items[0].italic);
+    const expected_world_x = runs.items[0].x + w_hello + w_space;
+    try std.testing.expectApproxEqAbs(expected_world_x, runs.items[1].x, 0.001);
+
+    // Both runs share the same y (single line).
+    try std.testing.expectEqual(runs.items[0].y, runs.items[1].y);
+}
+
+test "br forces line break" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const doc = try dom.Document.parse(a, "<html><body><p>First<br>Second</p></body></html>");
+    var page: model.Page = .{
+        .requested_url = "",
+        .url = "",
+        .html = "",
+        .dom = doc,
+        .title = "",
+        .text = "",
+        .links = &.{},
+        .forms = &.{},
+        .resources = &.{},
+        .js = .{},
+        .redirect_chain = &.{},
+        .cookie_count = 0,
+        .status_code = 200,
+        .content_type = "text/html",
+        .fallback_mode = .native_static,
+        .pipeline = "test",
+    };
+    var result = try layoutPage(std.testing.allocator, &page, .{ .width = 800, .height = 600 });
+    defer result.deinit();
+
+    var runs: std.ArrayList(TextRun) = .empty;
+    defer runs.deinit(std.testing.allocator);
+    try collectAllTextRuns(result.root, &runs, std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 2), runs.items.len);
+    try std.testing.expectEqualStrings("First", runs.items[0].text);
+    try std.testing.expectEqualStrings("Second", runs.items[1].text);
+    // Different y positions — line break moved second run to the next line.
+    try std.testing.expect(runs.items[1].y > runs.items[0].y);
+}
+
+test "text-indent shifts first run" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const doc = try dom.Document.parse(a, "<html><body><p style=\"text-indent:20px\">Hello world</p></body></html>");
+    var page: model.Page = .{
+        .requested_url = "",
+        .url = "",
+        .html = "",
+        .dom = doc,
+        .title = "",
+        .text = "",
+        .links = &.{},
+        .forms = &.{},
+        .resources = &.{},
+        .js = .{},
+        .redirect_chain = &.{},
+        .cookie_count = 0,
+        .status_code = 200,
+        .content_type = "text/html",
+        .fallback_mode = .native_static,
+        .pipeline = "test",
+    };
+    var result = try layoutPage(std.testing.allocator, &page, .{ .width = 800, .height = 600 });
+    defer result.deinit();
+
+    // Locate the inline (anonymous) box that holds the runs to verify x = box.x + 20.
+    var runs: std.ArrayList(TextRun) = .empty;
+    defer runs.deinit(std.testing.allocator);
+    try collectAllTextRuns(result.root, &runs, std.testing.allocator);
+    try std.testing.expect(runs.items.len >= 1);
+
+    // Find the box whose first run is "Hello".
+    const InlineBoxFinder = struct {
+        fn find(b: *const LayoutBox) ?*const LayoutBox {
+            if (b.text_runs.len > 0 and std.mem.eql(u8, b.text_runs[0].text, "Hello")) return b;
+            for (b.children) |c| if (find(c)) |hit| return hit;
+            return null;
+        }
+    };
+    const inline_box = InlineBoxFinder.find(result.root) orelse return error.TestUnexpectedResult;
+    const first_run = inline_box.text_runs[0];
+    try std.testing.expectApproxEqAbs(inline_box.x + 20.0, first_run.x, 0.001);
 }
