@@ -2069,8 +2069,28 @@ pub fn paintToSvg(
         "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{d}\" height=\"{d}\" viewBox=\"0 0 {d} {d}\">",
         .{ result.viewport.width, result.viewport.height, result.viewport.width, result.viewport.height });
     try buf.writer.writeAll("<desc>kuri-engine: CSS-aware layout + paint, not full CSS layout</desc>");
-    try buf.writer.writeAll("<rect width=\"100%\" height=\"100%\" fill=\"white\"/>");
-    try paintBox(allocator, &buf, result.root, result.doc);
+
+    // CSS canvas-painting rule (CSS 2.1 §14.2): when the root or body element has a
+    // non-transparent background, that color paints the canvas (the entire viewport),
+    // not just the element's own box. Apply it by tinting the initial full-bleed rect.
+    if (result.root.style.background_color) |canvas_bg| {
+        if (canvas_bg.a > 0.001) {
+            const hex = try colorToHex(allocator, canvas_bg);
+            defer allocator.free(hex);
+            try buf.writer.print(
+                "<rect width=\"100%\" height=\"100%\" fill=\"{s}\" fill-opacity=\"{d:.3}\"/>",
+                .{ hex, canvas_bg.a });
+        } else {
+            try buf.writer.writeAll("<rect width=\"100%\" height=\"100%\" fill=\"white\"/>");
+        }
+    } else {
+        try buf.writer.writeAll("<rect width=\"100%\" height=\"100%\" fill=\"white\"/>");
+    }
+
+    // Skip the root's own bg rect so we don't paint it twice.
+    var root_no_bg = result.root.*;
+    root_no_bg.style.background_color = null;
+    try paintBox(allocator, &buf, &root_no_bg, result.doc);
     try buf.writer.writeAll("</svg>");
     return allocator.dupe(u8, buf.written());
 }
