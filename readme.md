@@ -14,7 +14,7 @@
 
 **Browser automation & web crawling for AI agents. Written in Zig. Zero Node.js.**
 
-CDP automation · A11y snapshots · HAR recording · Standalone fetcher · Interactive terminal browser · Agentic CLI · Security testing
+CDP automation · A11y snapshots · HAR recording · Standalone fetcher · Interactive terminal browser · Agentic CLI · Security testing · iOS + Android device control
 
 [Quick Start](#-quick-start) · [Benchmarks](#-benchmarks) · [kuri-agent](#-kuri-agent) · [Security Testing](#-security-testing) · [API](#-http-api) · [Skills](#-skills) · [Changelog](CHANGELOG.md)
 
@@ -589,6 +589,32 @@ kuri-agent shot                      # saves ~/.kuri/screenshots/<ts>.png
 
 ---
 
+## 📱 kuri-mobile (iOS + Android)
+
+Native Zig CLI for driving iOS Simulators, real iPhones (listing + launch/terminate), and Android devices/emulators — inspired by [`mobile-device-mcp`](https://github.com/srmorete/mobile-device-mcp), reimplemented in Zig with no Bun/Node/Gradle/Xcode in the build path.
+
+```bash
+cd kuri-mobile && zig build && cp zig-out/bin/kuri-mobile ../zig-out/bin/
+
+# The main `kuri` binary forwards android/ios subcommands to kuri-mobile:
+kuri ios list-devices                              # sims + real devices (usbmuxd, native)
+kuri ios openurl https://example.com               # navigate Safari
+kuri ios screenshot out.png                        # auto-picks booted sim
+kuri ios launch com.apple.Preferences
+
+kuri android list-devices                          # native Zig adb wire-protocol client
+kuri android tap 540 1200
+kuri android swipe 100 1500 100 500
+kuri android screenshot phone.png
+kuri android uitree                                # flat element list via uiautomator dump
+```
+
+**What's native Zig:** adb host protocol (libc sockets, 4-hex framing over `host:transport:`/`shell:`/`exec:`), Android XML UI tree parser, usbmuxd `ListDevices` plist client.
+**What shells out:** `xcrun simctl` (iOS Simulator), `xcrun devicectl` (iOS real-device launch/terminate).
+**Driverless by design:** no on-device app is installed, so `run_code` sandboxes and XCUITest-backed tap/uitree on real iOS devices are intentionally **not** available. See [`kuri-mobile/README.md`](kuri-mobile/README.md) for the full parity matrix vs upstream.
+
+---
+
 ## 🔒 Security Testing
 
 `kuri-agent` supports browser-native security trajectories — log in once, then run reconnaissance and header/cookie audits without leaving the terminal.
@@ -743,9 +769,16 @@ kuri/
 │       ├── harness.zig        # Test HTTP client
 │       ├── integration.zig    # Integration tests
 │       └── merjs_e2e.zig      # E2E tests
-└── js/
-    ├── stealth.js             # Bot detection bypass
-    └── readability.js         # Content extraction
+├── js/
+│   ├── stealth.js             # Bot detection bypass
+│   └── readability.js         # Content extraction
+├── kuri-browser/              # Native Zig rendering experiments
+└── kuri-mobile/               # iOS + Android device control (Zig-native adb + usbmuxd)
+    ├── src/
+    │   ├── common/            # io helpers, unified UI tree parser
+    │   ├── android/           # adb wire protocol client, driver, CLI
+    │   └── ios/               # simctl, usbmuxd, devicectl, CLI
+    └── README.md              # Full parity matrix vs mobile-device-mcp
 ```
 
 ---

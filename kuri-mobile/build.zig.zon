@@ -1,0 +1,13 @@
+.{
+    .name = .kuri_mobile,
+    .version = "0.0.1",
+    .dependencies = .{},
+    .fingerprint = 0x41cfa5929f72d020,
+    .minimum_zig_version = "0.16.0",
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "README.md",
+    },
+}

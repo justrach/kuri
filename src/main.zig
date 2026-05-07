@@ -11,6 +11,7 @@ const CliAction = enum {
     run,
     help,
     version,
+    mobile,
 };
 
 pub fn main(init: std.process.Init.Minimal) !void {
@@ -33,6 +34,14 @@ pub fn main(init: std.process.Init.Minimal) !void {
         },
         .version => {
             compat.writeToStdout("kuri " ++ version ++ "\n");
+            return;
+        },
+        .mobile => {
+            // Dispatch `kuri android <...>` and `kuri ios <...>` to the
+            // sibling kuri-mobile binary. Keeps the mobile code in its
+            // own subproject (kuri-mobile/) and avoids pulling those
+            // modules into the main browser binary.
+            try execMobile(arena_impl.allocator(), args);
             return;
         },
         .run => {},
@@ -83,7 +92,48 @@ fn parseCliAction(args: []const []const u8) !CliAction {
         return .version;
     }
 
+    if (std.mem.eql(u8, args[1], "android") or std.mem.eql(u8, args[1], "ios")) {
+        return .mobile;
+    }
+
     return error.UnknownArgument;
+}
+
+/// Locate `kuri-mobile` next to this binary (or in PATH) and execvp it.
+fn execMobile(arena: std.mem.Allocator, args: []const []const u8) !void {
+    // Try a sibling path next to argv[0] first; otherwise fall back to PATH.
+    const sibling: ?[]const u8 = blk: {
+        const argv0 = args[0];
+        const dir = std.fs.path.dirname(argv0) orelse break :blk null;
+        if (dir.len == 0) break :blk null;
+        const candidate = try std.fmt.allocPrint(arena, "{s}/kuri-mobile", .{dir});
+        break :blk candidate;
+    };
+
+    // Build argv: kuri-mobile <android|ios> <rest...>
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(arena);
+    try argv.append(arena, sibling orelse "kuri-mobile");
+    for (args[1..]) |a| try argv.append(arena, a);
+
+    // Convert to NUL-terminated C strings.
+    var c_args: std.ArrayList([:0]u8) = .empty;
+    defer {
+        for (c_args.items) |s| arena.free(s);
+        c_args.deinit(arena);
+    }
+    for (argv.items) |a| {
+        const dup = try arena.allocSentinel(u8, a.len, 0);
+        @memcpy(dup[0..a.len], a);
+        try c_args.append(arena, dup);
+    }
+    const c_argv = try arena.alloc(?[*:0]const u8, c_args.items.len + 1);
+    for (c_args.items, 0..) |s, i| c_argv[i] = s.ptr;
+    c_argv[c_args.items.len] = null;
+
+    _ = compat.execvp(c_args.items[0].ptr, @ptrCast(c_argv.ptr));
+    std.debug.print("error: failed to exec '{s}'. Is kuri-mobile installed alongside kuri?\n", .{argv.items[0]});
+    std.process.exit(127);
 }
 
 fn printUnknownArgument(arg: []const u8) void {
@@ -97,6 +147,8 @@ fn printUsage() void {
         \\
         \\  USAGE
         \\    kuri                     Start the HTTP/CDP server
+        \\    kuri android <cmd>       Drive Android devices (delegates to kuri-mobile)
+        \\    kuri ios <cmd>           Drive iOS sims/devices (delegates to kuri-mobile)
         \\    kuri -h, --help          Show this help
         \\    kuri -V, --version       Print version and exit
         \\

@@ -2,6 +2,23 @@
 
 Instructions for AI coding agents working in this repository.
 
+## TurboDB Coordination
+
+For multi-agent or long-running repo work, prefer `tools/turbodb_coord.py` over
+ad hoc local JSON logs. It writes structured events to a repo-scoped TurboDB
+collection and can list, summarize, or wait for worker status.
+
+- Never commit TurboDB API keys. Pass credentials through `TURBODB_API_KEY`.
+- Use `TURBODB_GATEWAY_URL` for non-local gateways and `TURBODB_COLLECTION`
+  when a task needs an isolated collection; default collection is
+  `kuri_repo_coord`.
+- Log start and completion events with explicit `role`, `task` or `event`,
+  `status`, touched files, and a short note.
+- When workers own specific files, do not edit those files from the parent
+  until their completion events are present or the worker is explicitly stopped.
+- Use `summary` or `wait` before merging parallel work so stale worker notes do
+  not get mistaken for current state.
+
 ## Benchmark Honesty
 
 Never present a benchmark, parity score, or competitor comparison as stronger than the evidence supports.
@@ -75,3 +92,35 @@ cd kuri-browser
 ./zig-out/bin/kuri-browser bench --kuri-base http://127.0.0.1:8080
 ./zig-out/bin/kuri-browser parity --kuri-base http://127.0.0.1:8080
 ```
+
+## kuri-mobile (Android / iOS device automation)
+
+The `kuri-mobile/` subproject adds Zig-native device control alongside the
+browser stack. It is inspired by
+[`mobile-device-mcp`](https://github.com/srmorete/mobile-device-mcp) but is
+**driverless**: no on-device app, no Bun, no Gradle, no Xcode-time builds.
+
+Verification:
+
+```sh
+cd kuri-mobile
+zig build
+zig build test
+./zig-out/bin/kuri-mobile android list-devices  # needs `adb start-server`
+./zig-out/bin/kuri-mobile ios list-devices      # sims + real devices
+```
+
+The main `kuri` binary forwards `kuri android <cmd>` and `kuri ios <cmd>`
+to `kuri-mobile`. Make sure `kuri-mobile` is on PATH or installed next to
+the `kuri` binary.
+
+Honesty rules when reporting this work:
+
+- Never claim parity with `mobile-device-mcp` — kuri-mobile v1 has no
+  on-device driver, so no `run_code`, and no real-device iOS UI tree
+  / tap / swipe / type. Those commands intentionally return an error.
+- Distinguish native Zig surfaces (adb host protocol, Android XML
+  parser, usbmuxd ListDevices) from shelled-out paths
+  (`xcrun simctl`, `xcrun devicectl`).
+- Do not present this as a replacement for Appium, Maestro, or
+  XCUITest-based stacks.
