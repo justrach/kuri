@@ -35,6 +35,40 @@ jobs:
       - name: Run tests
         run: zig build test -Doptimize=ReleaseSafe
 
+      - name: Regression — --help / --version do NOT spawn Chrome (issue #156)
+        # Old kuri binaries (≤ v0.1.0) silently fell through to the daemon
+        # path on `--help`, launching headless Chrome and binding :8080.
+        # Fixed in f0ab19b. This step makes sure no future change re-routes
+        # `--help` or `--version` through the daemon path again.
+        run: |
+          set -euo pipefail
+          for flag in --help -h --version -V; do
+            echo "::group::kuri ${flag}"
+            # Run with hard 5 s timeout; help/version must exit fast.
+            output=$(timeout 5s ./zig-out/bin/kuri "${flag}" 2>&1) && rc=$? || rc=$?
+            echo "${output}"
+            echo "exit=${rc}"
+            if [ "${rc}" -ne 0 ]; then
+              echo "::error::kuri ${flag} returned non-zero (${rc}) — should print and exit 0"
+              exit 1
+            fi
+            # Match the actual log lines emitted by the daemon path
+            # (`std.log.info(...)` prefixes them with "info: "), not the
+            # help text — which legitimately documents Chrome-related env
+            # vars and would otherwise false-positive.
+            if echo "${output}" | grep -qE "^info: (launching managed Chrome|listening on|launched Chrome|connecting to existing Chrome)"; then
+              echo "::error::kuri ${flag} appears to have entered daemon startup. See issue #156."
+              exit 1
+            fi
+            # Confirm at least one expected line was printed.
+            if [ "${flag}" = "--help" ] || [ "${flag}" = "-h" ]; then
+              echo "${output}" | grep -q "USAGE" || { echo "::error::kuri ${flag} did not print USAGE"; exit 1; }
+            else
+              echo "${output}" | grep -q "kuri " || { echo "::error::kuri ${flag} did not print version"; exit 1; }
+            fi
+            echo "::endgroup::"
+          done
+
   startup-smoke:
     runs-on: ubuntu-latest
 
