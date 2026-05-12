@@ -1,9 +1,12 @@
 //! `kuri-mobile ios <cmd>` dispatcher.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const simctl = @import("simctl.zig");
 const usbmux = @import("usbmux.zig");
 const devicectl = @import("devicectl.zig");
+const sim_input = @import("sim_input.zig");
+const sim_window = @import("sim_window.zig");
 const io = @import("../common/io.zig");
 
 pub fn run(gpa: std.mem.Allocator, args: []const []const u8) !u8 {
@@ -107,15 +110,138 @@ pub fn run(gpa: std.mem.Allocator, args: []const []const u8) !u8 {
         return 0;
     }
 
-    if (std.mem.eql(u8, sub, "tap") or std.mem.eql(u8, sub, "swipe") or std.mem.eql(u8, sub, "type") or std.mem.eql(u8, sub, "uitree")) {
-        var arena_impl = std.heap.ArenaAllocator.init(gpa);
-        defer arena_impl.deinit();
-        io.printStderr(arena_impl.allocator(), "'{s}' on iOS requires XCUITest, which is not bundled in v1 (driverless mode).\n", .{sub});
+    if (std.mem.eql(u8, sub, "tap")) return cmdTap(gpa, udid_opt, simulator, cmd_args);
+    if (std.mem.eql(u8, sub, "swipe") or std.mem.eql(u8, sub, "scroll") or std.mem.eql(u8, sub, "pan")) return cmdSwipe(gpa, udid_opt, simulator, cmd_args);
+    if (std.mem.eql(u8, sub, "type")) return cmdType(gpa, udid_opt, simulator, cmd_args);
+    if (std.mem.eql(u8, sub, "uitree")) {
+        // Honest scope: macOS AX on Simulator.app only exposes window chrome,
+        // not the running iOS app's a11y tree. That bridge is XCUITest-only.
+        io.writeStderr("uitree on iOS requires XCUITest (driverless mode does not have a11y access to the iOS app). Use Accessibility Inspector or run via XCUITest.\n");
         return 3;
     }
 
     try printUsage();
     return 1;
+}
+
+// --- tap / swipe / type implementations (Simulator only) -------------------
+// Coordinates are *device pixels* matching `xcrun simctl io ... screenshot`,
+// so the same numbers you'd plug into `adb shell input tap` work here.
+
+/// Returns null if OK, or an exit code if the command should bail without
+/// raising a Zig error (so the user just sees the message + a clean status).
+fn guardSim(simulator: bool) ?u8 {
+    if (builtin.os.tag != .macos) {
+        io.writeStderr("ios input commands are macOS-only.\n");
+        return 3;
+    }
+    if (!simulator) {
+        io.writeStderr("tap/swipe/type on real iOS devices requires XCUITest; not supported in v1. Use --simulator.\n");
+        return 3;
+    }
+    return null;
+}
+
+fn parseF64(s: []const u8) !f64 {
+    if (std.fmt.parseFloat(f64, s)) |v| return v else |_| {}
+    const i = try std.fmt.parseInt(i64, s, 10);
+    return @floatFromInt(i);
+}
+
+const Resolved = struct {
+    udid: []const u8,
+    owned: bool, // true => caller must free .udid
+
+    fn deinit(self: Resolved, gpa: std.mem.Allocator) void {
+        if (self.owned) gpa.free(self.udid);
+    }
+};
+
+fn resolveUdid(gpa: std.mem.Allocator, udid_opt: ?[]const u8) !Resolved {
+    if (udid_opt) |u| return .{ .udid = u, .owned = false };
+    const u = try resolveBootedSim(gpa);
+    return .{ .udid = u, .owned = true };
+}
+
+fn prepSimAndPoint(
+    gpa: std.mem.Allocator,
+    udid: []const u8,
+    dev_x: f64,
+    dev_y: f64,
+) !sim_input.CGPoint {
+    try sim_window.activate(gpa);
+    const win = try sim_window.frontWindowRect(gpa);
+    const px = try sim_window.devicePixelSize(gpa, udid);
+    return sim_window.deviceToScreen(win, px, dev_x, dev_y);
+}
+
+fn cmdTap(gpa: std.mem.Allocator, udid_opt: ?[]const u8, simulator: bool, args: []const []const u8) !u8 {
+    if (guardSim(simulator)) |code| return code;
+    if (args.len < 2) return errMissing("x y");
+    const x = try parseF64(args[0]);
+    const y = try parseF64(args[1]);
+    const r = try resolveUdid(gpa, udid_opt);
+    defer r.deinit(gpa);
+    const p = try prepSimAndPoint(gpa, r.udid, x, y);
+    sim_input.tap(p);
+    return 0;
+}
+
+fn cmdSwipe(gpa: std.mem.Allocator, udid_opt: ?[]const u8, simulator: bool, args: []const []const u8) !u8 {
+    if (guardSim(simulator)) |code| return code;
+    if (args.len < 4) return errMissing("x1 y1 x2 y2 [duration_ms]");
+    const x1 = try parseF64(args[0]);
+    const y1 = try parseF64(args[1]);
+    const x2 = try parseF64(args[2]);
+    const y2 = try parseF64(args[3]);
+    const dur: u64 = if (args.len >= 5) try std.fmt.parseInt(u64, args[4], 10) else 300;
+    const r = try resolveUdid(gpa, udid_opt);
+    defer r.deinit(gpa);
+    try sim_window.activate(gpa);
+    const win = try sim_window.frontWindowRect(gpa);
+    const px = try sim_window.devicePixelSize(gpa, r.udid);
+    const a = sim_window.deviceToScreen(win, px, x1, y1);
+    const b = sim_window.deviceToScreen(win, px, x2, y2);
+    sim_input.swipe(a, b, dur);
+    return 0;
+}
+
+fn cmdType(gpa: std.mem.Allocator, udid_opt: ?[]const u8, simulator: bool, args: []const []const u8) !u8 {
+    if (guardSim(simulator)) |code| return code;
+    if (args.len < 1) return errMissing("text");
+    _ = udid_opt;
+    // Bring sim to front so keystrokes go to its focused field, then use
+    // System Events `keystroke` for Unicode-safe input. This avoids having
+    // to maintain a CGEvent keycode table.
+    try sim_window.activate(gpa);
+
+    var arena_impl = std.heap.ArenaAllocator.init(gpa);
+    defer arena_impl.deinit();
+    const arena = arena_impl.allocator();
+
+    var joined: std.ArrayList(u8) = .empty;
+    defer joined.deinit(arena);
+    for (args, 0..) |a, i| {
+        if (i > 0) try joined.append(arena, ' ');
+        try joined.appendSlice(arena, a);
+    }
+
+    // Escape backslashes and double-quotes for AppleScript string literal.
+    var escaped: std.ArrayList(u8) = .empty;
+    defer escaped.deinit(arena);
+    for (joined.items) |c| {
+        if (c == '\\' or c == '"') try escaped.append(arena, '\\');
+        try escaped.append(arena, c);
+    }
+
+    const script = try std.fmt.allocPrint(
+        arena,
+        "tell application \"System Events\" to tell process \"Simulator\" to keystroke \"{s}\"",
+        .{escaped.items},
+    );
+    const r = try io.runCommand(gpa, &.{ "osascript", "-e", script }, 64 * 1024);
+    gpa.free(r.stdout);
+    return 0;
 }
 
 /// Find the single booted iOS Simulator. Returns owned UDID slice; caller frees.
@@ -172,9 +298,14 @@ fn printUsage() !void {
         \\  screenshot [--udid U] [path.png]   defaults to the booted sim if --udid omitted
         \\  list-apps  --udid U --simulator
         \\
+        \\Simulator-only input (macOS, device-pixel coords matching screenshot):
+        \\  tap   [--udid U] <x> <y>
+        \\  swipe [--udid U] <x1> <y1> <x2> <y2> [duration_ms]   (alias: scroll, pan)
+        \\  type  [--udid U] <text...>
+        \\
         \\Not implemented in v1 (driverless mode):
-        \\  tap, swipe, type, uitree on real devices
-        \\    these require an on-device XCUITest runner; intentionally skipped.
+        \\  tap, swipe, type on real iOS devices            -> needs XCUITest
+        \\  uitree (simulator or device)                    -> needs XCUITest / Accessibility Inspector
         \\
     );
 }

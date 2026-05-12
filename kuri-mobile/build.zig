@@ -11,6 +11,11 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
 
+    // CGEvent (tap/swipe) lives in ApplicationServices on macOS.
+    if (target.result.os.tag == .macos) {
+        root_mod.linkFramework("ApplicationServices", .{});
+    }
+
     const exe = b.addExecutable(.{
         .name = "kuri-mobile",
         .root_module = root_mod,
@@ -23,14 +28,16 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run kuri-mobile");
     run_step.dependOn(&run_cmd.step);
 
-    const unit_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/main.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-        }),
+    const test_mod = b.createModule(.{
+        .root_source_file = b.path("src/main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
     });
+    if (target.result.os.tag == .macos) {
+        test_mod.linkFramework("ApplicationServices", .{});
+    }
+    const unit_tests = b.addTest(.{ .root_module = test_mod });
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&b.addRunArtifact(unit_tests).step);
 }

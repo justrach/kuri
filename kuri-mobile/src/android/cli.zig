@@ -40,7 +40,7 @@ pub fn run(gpa: std.mem.Allocator, args: []const []const u8) !u8 {
     if (std.mem.eql(u8, sub, "tap")) return cmdTap(gpa, &d, cmd_args);
     if (std.mem.eql(u8, sub, "double-tap")) return cmdDoubleTap(gpa, &d, cmd_args);
     if (std.mem.eql(u8, sub, "long-press")) return cmdLongPress(gpa, &d, cmd_args);
-    if (std.mem.eql(u8, sub, "swipe") or std.mem.eql(u8, sub, "scroll")) return cmdSwipe(gpa, &d, cmd_args);
+    if (std.mem.eql(u8, sub, "swipe") or std.mem.eql(u8, sub, "scroll") or std.mem.eql(u8, sub, "pan")) return cmdSwipe(gpa, &d, cmd_args);
     if (std.mem.eql(u8, sub, "type")) return cmdType(gpa, &d, cmd_args);
     if (std.mem.eql(u8, sub, "press")) return cmdPress(gpa, &d, cmd_args);
     if (std.mem.eql(u8, sub, "screenshot")) return cmdScreenshot(gpa, &d, cmd_args);
@@ -186,7 +186,7 @@ fn printUsage() !void {
         \\  tap <x> <y>
         \\  double-tap <x> <y>
         \\  long-press <x> <y> [ms]
-        \\  swipe <x1> <y1> <x2> <y2> [ms]
+        \\  swipe <x1> <y1> <x2> <y2> [ms]      (alias: scroll, pan)
         \\  type <text...>
         \\  press <button>          # home|back|menu|enter|tab|space|del|volumeUp|volumeDown|power|dpad{Up,Down,Left,Right,Center}
         \\  screenshot [path.png]

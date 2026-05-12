@@ -118,7 +118,13 @@ Honesty rules when reporting this work:
 
 - Never claim parity with `mobile-device-mcp` — kuri-mobile v1 has no
   on-device driver, so no `run_code`, and no real-device iOS UI tree
-  / tap / swipe / type. Those commands intentionally return an error.
+  / tap / swipe / type, and no Simulator UI tree. Those commands
+  intentionally return an error.
+- iOS Simulator `tap`/`swipe`/`pan`/`type` are implemented via macOS
+  CGEvent posts into the Simulator.app window (with `osascript` for
+  window activation, window-rect lookup, and Unicode `keystroke`).
+  They are not equivalent to XCUITest and depend on the user granting
+  Accessibility permission to the calling terminal.
 - Distinguish native Zig surfaces (adb host protocol, Android XML
   parser, usbmuxd ListDevices) from shelled-out paths
   (`xcrun simctl`, `xcrun devicectl`).

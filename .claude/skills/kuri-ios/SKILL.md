@@ -1,6 +1,6 @@
 ---
 name: kuri-ios
-description: Use kuri-ios to drive iOS Simulators from the CLI — list sims, boot/shutdown, navigate Safari to URLs (openurl), launch and terminate apps by bundle id, capture PNG screenshots, and list installed apps. Real iPhones over USB are supported for listing and launch/terminate via usbmuxd + xcrun devicectl. Tap, swipe, type, and UI tree on real devices are NOT supported in v1 because no XCUITest bundle is installed (driverless by design). Trigger phrases include "screenshot the iPhone sim", "open Safari on simulator", "launch iOS Settings", "list booted simulators", "navigate the iOS simulator to https://...".
+description: Use kuri-ios to drive iOS Simulators from the CLI — list sims, boot/shutdown, navigate Safari to URLs (openurl), launch and terminate apps by bundle id, capture PNG screenshots, list installed apps, and (on the Simulator only) tap, swipe/pan, and type via native CGEvent into the Simulator window. Real iPhones over USB are supported for listing and launch/terminate via usbmuxd + xcrun devicectl. Tap/swipe/type/uitree on real devices and uitree on the Simulator are NOT supported in v1 (require XCUITest). Trigger phrases include "screenshot the iPhone sim", "tap on iOS simulator", "swipe up on iPhone sim", "pan the iOS simulator", "type into iOS simulator", "open Safari on simulator", "launch iOS Settings", "list booted simulators".
 ---
 
 # kuri-ios
@@ -18,10 +18,17 @@ Drive iOS Simulators (and, where possible, real iPhones) through the
 - Enumerate real iPhones plugged in over USB (via usbmuxd, native Zig).
 - Launch / terminate an app on a real iPhone via `xcrun devicectl`.
 
+- Tap, swipe, pan, or type into the booted iOS Simulator (CGEvent posts
+  into the Simulator.app window; coords are device pixels matching the
+  screenshot). The first run will trigger a macOS Accessibility prompt
+  for your terminal — without that permission, taps are silently dropped.
+
 Do **not** use this skill for:
 
 - Tapping, swiping, typing, or reading UI tree on a real iPhone
   (requires XCUITest; intentionally not in v1).
+- Reading the UI tree of the iOS Simulator (the macOS AX of Simulator.app
+  does not expose the iOS app — that path is XCUITest only).
 - Running JS inside a page — that's a browser task, use kuri-agent.
 - Android — use the `kuri-android` skill instead.
 
@@ -79,11 +86,18 @@ kuri ios openurl "maps://?q=San%20Francisco"
 | `kuri ios terminate --device --udid <U> <bundle-id>` | Kill on real device |
 | `kuri ios screenshot [path.png]` | PNG from booted sim (auto-resolves) |
 | `kuri ios list-apps --udid <U>` | List installed apps on sim |
+| `kuri ios tap <x> <y>` | Tap at device pixel coords on the booted sim |
+| `kuri ios swipe <x1> <y1> <x2> <y2> [ms]` | Swipe/pan on the sim. Aliases: `pan`, `scroll` |
+| `kuri ios type <text...>` | Send keystrokes to the focused field on the sim |
 
 ## Intentional limits (don't claim parity with upstream)
 
-- `tap`, `swipe`, `type`, `uitree` return an explicit
-  "not supported in v1, requires XCUITest" error — on purpose.
+- `tap`, `swipe`, `type` work on the iOS **Simulator only** (CGEvent into
+  the Simulator.app window). On real iPhones they return an explicit
+  "requires XCUITest" error — on purpose.
+- `uitree` returns an explicit "requires XCUITest" error on both
+  Simulator and real device. The macOS AX tree of Simulator.app only
+  exposes the macOS window chrome, not the running iOS app.
 - Real-device screenshot is unavailable for the same reason.
 - There is no on-device `run_code` sandbox.
 
@@ -98,6 +112,8 @@ not this skill.
 | simctl device listing | libc fork/exec `xcrun simctl list devices --json`, parse JSON in Zig |
 | usbmuxd real-device listing | native Zig Unix-socket client, plist scan |
 | openurl / launch / terminate / screenshot | shell out to `xcrun simctl` / `xcrun devicectl` |
+| Simulator tap / swipe / pan | **native Zig** — CGEvent via `ApplicationServices.framework`, with `osascript` only used to (a) activate Simulator.app and (b) read the front window's position+size for the device→screen coord mapping |
+| Simulator type | shell out to `osascript` (`System Events keystroke`), Unicode-safe |
 | Resolve "booted sim" | iterate parsed list in Zig, match `state == "Booted"` |
 
 Apple's iOS Simulator runtime renders the screens — Kuri orchestrates.
