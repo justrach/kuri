@@ -193,6 +193,11 @@ const Browser = struct {
     }
 
     fn repl(self: *Browser) void {
+        if (comptime @import("builtin").os.tag == .windows) {
+            // TODO Wave-3+ Windows port: stdin fd_t differs; route via GetStdHandle.
+            std.debug.print("kuri repl: Windows port pending — non-interactive mode only\n", .{});
+            return;
+        }
         const stdin_fd: std.posix.fd_t = 0;
         var line_buf: [4096]u8 = undefined;
 

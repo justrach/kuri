@@ -30,49 +30,75 @@ const win = if (is_windows) struct {
     extern "kernel32" fn GetFileType(hFile: HANDLE) callconv(.winapi) DWORD;
     extern "kernel32" fn QueryPerformanceCounter(lpPerformanceCount: *i64) callconv(.winapi) BOOL;
     extern "kernel32" fn QueryPerformanceFrequency(lpFrequency: *i64) callconv(.winapi) BOOL;
+    extern "kernel32" fn Sleep(dwMilliseconds: DWORD) callconv(.winapi) void;
 } else struct {};
 
 // --- Time ---
+//
+// Use the impl-struct pattern (Zig idiom for "compile only one branch"):
+// `if (cond) struct {...} else struct {...}` — Zig instantiates only the
+// branch selected by the comptime-known `cond`, so the un-chosen struct's
+// body is never type-checked. That matters because `std.c.clock_gettime` on
+// Windows is an extern decl whose own parameter chain (timespec → void) FAILS
+// type-check, so even a dead `if (comptime is_windows) ... else { std.c.clock_gettime(...) }`
+// branch breaks the Windows build. Splitting into a struct sidesteps it.
 
-pub fn timestampSeconds() i64 {
-    if (comptime is_windows) return @divTrunc(milliTimestamp(), 1000);
-    var ts: std.c.timespec = undefined;
-    _ = std.c.clock_gettime(.REALTIME, &ts);
-    return ts.sec;
-}
-
-pub fn milliTimestamp() i64 {
-    if (comptime is_windows) {
-        // GetSystemTimeAsFileTime is the wall-clock equivalent; reuse the
-        // perf counter trick for monotonic-ish ms by dividing nanos.
-        return @intCast(@divTrunc(nanoTimestamp(), std.time.ns_per_ms));
+const time_impl = if (is_windows) struct {
+    pub fn timestampSeconds() i64 {
+        return @intCast(@divTrunc(@This().milliTimestamp(), 1000));
     }
-    var ts: std.c.timespec = undefined;
-    _ = std.c.clock_gettime(.REALTIME, &ts);
-    return @as(i64, ts.sec) * 1000 + @divTrunc(@as(i64, ts.nsec), 1_000_000);
-}
-
-pub fn nanoTimestamp() i128 {
-    if (comptime is_windows) {
+    pub fn milliTimestamp() i64 {
+        return @intCast(@divTrunc(@This().nanoTimestamp(), std.time.ns_per_ms));
+    }
+    pub fn nanoTimestamp() i128 {
         var counter: i64 = 0;
         var freq: i64 = 0;
         _ = win.QueryPerformanceCounter(&counter);
         _ = win.QueryPerformanceFrequency(&freq);
         if (freq == 0) return 0;
-        // counter * 1e9 / freq, computed in i128 to avoid overflow.
         return @divTrunc(@as(i128, counter) * std.time.ns_per_s, @as(i128, freq));
     }
-    var ts: std.c.timespec = undefined;
-    _ = std.c.clock_gettime(.REALTIME, &ts);
-    return @as(i128, ts.sec) * std.time.ns_per_s + @as(i128, ts.nsec);
-}
-pub fn threadSleep(ns: u64) void {
-    const ts = std.c.timespec{
-        .sec = @intCast(ns / std.time.ns_per_s),
-        .nsec = @intCast(ns % std.time.ns_per_s),
-    };
-    _ = std.c.nanosleep(&ts, null);
-}
+} else struct {
+    pub fn timestampSeconds() i64 {
+        var ts: std.c.timespec = undefined;
+        _ = std.c.clock_gettime(.REALTIME, &ts);
+        return ts.sec;
+    }
+    pub fn milliTimestamp() i64 {
+        var ts: std.c.timespec = undefined;
+        _ = std.c.clock_gettime(.REALTIME, &ts);
+        return @as(i64, ts.sec) * 1000 + @divTrunc(@as(i64, ts.nsec), 1_000_000);
+    }
+    pub fn nanoTimestamp() i128 {
+        var ts: std.c.timespec = undefined;
+        _ = std.c.clock_gettime(.REALTIME, &ts);
+        return @as(i128, ts.sec) * std.time.ns_per_s + @as(i128, ts.nsec);
+    }
+};
+
+pub fn timestampSeconds() i64 { return time_impl.timestampSeconds(); }
+pub fn milliTimestamp() i64 { return time_impl.milliTimestamp(); }
+pub fn nanoTimestamp() i128 { return time_impl.nanoTimestamp(); }
+
+// --- Threading ---
+
+const thread_impl = if (is_windows) struct {
+    pub fn threadSleep(ns: u64) void {
+        // Sleep takes milliseconds; round up to keep "at least this long".
+        const ms = (ns + std.time.ns_per_ms - 1) / std.time.ns_per_ms;
+        win.Sleep(@intCast(@min(ms, std.math.maxInt(u32))));
+    }
+} else struct {
+    pub fn threadSleep(ns: u64) void {
+        const ts = std.c.timespec{
+            .sec = @intCast(ns / std.time.ns_per_s),
+            .nsec = @intCast(ns % std.time.ns_per_s),
+        };
+        _ = std.c.nanosleep(&ts, null);
+    }
+};
+
+pub fn threadSleep(ns: u64) void { thread_impl.threadSleep(ns); }
 
 pub const PthreadMutex = struct {
     inner: std.c.pthread_mutex_t = std.c.PTHREAD_MUTEX_INITIALIZER,

@@ -271,6 +271,11 @@ fn cmdUse(arena: std.mem.Allocator, ws_url: []const u8) !void {
 /// Launch a visible (non-headless) Chrome with CDP, wait for it, auto-attach.
 /// This is the "human mode" — real browser, real user, agent rides alongside.
 fn cmdOpen(arena: std.mem.Allocator, port: u16, url: ?[]const u8) !void {
+    if (comptime @import("builtin").os.tag == .windows) {
+        // TODO Wave-3+ Windows port: replace fork+execvp with CreateProcessW.
+        fatal("kuri cmdOpen: Windows port pending — use HEADLESS path or wait for Wave-3 CreateProcessW shim\n", .{});
+        return;
+    }
     // 1. Check if Chrome CDP is already available on this port
     if (tryAttach(arena, port, url)) return;
 
