@@ -279,6 +279,9 @@ pub fn fdClose(fd: std.c.fd_t) void {
 pub extern "c" fn execvp(file: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_int;
 
 pub fn runCommand(allocator: std.mem.Allocator, argv: []const []const u8, max_output: usize) !struct { stdout: []u8, term: i32 } {
+    if (comptime is_windows) {
+        @panic("kuri Windows port: runCommand not implemented yet — Wave-2 will ship via CreateProcessW + pipe redirection");
+    }
     var arg_storage: std.ArrayList([:0]u8) = .empty;
     defer {
         for (arg_storage.items) |arg| allocator.free(arg);
@@ -352,7 +355,11 @@ fn ntohs(val: u16) u16 {
 }
 
 /// Try to connect to 127.0.0.1:port. Returns true if connection succeeded.
+/// Try to connect to 127.0.0.1:port. Returns true if connection succeeded.
 pub fn isPortInUse(port: u16) bool {
+    if (comptime is_windows) {
+        return false;  // TODO Wave-2: WSAStartup + WSASocket + connect
+    }
     const fd = c.socket(c.AF.INET, c.SOCK.STREAM, 0);
     if (fd < 0) return false;
     defer _ = c.close(fd);
@@ -371,10 +378,12 @@ pub const TcpStream = struct {
     fd: fd_t,
 
     pub fn close(self: TcpStream) void {
+        if (comptime is_windows) return;
         _ = c.close(self.fd);
     }
 
     pub fn writeAll(self: TcpStream, data: []const u8) !void {
+        if (comptime is_windows) return error.NotImplementedOnWindows;
         var sent: usize = 0;
         while (sent < data.len) {
             const n = c.write(self.fd, data[sent..].ptr, data.len - sent);
@@ -384,24 +393,28 @@ pub const TcpStream = struct {
     }
 
     pub fn read(self: TcpStream, buf: []u8) !usize {
+        if (comptime is_windows) return error.NotImplementedOnWindows;
         const n = c.read(self.fd, buf.ptr, buf.len);
         if (n < 0) return error.ConnectionResetByPeer;
         return @intCast(n);
     }
 
     pub fn write(self: TcpStream, data: []const u8) !usize {
+        if (comptime is_windows) return error.NotImplementedOnWindows;
         const n = c.write(self.fd, data.ptr, data.len);
         if (n <= 0) return error.BrokenPipe;
         return @intCast(n);
     }
 
     pub fn setSockOpt(self: TcpStream, level: i32, optname: u32, optval: []const u8) void {
+        if (comptime is_windows) return;
         _ = c.setsockopt(self.fd, level, optname, optval.ptr, @intCast(optval.len));
     }
 };
 
 /// Connect to 127.0.0.1:port via TCP. Returns a TcpStream.
 pub fn tcpConnectToIp4(port: u16) !TcpStream {
+    if (comptime is_windows) return error.NotImplementedOnWindows;
     const fd = c.socket(c.AF.INET, c.SOCK.STREAM, 0);
     if (fd < 0) return error.SocketCreateFailed;
 
@@ -434,18 +447,21 @@ pub const TcpServer = struct {
     };
 
     pub fn accept(self: TcpServer) !Connection {
+        if (comptime is_windows) return error.NotImplementedOnWindows;
         const client_fd = c.accept(self.fd, null, null);
         if (client_fd < 0) return error.AcceptFailed;
         return .{ .stream = .{ .fd = client_fd } };
     }
 
     pub fn deinit(self: *TcpServer) void {
+        if (comptime is_windows) return;
         _ = c.close(self.fd);
     }
 };
 
 /// Bind and listen on 127.0.0.1:port.
 pub fn tcpListen(port: u16) !TcpServer {
+    if (comptime is_windows) return error.NotImplementedOnWindows;
     const fd = c.socket(c.AF.INET, c.SOCK.STREAM, 0);
     if (fd < 0) return error.SocketCreateFailed;
     errdefer _ = c.close(fd);

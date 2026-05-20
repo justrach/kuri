@@ -1337,6 +1337,13 @@ fn saveSession(arena: std.mem.Allocator, session: *Session) !void {
 extern "c" fn connect(sock: std.c.fd_t, addr: *const std.posix.sockaddr, addrlen: std.posix.socklen_t) c_int;
 
 fn fetchChromeTabs(arena: std.mem.Allocator, host: []const u8, port: u16) ![]const u8 {
+    if (comptime @import("builtin").os.tag == .windows) {
+        // TODO Wave-2 Windows port: route via compat.tcpConnectToIp4 once that ships
+        // a Windows impl (WSAStartup + WSASocketW + connect). The current fn is
+        // POSIX-only (raw std.c.socket / std.c.write / std.posix.read).
+        return error.NotImplementedOnWindows;
+    }
+    _ = host;
     _ = host;
     // Create TCP socket
     const raw_fd = std.c.socket(std.posix.AF.INET, std.posix.SOCK.STREAM, 0);
