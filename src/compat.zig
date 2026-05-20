@@ -1,24 +1,63 @@
 /// Zig 0.16 compatibility shims for removed stdlib APIs.
 const std = @import("std");
+const builtin = @import("builtin");
+
+// --- Windows API shims (Zig 0.16's std.os.windows only exposes some Win32 entry points) ---
+
+const winapi = struct {
+    const DWORD = std.os.windows.DWORD;
+    const BOOL = std.os.windows.BOOL;
+    const HANDLE = std.os.windows.HANDLE;
+    const FILETIME = std.os.windows.FILETIME;
+
+    // Win32 ABI: STD_*_HANDLE are (DWORD)-N, expressed as wrapped u32 values.
+    const STD_ERROR_HANDLE: DWORD = 0xFFFFFFF4; // -12
+
+    extern "kernel32" fn GetSystemTimeAsFileTime(lpSystemTimeAsFileTime: *FILETIME) callconv(.winapi) void;
+    extern "kernel32" fn GetStdHandle(nStdHandle: DWORD) callconv(.winapi) ?HANDLE;
+    extern "kernel32" fn GetConsoleMode(hConsoleHandle: HANDLE, lpMode: *DWORD) callconv(.winapi) BOOL;
+};
 
 // --- Time ---
 
-pub fn timestampSeconds() i64 {
-    var ts: std.c.timespec = undefined;
-    _ = std.c.clock_gettime(.REALTIME, &ts);
-    return ts.sec;
-}
+/// 100-nanosecond intervals between the Windows FILETIME epoch (1601-01-01 UTC)
+/// and the Unix epoch (1970-01-01 UTC). FILETIME counts in 100ns ticks.
+const FILETIME_TO_UNIX_100NS: i128 = 11_644_473_600 * 10_000_000;
 
-pub fn milliTimestamp() i64 {
-    var ts: std.c.timespec = undefined;
-    _ = std.c.clock_gettime(.REALTIME, &ts);
-    return @as(i64, ts.sec) * 1000 + @divTrunc(@as(i64, ts.nsec), 1_000_000);
-}
-
-pub fn nanoTimestamp() i128 {
+fn realtimeNanos() i128 {
+    if (builtin.os.tag == .windows) {
+        var ft: winapi.FILETIME = undefined;
+        winapi.GetSystemTimeAsFileTime(&ft);
+        const ft_100ns: i128 = (@as(i128, ft.dwHighDateTime) << 32) | @as(i128, ft.dwLowDateTime);
+        return (ft_100ns - FILETIME_TO_UNIX_100NS) * 100;
+    }
     var ts: std.c.timespec = undefined;
     _ = std.c.clock_gettime(.REALTIME, &ts);
     return @as(i128, ts.sec) * std.time.ns_per_s + @as(i128, ts.nsec);
+}
+
+pub fn timestampSeconds() i64 {
+    return @intCast(@divTrunc(realtimeNanos(), std.time.ns_per_s));
+}
+
+pub fn milliTimestamp() i64 {
+    return @intCast(@divTrunc(realtimeNanos(), std.time.ns_per_ms));
+}
+
+pub fn nanoTimestamp() i128 {
+    return realtimeNanos();
+}
+
+// --- TTY detection ---
+
+/// Returns true if stderr (fd 2) is attached to a terminal.
+pub fn isTtyStderr() bool {
+    if (builtin.os.tag == .windows) {
+        const handle = winapi.GetStdHandle(winapi.STD_ERROR_HANDLE) orelse return false;
+        var mode: winapi.DWORD = undefined;
+        return winapi.GetConsoleMode(handle, &mode).toBool();
+    }
+    return std.c.isatty(2) != 0;
 }
 
 // --- Threading ---

@@ -203,7 +203,7 @@ fn shouldUseColor(force_no_color: bool) bool {
     if (compat.getenv("TERM")) |term| {
         if (std.mem.eql(u8, term, "dumb")) return false;
     }
-    return std.c.isatty(2) != 0;
+    return compat.isTtyStderr();
 }
 
 const Options = struct {

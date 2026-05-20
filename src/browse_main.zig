@@ -680,7 +680,7 @@ fn shouldUseColor() bool {
     if (compat.getenv("TERM")) |term| {
         if (std.mem.eql(u8, term, "dumb")) return false;
     }
-    return std.c.isatty(2) != 0;
+    return compat.isTtyStderr();
 }
 
 fn elapsed(start: i128) u64 {

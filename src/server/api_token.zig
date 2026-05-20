@@ -125,7 +125,7 @@ pub fn printStartupBanner(
     port: u16,
     resolved: Resolved,
 ) void {
-    const stderr_is_tty = std.c.isatty(2) != 0;
+    const stderr_is_tty = compat.isTtyStderr();
 
     var token_buf: [128]u8 = undefined;
     const token_line: []const u8 = switch (resolved.source) {
