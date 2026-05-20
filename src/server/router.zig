@@ -1372,6 +1372,11 @@ fn handleBrowdie(request: *std.http.Server.Request) void {
 }
 
 pub fn discoverTabs(arena: std.mem.Allocator, bridge: *Bridge, cfg: Config, cdp_port: u16) !usize {
+    if (comptime @import("builtin").os.tag == .windows) {
+        // TODO kuri-windows port: replace raw std.c.write socket I/O with
+        // Windows winsock equivalents. Wave-4+ ships compat.socketWrite via WSASend.
+        return error.NotImplementedOnWindows;
+    }
     const cdp_addr = parseCdpAddress(cfg.cdp_url, cdp_port);
     const host = cdp_addr.host;
     const port = cdp_addr.port;
