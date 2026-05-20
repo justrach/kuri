@@ -126,3 +126,51 @@ jobs:
           grep '"ok":true' health.json
           grep '"tabs":1' health.json
           grep '"id":"' tabs.json
+
+  windows-cross-compile:
+    # Verifies the Windows port stays buildable (issue #153). A native
+    # Windows runtime smoke test is out of scope for this job — Chrome
+    # automation, daemonization, and signal handling are all stubbed
+    # with `error.UnsupportedOnWindows` on Windows for now. This job
+    # exists so a future refactor that re-introduces an ungated POSIX
+    # call (`fork`, `std.c.open`, raw `setsockopt`/`read` on a socket)
+    # fails CI instead of silently regressing the Windows build.
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Zig 0.16.0
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Cache Zig build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            .zig-cache
+            ~/.cache/zig
+          key: zig-windows-cross-${{ hashFiles('build.zig', 'build.zig.zon') }}
+          restore-keys: |
+            zig-windows-cross-
+
+      - name: Cross-compile for x86_64-windows-gnu
+        run: zig build -Dtarget=x86_64-windows-gnu -Doptimize=ReleaseSafe
+
+      - name: Verify Windows executables were produced
+        run: |
+          set -euo pipefail
+          for bin in kuri kuri-agent kuri-browse kuri-fetch; do
+            path="zig-out/bin/${bin}.exe"
+            if [ ! -f "${path}" ]; then
+              echo "::error::missing ${path}"
+              exit 1
+            fi
+            file "${path}" | tee -a windows-build.txt
+            if ! file "${path}" | grep -q 'PE32+ executable .* for MS Windows'; then
+              echo "::error::${path} is not a Windows PE binary"
+              exit 1
+            fi
+          done

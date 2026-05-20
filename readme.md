@@ -134,9 +134,9 @@ The manifest includes exact asset URLs plus SHA-256 checksums for `aarch64-linux
 |---|---|
 | macOS (`aarch64`, `x86_64`) | Prebuilt binaries, signed + notarized |
 | Linux (`aarch64`, `x86_64`) | Prebuilt binaries |
-| Windows | **Not supported yet** — tracked at [#153](https://github.com/justrach/kuri/issues/153). Use **WSL2** and install the Linux build from a Linux shell. |
+| Windows (`x86_64`) | **Experimental — cross-compile only.** `zig build -Dtarget=x86_64-windows-gnu` is CI-verified, but Chrome automation, daemonization, signal-based shutdown, HAR recording, and the file-backed auth store are all stubbed with `error.UnsupportedOnWindows` at runtime. Use **WSL2** if you need the real feature set. Tracked at [#153](https://github.com/justrach/kuri/issues/153). |
 
-Kuri leans on POSIX primitives (`fork`, `clock_gettime`, raw sockets) in several spots, so a native Windows port is real work and not on the near-term roadmap. If you want it sooner, +1 [#153](https://github.com/justrach/kuri/issues/153) or send a PR.
+Kuri leans on POSIX primitives (`fork`, `clock_gettime`, raw sockets) in several spots, so a full native Windows port is real work. The compile-level baseline above lets the `--version`/`--help` paths and pure in-memory operations run; the gnarly bits (Chrome, sockets, daemonize) need real Win32 implementations before they come off the stub list. If you want to take any of those on, +1 [#153](https://github.com/justrach/kuri/issues/153) or open a PR.
 
 ### Build from source
 
