@@ -243,6 +243,7 @@ pub const CdpClient = struct {
     }
 
     pub fn drainWsEvents(self: *CdpClient, allocator: std.mem.Allocator, timeout_sec: i32) void {
+        if (@import("builtin").os.tag == .windows) return;
         self.mu.lock();
         defer self.mu.unlock();
 

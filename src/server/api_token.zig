@@ -87,6 +87,7 @@ fn resolveTokenPath(allocator: std.mem.Allocator) ![]u8 {
 }
 
 fn writeMode0600(path: []const u8, data: []const u8) !void {
+    if (@import("builtin").os.tag == .windows) return error.UnsupportedOnWindows;
     var buf: [4096]u8 = undefined;
     if (path.len >= buf.len) return error.NameTooLong;
     @memcpy(buf[0..path.len], path);

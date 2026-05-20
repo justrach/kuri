@@ -103,6 +103,7 @@ pub const Launcher = struct {
 
     /// Spawn the Chrome process with headless flags.
     fn launchChrome(self: *Launcher) !void {
+        if (@import("builtin").os.tag == .windows) return error.UnsupportedOnWindows;
         const chrome_bin = findChromeBinary() orelse {
             std.log.err("no Chrome binary found on this system", .{});
             return error.ChromeNotFound;
@@ -272,6 +273,10 @@ pub const Launcher = struct {
 
     /// Shut down the managed Chrome process.
     pub fn deinit(self: *Launcher) void {
+        if (@import("builtin").os.tag == .windows) {
+            self.child_pid = null;
+            return;
+        }
         if (self.child_pid) |pid| {
             _ = std.c.kill(pid, std.c.SIG.KILL);
             _ = std.c.waitpid(pid, null, 0);

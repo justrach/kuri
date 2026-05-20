@@ -266,6 +266,7 @@ fn cmdUse(arena: std.mem.Allocator, ws_url: []const u8) !void {
 /// Launch a visible (non-headless) Chrome with CDP, wait for it, auto-attach.
 /// This is the "human mode" — real browser, real user, agent rides alongside.
 fn cmdOpen(arena: std.mem.Allocator, port: u16, url: ?[]const u8) !void {
+    if (@import("builtin").os.tag == .windows) return error.UnsupportedOnWindows;
     // 1. Check if Chrome CDP is already available on this port
     if (tryAttach(arena, port, url)) return;
 
@@ -1328,6 +1329,7 @@ fn saveSession(arena: std.mem.Allocator, session: *Session) !void {
 extern "c" fn connect(sock: std.c.fd_t, addr: *const std.posix.sockaddr, addrlen: std.posix.socklen_t) c_int;
 
 fn fetchChromeTabs(arena: std.mem.Allocator, host: []const u8, port: u16) ![]const u8 {
+    if (@import("builtin").os.tag == .windows) return error.ConnectionRefused;
     _ = host;
     // Create TCP socket
     const raw_fd = std.c.socket(std.posix.AF.INET, std.posix.SOCK.STREAM, 0);

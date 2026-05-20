@@ -1315,7 +1315,16 @@ fn handleBrowdie(request: *std.http.Server.Request) void {
     resp.sendJson(request, browdie);
 }
 
-pub fn discoverTabs(arena: std.mem.Allocator, bridge: *Bridge, cfg: Config, cdp_port: u16) !usize {
+const DiscoverTabsError = error{
+    CannotConnectToChrome,
+    CannotResolveChromeAddress,
+    EmptyResponseFromChrome,
+    InvalidChromeResponse,
+    OutOfMemory,
+};
+
+pub fn discoverTabs(arena: std.mem.Allocator, bridge: *Bridge, cfg: Config, cdp_port: u16) DiscoverTabsError!usize {
+    if (@import("builtin").os.tag == .windows) return error.CannotConnectToChrome;
     const cdp_addr = parseCdpAddress(cfg.cdp_url, cdp_port);
     const host = cdp_addr.host;
     const port = cdp_addr.port;
