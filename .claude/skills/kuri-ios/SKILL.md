@@ -1,6 +1,6 @@
 ---
 name: kuri-ios
-description: Use kuri-ios to drive iOS Simulators from the CLI — list sims, boot/shutdown, navigate Safari to URLs (openurl), launch and terminate apps by bundle id, capture PNG screenshots, list installed apps, and (on the Simulator only) tap, swipe/pan, and type via native CGEvent into the Simulator window. Real iPhones over USB are supported for listing and launch/terminate via usbmuxd + xcrun devicectl. Tap/swipe/type/uitree on real devices and uitree on the Simulator are NOT supported in v1 (require XCUITest). Trigger phrases include "screenshot the iPhone sim", "tap on iOS simulator", "swipe up on iPhone sim", "pan the iOS simulator", "type into iOS simulator", "open Safari on simulator", "launch iOS Settings", "list booted simulators".
+description: Use kuri-ios to drive iOS Simulators from the CLI — list sims, boot/shutdown, navigate Safari to URLs (openurl), launch and terminate apps by bundle id, capture PNG screenshots, list installed apps, and (on the Simulator only) tap, doubletap, longpress, swipe/pan, and type via native CGEvent into the Simulator window. Real iPhones over USB are supported for listing and launch/terminate via usbmuxd + xcrun devicectl. Tap/swipe/type/uitree on real devices and uitree on the Simulator are NOT supported in v1 (require XCUITest). Multi-touch (pinch, rotate, two-finger pan) and hardware buttons (Home, Lock, Volume) are not wired yet. Trigger phrases include "screenshot the iPhone sim", "tap on iOS simulator", "doubletap iOS sim", "long press iOS sim", "swipe up on iPhone sim", "pan the iOS simulator", "type into iOS simulator", "open Safari on simulator", "launch iOS Settings", "list booted simulators".
 ---
 
 # kuri-ios
@@ -87,9 +87,10 @@ kuri ios openurl "maps://?q=San%20Francisco"
 | `kuri ios screenshot [path.png]` | PNG from booted sim (auto-resolves) |
 | `kuri ios list-apps --udid <U>` | List installed apps on sim |
 | `kuri ios tap <x> <y>` | Tap at device pixel coords on the booted sim |
+| `kuri ios doubletap <x> <y>` | Two quick taps at the same point (alias: `dbltap`) |
+| `kuri ios longpress <x> <y> [hold_ms]` | Press and hold (default 500ms — iOS haptic-touch threshold; alias: `long-press`) |
 | `kuri ios swipe <x1> <y1> <x2> <y2> [ms]` | Swipe/pan on the sim. Aliases: `pan`, `scroll` |
 | `kuri ios type <text...>` | Send keystrokes to the focused field on the sim |
-
 ## Intentional limits (don't claim parity with upstream)
 
 - `tap`, `swipe`, `type` work on the iOS **Simulator only** (CGEvent into

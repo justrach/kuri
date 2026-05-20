@@ -111,6 +111,8 @@ pub fn run(gpa: std.mem.Allocator, args: []const []const u8) !u8 {
     }
 
     if (std.mem.eql(u8, sub, "tap")) return cmdTap(gpa, udid_opt, simulator, cmd_args);
+    if (std.mem.eql(u8, sub, "doubletap") or std.mem.eql(u8, sub, "dbltap")) return cmdDoubleTap(gpa, udid_opt, simulator, cmd_args);
+    if (std.mem.eql(u8, sub, "longpress") or std.mem.eql(u8, sub, "long-press")) return cmdLongPress(gpa, udid_opt, simulator, cmd_args);
     if (std.mem.eql(u8, sub, "swipe") or std.mem.eql(u8, sub, "scroll") or std.mem.eql(u8, sub, "pan")) return cmdSwipe(gpa, udid_opt, simulator, cmd_args);
     if (std.mem.eql(u8, sub, "type")) return cmdType(gpa, udid_opt, simulator, cmd_args);
     if (std.mem.eql(u8, sub, "uitree")) {
@@ -184,6 +186,32 @@ fn cmdTap(gpa: std.mem.Allocator, udid_opt: ?[]const u8, simulator: bool, args: 
     defer r.deinit(gpa);
     const p = try prepSimAndPoint(gpa, r.udid, x, y);
     sim_input.tap(p);
+    return 0;
+}
+
+fn cmdDoubleTap(gpa: std.mem.Allocator, udid_opt: ?[]const u8, simulator: bool, args: []const []const u8) !u8 {
+    if (guardSim(simulator)) |code| return code;
+    if (args.len < 2) return errMissing("x y");
+    const x = try parseF64(args[0]);
+    const y = try parseF64(args[1]);
+    const r = try resolveUdid(gpa, udid_opt);
+    defer r.deinit(gpa);
+    const p = try prepSimAndPoint(gpa, r.udid, x, y);
+    sim_input.doubleTap(p);
+    return 0;
+}
+
+fn cmdLongPress(gpa: std.mem.Allocator, udid_opt: ?[]const u8, simulator: bool, args: []const []const u8) !u8 {
+    if (guardSim(simulator)) |code| return code;
+    if (args.len < 2) return errMissing("x y [hold_ms]");
+    const x = try parseF64(args[0]);
+    const y = try parseF64(args[1]);
+    // iOS treats ~500ms as the threshold for "long press" / haptic touch.
+    const hold: u64 = if (args.len >= 3) try std.fmt.parseInt(u64, args[2], 10) else 500;
+    const r = try resolveUdid(gpa, udid_opt);
+    defer r.deinit(gpa);
+    const p = try prepSimAndPoint(gpa, r.udid, x, y);
+    sim_input.longPress(p, hold);
     return 0;
 }
 
@@ -299,13 +327,17 @@ fn printUsage() !void {
         \\  list-apps  --udid U --simulator
         \\
         \\Simulator-only input (macOS, device-pixel coords matching screenshot):
-        \\  tap   [--udid U] <x> <y>
-        \\  swipe [--udid U] <x1> <y1> <x2> <y2> [duration_ms]   (alias: scroll, pan)
-        \\  type  [--udid U] <text...>
+        \\  tap       [--udid U] <x> <y>
+        \\  doubletap [--udid U] <x> <y>                          (alias: dbltap)
+        \\  longpress [--udid U] <x> <y> [hold_ms]                (alias: long-press; default 500ms)
+        \\  swipe     [--udid U] <x1> <y1> <x2> <y2> [duration_ms]   (alias: scroll, pan)
+        \\  type      [--udid U] <text...>
         \\
         \\Not implemented in v1 (driverless mode):
         \\  tap, swipe, type on real iOS devices            -> needs XCUITest
         \\  uitree (simulator or device)                    -> needs XCUITest / Accessibility Inspector
+        \\  pinch / rotate / two-finger gestures            -> need CGEvent flags + multi-touch wiring
+        \\  hardware buttons (Home, Lock, Volume, Shake)    -> need osascript Simulator menu shortcuts
         \\
     );
 }
