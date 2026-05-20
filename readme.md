@@ -128,6 +128,16 @@ curl -fsSL https://raw.githubusercontent.com/justrach/kuri/release-channel/stabl
 
 The manifest includes exact asset URLs plus SHA-256 checksums for `aarch64-linux`, `x86_64-linux`, `aarch64-macos`, and `x86_64-macos`.
 
+### Platform support
+
+| Platform | Status |
+|---|---|
+| macOS (`aarch64`, `x86_64`) | Prebuilt binaries, signed + notarized |
+| Linux (`aarch64`, `x86_64`) | Prebuilt binaries |
+| Windows | **Not supported yet** — tracked at [#153](https://github.com/justrach/kuri/issues/153). Use **WSL2** and install the Linux build from a Linux shell. |
+
+Kuri leans on POSIX primitives (`fork`, `clock_gettime`, raw sockets) in several spots, so a native Windows port is real work and not on the near-term roadmap. If you want it sooner, +1 [#153](https://github.com/justrach/kuri/issues/153) or send a PR.
+
 ### Build from source
 
 Requires [Zig ≥ 0.16.0](https://ziglang.org/download/).

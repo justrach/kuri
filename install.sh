@@ -15,6 +15,11 @@ ARCH="$(uname -m)"
 case "$OS" in
   Darwin) OS_NAME="macos" ;;
   Linux)  OS_NAME="linux" ;;
+  MINGW*|MSYS*|CYGWIN*|Windows_NT)
+    echo "kuri does not ship Windows binaries yet (tracked at https://github.com/justrach/kuri/issues/153)." >&2
+    echo "On Windows, use WSL2 and re-run this installer in a Linux shell." >&2
+    exit 1
+    ;;
   *) echo "Unsupported OS: $OS" >&2; exit 1 ;;
 esac
 
