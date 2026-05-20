@@ -1339,7 +1339,9 @@ fn saveSession(arena: std.mem.Allocator, session: *Session) !void {
 
 // ── Chrome tab discovery ──────────────────────────────────────────────────────
 
-extern "c" fn connect(sock: std.c.fd_t, addr: *const std.posix.sockaddr, addrlen: std.posix.socklen_t) c_int;
+const posix_net = if (@import("builtin").os.tag == .windows) struct {} else struct {
+    pub extern "c" fn connect(sock: std.c.fd_t, addr: *const std.posix.sockaddr, addrlen: std.posix.socklen_t) c_int;
+};
 
 fn fetchChromeTabs(arena: std.mem.Allocator, host: []const u8, port: u16) ![]const u8 {
     if (comptime @import("builtin").os.tag == .windows) {
@@ -1360,7 +1362,7 @@ fn fetchChromeTabs(arena: std.mem.Allocator, host: []const u8, port: u16) ![]con
         .port = std.mem.nativeToBig(u16, port),
         .addr = std.mem.nativeToBig(u32, 0x7f000001), // 127.0.0.1
     };
-    if (connect(fd, @ptrCast(&addr), @sizeOf(std.posix.sockaddr.in)) != 0) {
+    if (posix_net.connect(fd, @ptrCast(&addr), @sizeOf(std.posix.sockaddr.in)) != 0) {
         _ = std.c.close(fd);
         return error.ConnectionRefused;
     }

@@ -2,7 +2,9 @@ const std = @import("std");
 const crypto = std.crypto;
 const compat = @import("../compat.zig");
 
-const c_connect = @extern(*const fn (std.c.fd_t, *const anyopaque, std.posix.socklen_t) callconv(.c) c_int, .{ .name = "connect" });
+const posix_net = if (@import("builtin").os.tag == .windows) struct {} else struct {
+    pub const c_connect = @extern(*const fn (std.c.fd_t, *const anyopaque, std.posix.socklen_t) callconv(.c) c_int, .{ .name = "connect" });
+};
 
 /// Pure Zig WebSocket client for CDP communication.
 /// Implements RFC 6455: HTTP upgrade handshake, masked client frames, unmasked server reads.
@@ -27,6 +29,7 @@ pub const WebSocketClient = struct {
 
     /// Connect to a loopback WebSocket endpoint. url must be like "ws://host:port/path".
     pub fn connect(allocator: std.mem.Allocator, url: []const u8, read_buf: []u8, write_buf: []u8) !WebSocketClient {
+        if (comptime @import("builtin").os.tag == .windows) return error.ConnectionFailed;
         const parsed = try parseWsUrl(url);
 
         // Resolve localhost to 127.0.0.1 — resolveIp fails on some systems
@@ -42,7 +45,7 @@ pub const WebSocketClient = struct {
             .port = std.mem.nativeToBig(u16, parsed.port),
             .addr = ip_addr,
         };
-        if (c_connect(fd, @ptrCast(&addr), @sizeOf(std.posix.sockaddr.in)) != 0) {
+        if (posix_net.c_connect(fd, @ptrCast(&addr), @sizeOf(std.posix.sockaddr.in)) != 0) {
             return Error.ConnectionFailed;
         }
 
@@ -86,6 +89,7 @@ pub const WebSocketClient = struct {
     }
 
     pub fn close(self: *WebSocketClient) void {
+        if (comptime @import("builtin").os.tag == .windows) return;
         if (self.connected) {
             // Send close frame (opcode 8), best effort
             self.writeFrame(0x8, &.{}) catch {};
@@ -226,6 +230,7 @@ pub const WebSocketClient = struct {
     }
 
     fn writeAll(self: *WebSocketClient, data: []const u8) !void {
+        if (comptime @import("builtin").os.tag == .windows) return Error.WriteFailed;
         var sent: usize = 0;
         while (sent < data.len) {
             const n = std.c.write(self.fd, data.ptr + sent, data.len - sent);

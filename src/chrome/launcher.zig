@@ -584,6 +584,7 @@ fn joinPath(buf: []u8, raw_dir: []const u8, name: []const u8) ?[]const u8 {
 }
 
 fn isExecutablePath(path: []const u8) bool {
+    if (comptime @import("builtin").os.tag == .windows) return false; // POSIX access/chmod/fork chain
     if (path.len == 0 or path.len >= 4096) return false;
 
     var path_buf: [4096]u8 = undefined;

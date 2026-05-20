@@ -122,6 +122,7 @@ test "saveToLocal writes file and returns path" {
 }
 
 fn deleteTreeAbsolute(dir: []const u8) void {
+    if (comptime @import("builtin").os.tag == .windows) return; // POSIX fork+exec
     var buf: [4096]u8 = undefined;
     const cmd = std.fmt.bufPrint(&buf, "rm -rf {s}", .{dir}) catch return;
     buf[cmd.len] = 0;

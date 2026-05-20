@@ -89,6 +89,7 @@ fn linuxPathIsSymlink(path_z: [*:0]const u8) bool {
 }
 
 fn posixPathIsSymlink(path_z: [*:0]const u8) bool {
+    if (comptime @import("builtin").os.tag == .windows) return false; // POSIX fstatat
     var stat_buf: std.c.Stat = undefined;
     if (std.c.fstatat(std.c.AT.FDCWD, path_z, &stat_buf, std.c.AT.SYMLINK_NOFOLLOW) != 0) {
         return false;

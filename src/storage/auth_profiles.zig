@@ -108,6 +108,7 @@ pub fn listProfiles(
     allocator: std.mem.Allocator,
     state_dir: []const u8,
 ) ![]AuthProfileMeta {
+    if (comptime @import("builtin").os.tag == .windows) return .{};
     const dir_path = try authProfilesDir(allocator, state_dir);
     defer allocator.free(dir_path);
 
@@ -363,6 +364,7 @@ fn runCommand(allocator: std.mem.Allocator, argv: []const []const u8) ![]u8 {
 }
 
 fn deleteTreeAbsolute(dir: []const u8) void {
+    if (comptime @import("builtin").os.tag == .windows) return;
     var buf: [4096]u8 = undefined;
     const cmd = std.fmt.bufPrint(&buf, "rm -rf {s}", .{dir}) catch return;
     buf[cmd.len] = 0;
