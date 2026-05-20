@@ -3,31 +3,69 @@ const std = @import("std");
 const builtin = @import("builtin");
 const is_windows = builtin.os.tag == .windows;
 
+// --- Windows kernel32 extern bindings ---
+// Zig 0.16's std.os.windows.kernel32 is nearly empty (does not export
+// GetStdHandle / WriteFile / GetFileType / QueryPerformanceCounter).
+// Declare the bindings we need directly so the file type-checks on Windows.
+// These are only referenced from inside `if (comptime is_windows)` branches
+// so they don't affect POSIX builds.
+
+const win = if (is_windows) struct {
+    const HANDLE = *anyopaque;
+    const DWORD = u32;
+    const BOOL = i32;
+
+    const STD_OUTPUT_HANDLE: DWORD = @bitCast(@as(i32, -11));
+    const STD_ERROR_HANDLE: DWORD = @bitCast(@as(i32, -12));
+    const FILE_TYPE_CHAR: DWORD = 0x0002;
+
+    extern "kernel32" fn GetStdHandle(nStdHandle: DWORD) callconv(.winapi) HANDLE;
+    extern "kernel32" fn WriteFile(
+        hFile: HANDLE,
+        lpBuffer: [*]const u8,
+        nNumberOfBytesToWrite: DWORD,
+        lpNumberOfBytesWritten: *DWORD,
+        lpOverlapped: ?*anyopaque,
+    ) callconv(.winapi) BOOL;
+    extern "kernel32" fn GetFileType(hFile: HANDLE) callconv(.winapi) DWORD;
+    extern "kernel32" fn QueryPerformanceCounter(lpPerformanceCount: *i64) callconv(.winapi) BOOL;
+    extern "kernel32" fn QueryPerformanceFrequency(lpFrequency: *i64) callconv(.winapi) BOOL;
+} else struct {};
+
 // --- Time ---
 
 pub fn timestampSeconds() i64 {
-    if (comptime is_windows) return @intCast(@divTrunc(std.time.milliTimestamp(), 1000));
+    if (comptime is_windows) return @divTrunc(milliTimestamp(), 1000);
     var ts: std.c.timespec = undefined;
     _ = std.c.clock_gettime(.REALTIME, &ts);
     return ts.sec;
 }
 
 pub fn milliTimestamp() i64 {
-    if (comptime is_windows) return std.time.milliTimestamp();
+    if (comptime is_windows) {
+        // GetSystemTimeAsFileTime is the wall-clock equivalent; reuse the
+        // perf counter trick for monotonic-ish ms by dividing nanos.
+        return @intCast(@divTrunc(nanoTimestamp(), std.time.ns_per_ms));
+    }
     var ts: std.c.timespec = undefined;
     _ = std.c.clock_gettime(.REALTIME, &ts);
     return @as(i64, ts.sec) * 1000 + @divTrunc(@as(i64, ts.nsec), 1_000_000);
 }
 
 pub fn nanoTimestamp() i128 {
-    if (comptime is_windows) return std.time.nanoTimestamp();
+    if (comptime is_windows) {
+        var counter: i64 = 0;
+        var freq: i64 = 0;
+        _ = win.QueryPerformanceCounter(&counter);
+        _ = win.QueryPerformanceFrequency(&freq);
+        if (freq == 0) return 0;
+        // counter * 1e9 / freq, computed in i128 to avoid overflow.
+        return @divTrunc(@as(i128, counter) * std.time.ns_per_s, @as(i128, freq));
+    }
     var ts: std.c.timespec = undefined;
     _ = std.c.clock_gettime(.REALTIME, &ts);
     return @as(i128, ts.sec) * std.time.ns_per_s + @as(i128, ts.nsec);
 }
-
-// --- Threading ---
-
 pub fn threadSleep(ns: u64) void {
     const ts = std.c.timespec{
         .sec = @intCast(ns / std.time.ns_per_s),
@@ -111,24 +149,19 @@ pub fn getenv(name: []const u8) ?[]const u8 {
 }
 
 // --- Filesystem (replaces removed std.fs.cwd / std.fs.File) ---
-
 pub fn stderrIsTty() bool {
     if (comptime is_windows) {
-        const w = std.os.windows;
-        const handle = w.GetStdHandle(w.STD_ERROR_HANDLE) catch return false;
-        // GetFileType returns FILE_TYPE_CHAR (0x02) for consoles. Anything
-        // else (pipes, disk, etc) is not a tty for color-detection purposes.
-        return w.kernel32.GetFileType(handle) == 0x02;
+        const handle = win.GetStdHandle(win.STD_ERROR_HANDLE);
+        return win.GetFileType(handle) == win.FILE_TYPE_CHAR;
     }
     return std.c.isatty(2) != 0;
 }
 
 pub fn writeToStdout(data: []const u8) void {
     if (comptime is_windows) {
-        const w = std.os.windows;
-        const handle = w.GetStdHandle(w.STD_OUTPUT_HANDLE) catch return;
-        var written: w.DWORD = 0;
-        _ = w.kernel32.WriteFile(handle, data.ptr, @intCast(data.len), &written, null);
+        const handle = win.GetStdHandle(win.STD_OUTPUT_HANDLE);
+        var written: u32 = 0;
+        _ = win.WriteFile(handle, data.ptr, @intCast(data.len), &written, null);
         return;
     }
     var sent: usize = 0;
@@ -141,10 +174,9 @@ pub fn writeToStdout(data: []const u8) void {
 
 pub fn writeToStderr(data: []const u8) void {
     if (comptime is_windows) {
-        const w = std.os.windows;
-        const handle = w.GetStdHandle(w.STD_ERROR_HANDLE) catch return;
-        var written: w.DWORD = 0;
-        _ = w.kernel32.WriteFile(handle, data.ptr, @intCast(data.len), &written, null);
+        const handle = win.GetStdHandle(win.STD_ERROR_HANDLE);
+        var written: u32 = 0;
+        _ = win.WriteFile(handle, data.ptr, @intCast(data.len), &written, null);
         return;
     }
     var sent: usize = 0;
