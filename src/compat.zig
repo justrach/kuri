@@ -1,21 +1,26 @@
 /// Zig 0.16 compatibility shims for removed stdlib APIs.
 const std = @import("std");
+const builtin = @import("builtin");
+const is_windows = builtin.os.tag == .windows;
 
 // --- Time ---
 
 pub fn timestampSeconds() i64 {
+    if (comptime is_windows) return @intCast(@divTrunc(std.time.milliTimestamp(), 1000));
     var ts: std.c.timespec = undefined;
     _ = std.c.clock_gettime(.REALTIME, &ts);
     return ts.sec;
 }
 
 pub fn milliTimestamp() i64 {
+    if (comptime is_windows) return std.time.milliTimestamp();
     var ts: std.c.timespec = undefined;
     _ = std.c.clock_gettime(.REALTIME, &ts);
     return @as(i64, ts.sec) * 1000 + @divTrunc(@as(i64, ts.nsec), 1_000_000);
 }
 
 pub fn nanoTimestamp() i128 {
+    if (comptime is_windows) return std.time.nanoTimestamp();
     var ts: std.c.timespec = undefined;
     _ = std.c.clock_gettime(.REALTIME, &ts);
     return @as(i128, ts.sec) * std.time.ns_per_s + @as(i128, ts.nsec);
@@ -107,7 +112,25 @@ pub fn getenv(name: []const u8) ?[]const u8 {
 
 // --- Filesystem (replaces removed std.fs.cwd / std.fs.File) ---
 
+pub fn stderrIsTty() bool {
+    if (comptime is_windows) {
+        const w = std.os.windows;
+        const handle = w.GetStdHandle(w.STD_ERROR_HANDLE) catch return false;
+        // GetFileType returns FILE_TYPE_CHAR (0x02) for consoles. Anything
+        // else (pipes, disk, etc) is not a tty for color-detection purposes.
+        return w.kernel32.GetFileType(handle) == 0x02;
+    }
+    return std.c.isatty(2) != 0;
+}
+
 pub fn writeToStdout(data: []const u8) void {
+    if (comptime is_windows) {
+        const w = std.os.windows;
+        const handle = w.GetStdHandle(w.STD_OUTPUT_HANDLE) catch return;
+        var written: w.DWORD = 0;
+        _ = w.kernel32.WriteFile(handle, data.ptr, @intCast(data.len), &written, null);
+        return;
+    }
     var sent: usize = 0;
     while (sent < data.len) {
         const n = std.c.write(1, data[sent..].ptr, data.len - sent);
@@ -117,6 +140,13 @@ pub fn writeToStdout(data: []const u8) void {
 }
 
 pub fn writeToStderr(data: []const u8) void {
+    if (comptime is_windows) {
+        const w = std.os.windows;
+        const handle = w.GetStdHandle(w.STD_ERROR_HANDLE) catch return;
+        var written: w.DWORD = 0;
+        _ = w.kernel32.WriteFile(handle, data.ptr, @intCast(data.len), &written, null);
+        return;
+    }
     var sent: usize = 0;
     while (sent < data.len) {
         const n = std.c.write(2, data[sent..].ptr, data.len - sent);
