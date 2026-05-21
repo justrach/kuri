@@ -62,15 +62,9 @@ pub fn saveToLocal(
 
     const filename = try generateFilename(url, ext, allocator);
     defer allocator.free(filename);
-
     const filepath = try std.fs.path.join(allocator, &.{ output_dir, filename });
 
-    const fd = compat.cwdCreateFile(filepath) catch |err| {
-        allocator.free(filepath);
-        return err;
-    };
-    defer compat.fdClose(fd);
-    compat.fdWriteAll(fd, content) catch |err| {
+    compat.cwdWriteFile(filepath, content) catch |err| {
         allocator.free(filepath);
         return err;
     };

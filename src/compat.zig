@@ -213,48 +213,34 @@ pub fn writeToStderr(data: []const u8) void {
     }
 }
 
-// --- Filesystem (cwd operations using C calls) ---
-
-pub fn cwdCreateFile(path: []const u8) !std.c.fd_t {
-    var buf: [4096]u8 = undefined;
-    if (path.len >= buf.len) return error.NameTooLong;
-    @memcpy(buf[0..path.len], path);
-    buf[path.len] = 0;
-    const fd = std.c.open(buf[0..path.len :0], .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(std.c.mode_t, 0o644));
-    if (fd < 0) return error.FileNotFound;
-    return fd;
-}
+// --- Filesystem (cwd operations via std.Io.Dir, Zig 0.16 portable API) ---
+// Wave 6 (Windows port): replaced the prior std.c.open/read/write/close
+// trio with Zig 0.16's std.Io.Dir.cwd() API. Reason: Zig 0.16's
+// lib/std/c.zig defines `extern "c" fn open(path, oflag: O, ...)` with a
+// variadic `...` that violates the x86_64-windows ABI (`parameter of
+// type 'void' not allowed in calling convention 'x86_64_win'`). Any
+// reference to std.c.open transitively poisoned compat.cwd*File for
+// Windows targets. std.Io.Dir.cwd() dispatches per-platform: kernel32
+// on Windows, posix syscalls on darwin/linux; no libc extern dependency.
+//
+// API surface preserved for callers: cwdReadFile / cwdWriteFile still
+// take the same args + return types. cwdCreateFile is removed (no
+// external callers per zigrep; was an internal helper for the old
+// fd-based cwdWriteFile that's now in-lined into Io.Dir.writeFile).
+//
+// API source: deepwiki ziglang/zig confirmed std.fs.cwd() moved to
+// std.Io.Dir.cwd() in Zig 0.16, threadCtx via .init_single_threaded.
 
 pub fn cwdReadFile(allocator: std.mem.Allocator, path: []const u8, max_size: usize) ![]u8 {
-    var buf: [4096]u8 = undefined;
-    if (path.len >= buf.len) return error.NameTooLong;
-    @memcpy(buf[0..path.len], path);
-    buf[path.len] = 0;
-    const fd = std.c.open(buf[0..path.len :0], .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
-    if (fd < 0) return error.FileNotFound;
-    defer _ = std.c.close(fd);
-
-    var result = std.ArrayList(u8).empty;
-    var read_buf: [8192]u8 = undefined;
-    while (true) {
-        const n = std.c.read(fd, &read_buf, read_buf.len);
-        if (n <= 0) break;
-        const bytes: usize = @intCast(n);
-        if (result.items.len + bytes > max_size) return error.FileTooBig;
-        try result.appendSlice(allocator, read_buf[0..bytes]);
-    }
-    return result.toOwnedSlice(allocator);
+    var threaded: std.Io.Threaded = .init_single_threaded;
+    const io = threaded.io();
+    return try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(max_size));
 }
 
 pub fn cwdWriteFile(path: []const u8, data: []const u8) !void {
-    const fd = try cwdCreateFile(path);
-    defer _ = std.c.close(fd);
-    var sent: usize = 0;
-    while (sent < data.len) {
-        const n = std.c.write(fd, data[sent..].ptr, data.len - sent);
-        if (n <= 0) return error.WriteError;
-        sent += @intCast(n);
-    }
+    var threaded: std.Io.Threaded = .init_single_threaded;
+    const io = threaded.io();
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = data });
 }
 
 pub fn cwdMakePath(path: []const u8) !void {

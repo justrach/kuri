@@ -790,12 +790,10 @@ fn cmdScreenshot(arena: std.mem.Allocator, client: *CdpClient, out_path: ?[]cons
         break :blk try std.fmt.allocPrint(arena, "{s}/{d}.png", .{ shots_dir, ts });
     };
 
-    const file = compat.cwdCreateFile(path) catch |err| {
-        jsonError("cannot create file '{s}': {s}", .{ path, @errorName(err) });
+    compat.cwdWriteFile(path, decoded) catch |err| {
+        jsonError("cannot write file '{s}': {s}", .{ path, @errorName(err) });
         std.process.exit(1);
     };
-    defer compat.fdClose(file);
-    compat.fdWriteAll(file, decoded) catch {};
 
     const out = try std.fmt.allocPrint(arena, "{{\"ok\":true,\"path\":\"{s}\",\"bytes\":{d}}}\n", .{ path, decoded.len });
     compat.writeToStdout(out);

@@ -157,17 +157,12 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
     // Write output to file or stdout
     if (opts.output_file) |path| {
-        const file = compat.cwdCreateFile(path) catch |err| {
+        compat.cwdWriteFile(path, output_content) catch |err| {
             if (color) {
                 std.debug.print("\x1b[31m✗\x1b[0m cannot write to '{s}': {s}\n", .{ path, @errorName(err) });
             } else {
                 std.debug.print("error: cannot write to '{s}': {s}\n", .{ path, @errorName(err) });
             }
-            std.process.exit(1);
-        };
-        defer compat.fdClose(file);
-        compat.fdWriteAll(file, output_content) catch |err| {
-            std.debug.print("error: write failed: {s}\n", .{@errorName(err)});
             std.process.exit(1);
         };
         if (!opts.quiet) {
