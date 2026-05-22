@@ -1,6 +1,6 @@
 #!/usr/bin/env sh
-# kuri release-channel installer — https://github.com/justrach/kuri
-# Usage: curl -fsSL https://raw.githubusercontent.com/justrach/kuri/release-channel/stable/install.sh | sh
+# kuri installer — https://github.com/justrach/kuri
+# Usage: curl -fsSL https://raw.githubusercontent.com/justrach/kuri/main/install.sh | sh
 set -e
 
 REPO="justrach/kuri"
@@ -8,12 +8,13 @@ CHANNEL="${KURI_CHANNEL:-stable}"
 BASE_URL="${KURI_RELEASE_BASE:-https://raw.githubusercontent.com/${REPO}/release-channel/${CHANNEL}}"
 INSTALL_DIR="${KURI_INSTALL_DIR:-$HOME/.local/bin}"
 
+# ── Detect platform ───────────────────────────────────────────────────────────
 OS="$(uname -s)"
 ARCH="$(uname -m)"
 
 case "$OS" in
   Darwin) OS_NAME="macos" ;;
-  Linux) OS_NAME="linux" ;;
+  Linux)  OS_NAME="linux" ;;
   *) echo "Unsupported OS: $OS" >&2; exit 1 ;;
 esac
 
@@ -23,12 +24,14 @@ case "$ARCH" in
   *) echo "Unsupported arch: $ARCH" >&2; exit 1 ;;
 esac
 
-TARGET="${ARCH_NAME}-${OS_NAME}"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
-MANIFEST_URL="${BASE_URL}/latest.json"
+TARGET="${ARCH_NAME}-${OS_NAME}"
+
+# ── Fetch channel manifest ────────────────────────────────────────────────────
 echo "Fetching kuri ${CHANNEL} channel manifest..."
+MANIFEST_URL="${BASE_URL}/latest.json"
 curl -fsSL "$MANIFEST_URL" -o "$TMP/latest.json"
 
 VERSION="$(grep '"version"' "$TMP/latest.json" | head -1 | sed 's/.*"version": *"\([^"]*\)".*/\1/')"
@@ -42,6 +45,8 @@ if [ -z "$VERSION" ] || [ -z "$URL" ]; then
 fi
 
 echo "Installing kuri ${VERSION} (${TARGET})..."
+
+# ── Download, verify & unpack ─────────────────────────────────────────────────
 curl -fL "$URL" -o "$TMP/kuri.tar.gz"
 
 if [ -n "$SHA256" ]; then
@@ -62,6 +67,8 @@ if [ -n "$SHA256" ]; then
 fi
 
 tar -xzf "$TMP/kuri.tar.gz" -C "$TMP"
+
+# ── Install binaries ──────────────────────────────────────────────────────────
 mkdir -p "$INSTALL_DIR"
 
 BINS="kuri kuri-agent kuri-fetch kuri-browse"
@@ -70,6 +77,7 @@ for BIN in $BINS; do
   if [ -f "$TMP/$BIN" ]; then
     cp "$TMP/$BIN" "$INSTALL_DIR/$BIN"
     chmod +x "$INSTALL_DIR/$BIN"
+    # Remove macOS quarantine so binaries run without Gatekeeper prompt
     if [ "$OS_NAME" = "macos" ]; then
       xattr -d com.apple.quarantine "$INSTALL_DIR/$BIN" 2>/dev/null || true
     fi
@@ -77,6 +85,7 @@ for BIN in $BINS; do
   fi
 done
 
+# ── PATH hint ─────────────────────────────────────────────────────────────────
 echo ""
 echo "Installed:$INSTALLED"
 echo "Location:  $INSTALL_DIR"

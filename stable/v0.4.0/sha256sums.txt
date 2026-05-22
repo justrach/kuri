@@ -1,0 +1,1 @@
+88b62e2dbf80802e9e71f8470b049eb581f038a8708c7fd654c8211f11fdceea  stable/v0.4.0/kuri-v0.4.0-aarch64-macos.tar.gz
