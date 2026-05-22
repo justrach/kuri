@@ -34,10 +34,10 @@ echo "Fetching kuri ${CHANNEL} channel manifest..."
 MANIFEST_URL="${BASE_URL}/latest.json"
 curl -fsSL "$MANIFEST_URL" -o "$TMP/latest.json"
 
-VERSION="$(grep '"version"' "$TMP/latest.json" | head -1 | sed 's/.*"version": *"\([^"]*\)".*/\1/')"
-ASSET_BLOCK="$(sed -n "/\"${TARGET}\"[[:space:]]*:/,/}/p" "$TMP/latest.json")"
-URL="$(printf '%s\n' "$ASSET_BLOCK" | grep '"url"' | head -1 | sed 's/.*"url": *"\([^"]*\)".*/\1/')"
-SHA256="$(printf '%s\n' "$ASSET_BLOCK" | grep '"sha256"' | head -1 | sed 's/.*"sha256": *"\([^"]*\)".*/\1/')"
+VERSION="$(grep --color=never '"version"' "$TMP/latest.json" | head -1 | sed -E 's/.*"version": *"([^"]*)".*/\1/')"
+ASSET_BLOCK="$(sed -n -E "/\"${TARGET}\"[[:space:]]*:/,/}/p" "$TMP/latest.json")"
+URL="$(printf '%s\n' "$ASSET_BLOCK" | grep --color=never '"url"' | head -1 | sed -E 's/.*"url": *"([^"]*)".*/\1/')"
+SHA256="$(printf '%s\n' "$ASSET_BLOCK" | grep --color=never '"sha256"' | head -1 | sed -E 's/.*"sha256": *"([^"]*)".*/\1/')"
 
 if [ -z "$VERSION" ] || [ -z "$URL" ]; then
   echo "Error: no ${TARGET} asset in ${MANIFEST_URL}" >&2
