@@ -489,6 +489,65 @@ fn autoSnap(arena: std.mem.Allocator, client: *CdpClient, session: *Session) voi
     compat.writeToStdout(compact);
 }
 
+fn cdpClick(arena: std.mem.Allocator, client: *CdpClient, object_id: []const u8, action: []const u8) !void {
+    const rect_js = if (std.mem.eql(u8, action, "check"))
+        "function() { this.scrollIntoViewIfNeeded(); if (this.checked) return 'skip'; const r = this.getBoundingClientRect(); return r.x+r.width/2+','+r.y+r.height/2; }"
+    else if (std.mem.eql(u8, action, "uncheck"))
+        "function() { this.scrollIntoViewIfNeeded(); if (!this.checked) return 'skip'; const r = this.getBoundingClientRect(); return r.x+r.width/2+','+r.y+r.height/2; }"
+    else
+        "function() { this.scrollIntoViewIfNeeded(); const r = this.getBoundingClientRect(); return r.x+r.width/2+','+r.y+r.height/2; }";
+
+    const escaped_rect = try escapeForJson(arena, rect_js);
+    const rect_params = try std.fmt.allocPrint(arena,
+        "{{\"objectId\":\"{s}\",\"functionDeclaration\":\"{s}\",\"returnByValue\":true}}", .{ object_id, escaped_rect });
+    const rect_resp = client.send(arena, protocol.Methods.runtime_call_function_on, rect_params) catch |err| {
+        jsonError("getBoundingClientRect failed: {s}", .{@errorName(err)});
+        std.process.exit(1);
+    };
+    const coords_str = extractCdpValue(rect_resp);
+
+    if (std.mem.eql(u8, coords_str, "skip")) {
+        const label = if (std.mem.eql(u8, action, "check")) "checked" else "unchecked";
+        const out = try std.fmt.allocPrint(arena, "{{\"ok\":true,\"action\":\"{s}\"}}\n", .{label});
+        compat.writeToStdout(out);
+        return;
+    }
+
+    const comma = std.mem.indexOfScalar(u8, coords_str, ',') orelse {
+        jsonError("could not parse element coordinates", .{});
+        std.process.exit(1);
+    };
+    const x = std.fmt.parseFloat(f64, coords_str[0..comma]) catch {
+        jsonError("could not parse element x coordinate", .{});
+        std.process.exit(1);
+    };
+    const y = std.fmt.parseFloat(f64, coords_str[comma + 1 ..]) catch {
+        jsonError("could not parse element y coordinate", .{});
+        std.process.exit(1);
+    };
+    const x_int: i64 = @intFromFloat(@round(x));
+    const y_int: i64 = @intFromFloat(@round(y));
+
+    const down_params = try std.fmt.allocPrint(arena,
+        "{{\"type\":\"mousePressed\",\"x\":{d},\"y\":{d},\"button\":\"left\",\"clickCount\":1}}", .{ x_int, y_int });
+    _ = client.send(arena, protocol.Methods.input_dispatch_mouse_event, down_params) catch |err| {
+        jsonError("Input.dispatchMouseEvent(mousePressed) failed: {s}", .{@errorName(err)});
+        std.process.exit(1);
+    };
+
+    const up_params = try std.fmt.allocPrint(arena,
+        "{{\"type\":\"mouseReleased\",\"x\":{d},\"y\":{d},\"button\":\"left\",\"clickCount\":1}}", .{ x_int, y_int });
+    _ = client.send(arena, protocol.Methods.input_dispatch_mouse_event, up_params) catch |err| {
+        jsonError("Input.dispatchMouseEvent(mouseReleased) failed: {s}", .{@errorName(err)});
+        std.process.exit(1);
+    };
+
+    const label = if (std.mem.eql(u8, action, "check")) "checked" else if (std.mem.eql(u8, action, "uncheck")) "unchecked" else "clicked";
+    const out = try std.fmt.allocPrint(arena, "{{\"ok\":true,\"action\":\"{s}\"}}\n", .{label});
+    compat.writeToStdout(out);
+}
+
+
 fn cmdAction(arena: std.mem.Allocator, client: *CdpClient, session: *Session, action: []const u8, ref: []const u8, value: ?[]const u8) !void {
     // Normalize ref: strip leading '@' if present
     const clean_ref = if (ref.len > 0 and ref[0] == '@') ref[1..] else ref;
@@ -575,14 +634,17 @@ fn cmdAction(arena: std.mem.Allocator, client: *CdpClient, session: *Session, ac
     ;
 
     // Step 2: build JS function for the action
+    // For click/check/uncheck, use CDP Input.dispatchMouseEvent for React/Vue compatibility (#164)
+    if (std.mem.eql(u8, action, "click") or std.mem.eql(u8, action, "check") or std.mem.eql(u8, action, "uncheck")) {
+        try cdpClick(arena, client, object_id, action);
+        return;
+    }
+
     const js_fn: []const u8 = blk: {
-        if (std.mem.eql(u8, action, "click")) break :blk "function() { this.scrollIntoViewIfNeeded(); this.click(); return 'clicked'; }";
         if (std.mem.eql(u8, action, "hover")) break :blk "function() { this.dispatchEvent(new MouseEvent('mouseover', {bubbles:true})); return 'hovered'; }";
         if (std.mem.eql(u8, action, "focus")) break :blk "function() { this.focus(); return 'focused'; }";
         if (std.mem.eql(u8, action, "dblclick")) break :blk "function() { this.scrollIntoViewIfNeeded(); this.dispatchEvent(new MouseEvent('dblclick', {bubbles:true,cancelable:true})); return 'dblclicked'; }";
         if (std.mem.eql(u8, action, "blur")) break :blk "function() { this.blur(); return 'blurred'; }";
-        if (std.mem.eql(u8, action, "check")) break :blk "function() { if (!this.checked) { this.click(); } return 'checked'; }";
-        if (std.mem.eql(u8, action, "uncheck")) break :blk "function() { if (this.checked) { this.click(); } return 'unchecked'; }";
         if (std.mem.eql(u8, action, "type") or std.mem.eql(u8, action, "fill")) {
             const v = value orelse {
                 jsonError("{s} requires a value", .{action});
