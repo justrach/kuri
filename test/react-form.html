@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    body { font-family: system-ui; max-width: 500px; margin: 40px auto; }
+    input { padding: 8px; margin: 4px 0; width: 100%; box-sizing: border-box; }
+    button { padding: 8px 16px; margin: 8px 4px 8px 0; cursor: pointer; }
+    .result { margin-top: 16px; padding: 12px; background: #e8f5e9; border-radius: 4px; }
+    .error { background: #ffebee; }
+    #test-status { margin-top: 12px; font-size: 14px; color: #666; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+    function App() {
+      const [name, setName] = React.useState("");
+      const [email, setEmail] = React.useState("");
+      const [submitted, setSubmitted] = React.useState(null);
+
+      function handleSubmit() {
+        if (!name || !email) return;
+        setSubmitted({ name, email, ts: Date.now() });
+      }
+
+      function handleReset() {
+        setName("");
+        setEmail("");
+        setSubmitted(null);
+      }
+
+      return (
+        <div>
+          <h2>React Controlled Form</h2>
+          <div>
+            <label htmlFor="name-input">Name</label>
+            <input
+              id="name-input"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="Enter name"
+            />
+          </div>
+          <div>
+            <label htmlFor="email-input">Email</label>
+            <input
+              id="email-input"
+              type="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              placeholder="Enter email"
+            />
+          </div>
+          <button onClick={handleSubmit}>Submit</button>
+          <button onClick={handleReset}>Reset</button>
+
+          <div id="test-status">
+            name={JSON.stringify(name)} email={JSON.stringify(email)}
+          </div>
+
+          {submitted && (
+            <div className="result" data-testid="result">
+              <strong>Submitted!</strong><br/>
+              Name: <span id="result-name">{submitted.name}</span><br/>
+              Email: <span id="result-email">{submitted.email}</span>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById("root"));
+    root.render(<App />);
+  </script>
+</body>
+</html>

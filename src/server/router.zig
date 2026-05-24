@@ -894,6 +894,89 @@ fn sendSnapshotResponse(request: *std.http.Server.Request, arena: std.mem.Alloca
     resp.sendJson(request, json_buf.items);
 }
 
+fn cdpClickHttp(request: *std.http.Server.Request, arena: std.mem.Allocator, client: *CdpClient, object_id: []const u8, kind: @import("../cdp/actions.zig").ActionKind) void {
+    const rect_js: []const u8 = switch (kind) {
+        .check => "function() { this.scrollIntoViewIfNeeded(); if (this.checked) return 'skip'; const r = this.getBoundingClientRect(); return (r.x+r.width/2)+','+(r.y+r.height/2); }",
+        .uncheck => "function() { this.scrollIntoViewIfNeeded(); if (!this.checked) return 'skip'; const r = this.getBoundingClientRect(); return (r.x+r.width/2)+','+(r.y+r.height/2); }",
+        else => "function() { this.scrollIntoViewIfNeeded(); const r = this.getBoundingClientRect(); return (r.x+r.width/2)+','+(r.y+r.height/2); }",
+    };
+
+    const escaped_rect = jsonEscapeAlloc(arena, rect_js) orelse {
+        resp.sendError(request, 500, "Internal Server Error");
+        return;
+    };
+    const rect_params = std.fmt.allocPrint(arena,
+        "{{\"objectId\":\"{s}\",\"functionDeclaration\":\"{s}\",\"returnByValue\":true}}", .{ object_id, escaped_rect }) catch {
+        resp.sendError(request, 500, "Internal Server Error");
+        return;
+    };
+    const rect_resp = client.send(arena, protocol.Methods.runtime_call_function_on, rect_params) catch {
+        resp.sendError(request, 502, "getBoundingClientRect failed");
+        return;
+    };
+    const coords_str = extractSimpleJsonString(rect_resp, 0, "\"value\"") orelse {
+        resp.sendError(request, 500, "Could not parse element coordinates");
+        return;
+    };
+
+    if (std.mem.eql(u8, coords_str, "skip")) {
+        const label = if (kind == .check) "checked" else "unchecked";
+        const body = std.fmt.allocPrint(arena, "{{\"ok\":true,\"action\":\"{s}\"}}", .{label}) catch {
+            resp.sendError(request, 500, "Internal Server Error");
+            return;
+        };
+        resp.sendJson(request, body);
+        return;
+    }
+
+    const comma = std.mem.indexOfScalar(u8, coords_str, ',') orelse {
+        resp.sendError(request, 500, "Could not parse element coordinates");
+        return;
+    };
+    const x = std.fmt.parseFloat(f64, coords_str[0..comma]) catch {
+        resp.sendError(request, 500, "Could not parse element x coordinate");
+        return;
+    };
+    const y = std.fmt.parseFloat(f64, coords_str[comma + 1 ..]) catch {
+        resp.sendError(request, 500, "Could not parse element y coordinate");
+        return;
+    };
+    const x_int: i64 = @intFromFloat(@round(x));
+    const y_int: i64 = @intFromFloat(@round(y));
+
+    const down_params = std.fmt.allocPrint(arena,
+        "{{\"type\":\"mousePressed\",\"x\":{d},\"y\":{d},\"button\":\"left\",\"clickCount\":1}}", .{ x_int, y_int }) catch {
+        resp.sendError(request, 500, "Internal Server Error");
+        return;
+    };
+    _ = client.send(arena, protocol.Methods.input_dispatch_mouse_event, down_params) catch {
+        resp.sendError(request, 502, "Input.dispatchMouseEvent(mousePressed) failed");
+        return;
+    };
+
+    const up_params = std.fmt.allocPrint(arena,
+        "{{\"type\":\"mouseReleased\",\"x\":{d},\"y\":{d},\"button\":\"left\",\"clickCount\":1}}", .{ x_int, y_int }) catch {
+        resp.sendError(request, 500, "Internal Server Error");
+        return;
+    };
+    _ = client.send(arena, protocol.Methods.input_dispatch_mouse_event, up_params) catch {
+        resp.sendError(request, 502, "Input.dispatchMouseEvent(mouseReleased) failed");
+        return;
+    };
+
+    const label = switch (kind) {
+        .check => "checked",
+        .uncheck => "unchecked",
+        else => "clicked",
+    };
+    const body = std.fmt.allocPrint(arena, "{{\"ok\":true,\"action\":\"{s}\"}}", .{label}) catch {
+        resp.sendError(request, 500, "Internal Server Error");
+        return;
+    };
+    resp.sendJson(request, body);
+}
+
+
 fn handleAction(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
     const target = request.head.target;
     const tab_id = requireEffectiveTabId(arena, request, bridge) orelse return;
@@ -1043,22 +1126,26 @@ fn handleAction(request: *std.http.Server.Request, arena: std.mem.Allocator, bri
         \\}
     ;
 
-    // Step 2: Build the JS function for the action
+    // Step 2: For click/check/uncheck, use CDP Input.dispatchMouseEvent for React/Vue compatibility (#164)
+    if (kind == .click or kind == .check or kind == .uncheck) {
+        cdpClickHttp(request, arena, client, object_id, kind);
+        return;
+    }
+
+    // Build the JS function for non-click actions
     const js_fn: []const u8 = switch (kind) {
-        .click => "function() { this.scrollIntoViewIfNeeded(); this.click(); return 'clicked'; }",
+        .click, .check, .uncheck => unreachable,
         .focus => "function() { this.focus(); return 'focused'; }",
         .hover => "function() { this.dispatchEvent(new MouseEvent('mouseover', {bubbles:true})); return 'hovered'; }",
         .dblclick => "function() { this.scrollIntoViewIfNeeded(); this.dispatchEvent(new MouseEvent('dblclick', {bubbles:true,cancelable:true})); return 'dblclicked'; }",
-        .check => "function() { if (!this.checked) { this.click(); } return 'checked'; }",
-        .uncheck => "function() { if (this.checked) { this.click(); } return 'unchecked'; }",
         .blur => "function() { this.blur(); return 'blurred'; }",
         .fill, .type => blk: {
             const v = value orelse {
                 resp.sendError(request, 400, "Missing value parameter for fill/type");
                 return;
             };
-            // realistic=true: use per-character key events for React/Vue compatibility
-            const use_realistic = if (realistic) |r| std.mem.eql(u8, r, "true") else false;
+            // Default to CDP key events for React/Vue compatibility (#164); opt out with realistic=false
+            const use_realistic = if (realistic) |r| !std.mem.eql(u8, r, "false") else true;
             if (use_realistic) {
                 // Focus the element first
                 const focus_fn =
@@ -1315,7 +1402,16 @@ fn handleBrowdie(request: *std.http.Server.Request) void {
     resp.sendJson(request, browdie);
 }
 
-pub fn discoverTabs(arena: std.mem.Allocator, bridge: *Bridge, cfg: Config, cdp_port: u16) !usize {
+const DiscoverTabsError = error{
+    CannotConnectToChrome,
+    CannotResolveChromeAddress,
+    EmptyResponseFromChrome,
+    InvalidChromeResponse,
+    OutOfMemory,
+};
+
+pub fn discoverTabs(arena: std.mem.Allocator, bridge: *Bridge, cfg: Config, cdp_port: u16) DiscoverTabsError!usize {
+    if (@import("builtin").os.tag == .windows) return error.CannotConnectToChrome;
     const cdp_addr = parseCdpAddress(cfg.cdp_url, cdp_port);
     const host = cdp_addr.host;
     const port = cdp_addr.port;

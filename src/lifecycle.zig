@@ -16,7 +16,10 @@ const launcher = @import("chrome/launcher.zig");
 var launcher_ptr: ?*launcher.Launcher = null;
 
 pub fn install(l: *launcher.Launcher) void {
-    launcher_ptr = l;
+    if (@import("builtin").os.tag == .windows) {
+        launcher_ptr = l;
+        return;
+    }
 
     var sa: std.c.Sigaction = std.mem.zeroes(std.c.Sigaction);
     sa.handler = .{ .handler = handler };

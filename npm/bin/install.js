@@ -31,6 +31,13 @@ function resolveTarget(nodePlatform = process.platform, nodeArch = process.arch)
 
   const opsys = SUPPORTED_PLATFORMS[nodePlatform];
   if (!opsys) {
+    if (nodePlatform === "win32") {
+      throw new Error(
+        "unsupported platform: win32. kuri-agent does not ship Windows binaries yet " +
+          "(tracked at https://github.com/justrach/kuri/issues/153). On Windows, use WSL2 " +
+          "and install kuri-agent from a Linux shell."
+      );
+    }
     throw new Error(`unsupported platform: ${nodePlatform}. kuri-agent publishes binaries for darwin and linux only`);
   }
 

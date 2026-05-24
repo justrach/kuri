@@ -193,6 +193,7 @@ const Browser = struct {
     }
 
     fn repl(self: *Browser) void {
+        if (@import("builtin").os.tag == .windows) return;
         const stdin_fd: std.posix.fd_t = 0;
         var line_buf: [4096]u8 = undefined;
 
@@ -655,6 +656,7 @@ fn findLinkNum(links: []const []const u8, url: []const u8, fallback: usize) usiz
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 fn readLine(fd: std.posix.fd_t, buf: []u8) ?[]const u8 {
+    if (@import("builtin").os.tag == .windows) return null;
     var i: usize = 0;
     while (i < buf.len) {
         const bytes_read = std.posix.read(fd, buf[i .. i + 1]) catch return null;
@@ -680,7 +682,7 @@ fn shouldUseColor() bool {
     if (compat.getenv("TERM")) |term| {
         if (std.mem.eql(u8, term, "dumb")) return false;
     }
-    return std.c.isatty(2) != 0;
+    return compat.isTtyStderr();
 }
 
 fn elapsed(start: i128) u64 {

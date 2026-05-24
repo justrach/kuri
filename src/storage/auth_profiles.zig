@@ -82,6 +82,7 @@ pub fn deleteProfile(
     state_dir: []const u8,
     name: []const u8,
 ) !void {
+    if (@import("builtin").os.tag == .windows) return error.UnsupportedOnWindows;
     const safe_name = try sanitizeName(allocator, name);
     defer allocator.free(safe_name);
 
@@ -108,6 +109,7 @@ pub fn listProfiles(
     allocator: std.mem.Allocator,
     state_dir: []const u8,
 ) ![]AuthProfileMeta {
+    if (@import("builtin").os.tag == .windows) return allocator.alloc(AuthProfileMeta, 0);
     const dir_path = try authProfilesDir(allocator, state_dir);
     defer allocator.free(dir_path);
 

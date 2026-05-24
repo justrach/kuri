@@ -27,6 +27,7 @@ pub const WebSocketClient = struct {
 
     /// Connect to a loopback WebSocket endpoint. url must be like "ws://host:port/path".
     pub fn connect(allocator: std.mem.Allocator, url: []const u8, read_buf: []u8, write_buf: []u8) !WebSocketClient {
+        if (@import("builtin").os.tag == .windows) return Error.ConnectionFailed;
         const parsed = try parseWsUrl(url);
 
         // Resolve localhost to 127.0.0.1 — resolveIp fails on some systems
@@ -235,6 +236,7 @@ pub const WebSocketClient = struct {
     }
 
     fn rawRead(self: *WebSocketClient, buf: []u8) !usize {
+        if (@import("builtin").os.tag == .windows) return Error.ReadFailed;
         return std.posix.read(self.fd, buf) catch return Error.ReadFailed;
     }
 

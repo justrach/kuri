@@ -1,29 +1,91 @@
 /// Zig 0.16 compatibility shims for removed stdlib APIs.
 const std = @import("std");
+const builtin = @import("builtin");
+
+// --- Windows API shims (Zig 0.16's std.os.windows only exposes some Win32 entry points) ---
+
+const winapi = struct {
+    const DWORD = std.os.windows.DWORD;
+    const BOOL = std.os.windows.BOOL;
+    const HANDLE = std.os.windows.HANDLE;
+    const FILETIME = std.os.windows.FILETIME;
+
+    // Win32 ABI: STD_*_HANDLE are (DWORD)-N, expressed as wrapped u32 values.
+    const STD_OUTPUT_HANDLE: DWORD = 0xFFFFFFF5; // -11
+    const STD_ERROR_HANDLE: DWORD = 0xFFFFFFF4; // -12
+
+    /// Windows Slim Reader/Writer lock. Zero-initialized = SRWLOCK_INIT.
+    const SRWLOCK = extern struct { Ptr: ?*anyopaque = null };
+
+    extern "kernel32" fn GetSystemTimeAsFileTime(lpSystemTimeAsFileTime: *FILETIME) callconv(.winapi) void;
+    extern "kernel32" fn GetStdHandle(nStdHandle: DWORD) callconv(.winapi) ?HANDLE;
+    extern "kernel32" fn GetConsoleMode(hConsoleHandle: HANDLE, lpMode: *DWORD) callconv(.winapi) BOOL;
+    extern "kernel32" fn WriteFile(
+        hFile: HANDLE,
+        lpBuffer: [*]const u8,
+        nNumberOfBytesToWrite: DWORD,
+        lpNumberOfBytesWritten: ?*DWORD,
+        lpOverlapped: ?*anyopaque,
+    ) callconv(.winapi) BOOL;
+    extern "kernel32" fn Sleep(dwMilliseconds: DWORD) callconv(.winapi) void;
+    extern "kernel32" fn AcquireSRWLockExclusive(SRWLock: *SRWLOCK) callconv(.winapi) void;
+    extern "kernel32" fn ReleaseSRWLockExclusive(SRWLock: *SRWLOCK) callconv(.winapi) void;
+    extern "kernel32" fn TryAcquireSRWLockExclusive(SRWLock: *SRWLOCK) callconv(.winapi) BOOL;
+    extern "kernel32" fn AcquireSRWLockShared(SRWLock: *SRWLOCK) callconv(.winapi) void;
+    extern "kernel32" fn ReleaseSRWLockShared(SRWLock: *SRWLOCK) callconv(.winapi) void;
+};
 
 // --- Time ---
 
-pub fn timestampSeconds() i64 {
-    var ts: std.c.timespec = undefined;
-    _ = std.c.clock_gettime(.REALTIME, &ts);
-    return ts.sec;
-}
+/// 100-nanosecond intervals between the Windows FILETIME epoch (1601-01-01 UTC)
+/// and the Unix epoch (1970-01-01 UTC). FILETIME counts in 100ns ticks.
+const FILETIME_TO_UNIX_100NS: i128 = 11_644_473_600 * 10_000_000;
 
-pub fn milliTimestamp() i64 {
-    var ts: std.c.timespec = undefined;
-    _ = std.c.clock_gettime(.REALTIME, &ts);
-    return @as(i64, ts.sec) * 1000 + @divTrunc(@as(i64, ts.nsec), 1_000_000);
-}
-
-pub fn nanoTimestamp() i128 {
+fn realtimeNanos() i128 {
+    if (builtin.os.tag == .windows) {
+        var ft: winapi.FILETIME = undefined;
+        winapi.GetSystemTimeAsFileTime(&ft);
+        const ft_100ns: i128 = (@as(i128, ft.dwHighDateTime) << 32) | @as(i128, ft.dwLowDateTime);
+        return (ft_100ns - FILETIME_TO_UNIX_100NS) * 100;
+    }
     var ts: std.c.timespec = undefined;
     _ = std.c.clock_gettime(.REALTIME, &ts);
     return @as(i128, ts.sec) * std.time.ns_per_s + @as(i128, ts.nsec);
 }
 
+pub fn timestampSeconds() i64 {
+    return @intCast(@divTrunc(realtimeNanos(), std.time.ns_per_s));
+}
+
+pub fn milliTimestamp() i64 {
+    return @intCast(@divTrunc(realtimeNanos(), std.time.ns_per_ms));
+}
+
+pub fn nanoTimestamp() i128 {
+    return realtimeNanos();
+}
+
+// --- TTY detection ---
+
+/// Returns true if stderr (fd 2) is attached to a terminal.
+pub fn isTtyStderr() bool {
+    if (builtin.os.tag == .windows) {
+        const handle = winapi.GetStdHandle(winapi.STD_ERROR_HANDLE) orelse return false;
+        var mode: winapi.DWORD = undefined;
+        return winapi.GetConsoleMode(handle, &mode).toBool();
+    }
+    return std.c.isatty(2) != 0;
+}
+
 // --- Threading ---
 
 pub fn threadSleep(ns: u64) void {
+    if (@import("builtin").os.tag == .windows) {
+        const ms_u128: u128 = @as(u128, ns) / std.time.ns_per_ms;
+        const ms: winapi.DWORD = @intCast(@min(ms_u128, @as(u128, std.math.maxInt(winapi.DWORD))));
+        winapi.Sleep(ms);
+        return;
+    }
     const ts = std.c.timespec{
         .sec = @intCast(ns / std.time.ns_per_s),
         .nsec = @intCast(ns % std.time.ns_per_s),
@@ -31,33 +93,62 @@ pub fn threadSleep(ns: u64) void {
     _ = std.c.nanosleep(&ts, null);
 }
 
+const is_windows_target = @import("builtin").os.tag == .windows;
+
 pub const PthreadMutex = struct {
-    inner: std.c.pthread_mutex_t = std.c.PTHREAD_MUTEX_INITIALIZER,
+    inner: if (is_windows_target) winapi.SRWLOCK else std.c.pthread_mutex_t =
+        if (is_windows_target) winapi.SRWLOCK{} else std.c.PTHREAD_MUTEX_INITIALIZER,
 
     pub fn lock(m: *PthreadMutex) void {
+        if (is_windows_target) {
+            winapi.AcquireSRWLockExclusive(&m.inner);
+            return;
+        }
         _ = std.c.pthread_mutex_lock(&m.inner);
     }
     pub fn unlock(m: *PthreadMutex) void {
+        if (is_windows_target) {
+            winapi.ReleaseSRWLockExclusive(&m.inner);
+            return;
+        }
         _ = std.c.pthread_mutex_unlock(&m.inner);
     }
     pub fn tryLock(m: *PthreadMutex) bool {
+        if (is_windows_target) return winapi.TryAcquireSRWLockExclusive(&m.inner).toBool();
         return @intFromEnum(std.c.pthread_mutex_trylock(&m.inner)) == 0;
     }
 };
 
 pub const PthreadRwLock = struct {
-    inner: std.c.pthread_rwlock_t = .{},
+    inner: if (is_windows_target) winapi.SRWLOCK else std.c.pthread_rwlock_t =
+        if (is_windows_target) winapi.SRWLOCK{} else .{},
 
     pub fn lock(rw: *PthreadRwLock) void {
+        if (is_windows_target) {
+            winapi.AcquireSRWLockExclusive(&rw.inner);
+            return;
+        }
         _ = std.c.pthread_rwlock_wrlock(&rw.inner);
     }
     pub fn unlock(rw: *PthreadRwLock) void {
+        if (is_windows_target) {
+            winapi.ReleaseSRWLockExclusive(&rw.inner);
+            return;
+        }
         _ = std.c.pthread_rwlock_unlock(&rw.inner);
     }
     pub fn lockShared(rw: *PthreadRwLock) void {
+        if (is_windows_target) {
+            winapi.AcquireSRWLockShared(&rw.inner);
+            return;
+        }
         _ = std.c.pthread_rwlock_rdlock(&rw.inner);
     }
     pub fn unlockShared(rw: *PthreadRwLock) void {
+        if (is_windows_target) {
+            winapi.ReleaseSRWLockShared(&rw.inner);
+            return;
+        }
         _ = std.c.pthread_rwlock_unlock(&rw.inner);
     }
 };
@@ -108,18 +199,40 @@ pub fn getenv(name: []const u8) ?[]const u8 {
 // --- Filesystem (replaces removed std.fs.cwd / std.fs.File) ---
 
 pub fn writeToStdout(data: []const u8) void {
-    var sent: usize = 0;
-    while (sent < data.len) {
-        const n = std.c.write(1, data[sent..].ptr, data.len - sent);
-        if (n <= 0) break;
-        sent += @intCast(n);
-    }
+    writeToStdHandle(.stdout, data);
 }
 
 pub fn writeToStderr(data: []const u8) void {
+    writeToStdHandle(.stderr, data);
+}
+
+const StdStream = enum { stdout, stderr };
+
+fn writeToStdHandle(which: StdStream, data: []const u8) void {
+    if (builtin.os.tag == .windows) {
+        const handle_id: winapi.DWORD = switch (which) {
+            .stdout => winapi.STD_OUTPUT_HANDLE,
+            .stderr => winapi.STD_ERROR_HANDLE,
+        };
+        const handle = winapi.GetStdHandle(handle_id) orelse return;
+        var sent: usize = 0;
+        while (sent < data.len) {
+            const remaining = data.len - sent;
+            const chunk: winapi.DWORD = @intCast(@min(remaining, std.math.maxInt(winapi.DWORD)));
+            var written: winapi.DWORD = 0;
+            if (!winapi.WriteFile(handle, data[sent..].ptr, chunk, &written, null).toBool()) break;
+            if (written == 0) break;
+            sent += written;
+        }
+        return;
+    }
+    const fd: c_int = switch (which) {
+        .stdout => 1,
+        .stderr => 2,
+    };
     var sent: usize = 0;
     while (sent < data.len) {
-        const n = std.c.write(2, data[sent..].ptr, data.len - sent);
+        const n = std.c.write(fd, data[sent..].ptr, data.len - sent);
         if (n <= 0) break;
         sent += @intCast(n);
     }
@@ -128,6 +241,7 @@ pub fn writeToStderr(data: []const u8) void {
 // --- Filesystem (cwd operations using C calls) ---
 
 pub fn cwdCreateFile(path: []const u8) !std.c.fd_t {
+    if (builtin.os.tag == .windows) return error.UnsupportedOnWindows;
     var buf: [4096]u8 = undefined;
     if (path.len >= buf.len) return error.NameTooLong;
     @memcpy(buf[0..path.len], path);
@@ -138,6 +252,7 @@ pub fn cwdCreateFile(path: []const u8) !std.c.fd_t {
 }
 
 pub fn cwdReadFile(allocator: std.mem.Allocator, path: []const u8, max_size: usize) ![]u8 {
+    if (builtin.os.tag == .windows) return error.UnsupportedOnWindows;
     var buf: [4096]u8 = undefined;
     if (path.len >= buf.len) return error.NameTooLong;
     @memcpy(buf[0..path.len], path);
@@ -159,6 +274,7 @@ pub fn cwdReadFile(allocator: std.mem.Allocator, path: []const u8, max_size: usi
 }
 
 pub fn cwdWriteFile(path: []const u8, data: []const u8) !void {
+    if (builtin.os.tag == .windows) return error.UnsupportedOnWindows;
     const fd = try cwdCreateFile(path);
     defer _ = std.c.close(fd);
     var sent: usize = 0;
@@ -170,6 +286,7 @@ pub fn cwdWriteFile(path: []const u8, data: []const u8) !void {
 }
 
 pub fn cwdMakePath(path: []const u8) !void {
+    if (builtin.os.tag == .windows) return error.UnsupportedOnWindows;
     // Iteratively create each component
     var i: usize = 0;
     while (i < path.len) {
@@ -184,6 +301,7 @@ pub fn cwdMakePath(path: []const u8) !void {
 }
 
 pub fn cwdDeleteFile(path: []const u8) !void {
+    if (builtin.os.tag == .windows) return error.UnsupportedOnWindows;
     var buf: [4096]u8 = undefined;
     if (path.len >= buf.len) return error.NameTooLong;
     @memcpy(buf[0..path.len], path);
@@ -192,6 +310,7 @@ pub fn cwdDeleteFile(path: []const u8) !void {
 }
 
 pub fn cwdAccess(path: []const u8) bool {
+    if (builtin.os.tag == .windows) return false;
     var buf: [4096]u8 = undefined;
     if (path.len >= buf.len) return false;
     @memcpy(buf[0..path.len], path);
@@ -200,6 +319,7 @@ pub fn cwdAccess(path: []const u8) bool {
 }
 
 pub fn fdWriteAll(fd: std.c.fd_t, data: []const u8) !void {
+    if (builtin.os.tag == .windows) return error.UnsupportedOnWindows;
     var sent: usize = 0;
     while (sent < data.len) {
         const n = std.c.write(fd, data[sent..].ptr, data.len - sent);
@@ -209,6 +329,7 @@ pub fn fdWriteAll(fd: std.c.fd_t, data: []const u8) !void {
 }
 
 pub fn fdClose(fd: std.c.fd_t) void {
+    if (builtin.os.tag == .windows) return;
     _ = std.c.close(fd);
 }
 
@@ -217,6 +338,7 @@ pub fn fdClose(fd: std.c.fd_t) void {
 pub extern "c" fn execvp(file: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_int;
 
 pub fn runCommand(allocator: std.mem.Allocator, argv: []const []const u8, max_output: usize) !struct { stdout: []u8, term: i32 } {
+    if (builtin.os.tag == .windows) return error.UnsupportedOnWindows;
     var arg_storage: std.ArrayList([:0]u8) = .empty;
     defer {
         for (arg_storage.items) |arg| allocator.free(arg);
@@ -291,6 +413,7 @@ fn ntohs(val: u16) u16 {
 
 /// Try to connect to 127.0.0.1:port. Returns true if connection succeeded.
 pub fn isPortInUse(port: u16) bool {
+    if (builtin.os.tag == .windows) return false;
     const fd = c.socket(c.AF.INET, c.SOCK.STREAM, 0);
     if (fd < 0) return false;
     defer _ = c.close(fd);
@@ -309,10 +432,12 @@ pub const TcpStream = struct {
     fd: fd_t,
 
     pub fn close(self: TcpStream) void {
+        if (builtin.os.tag == .windows) return;
         _ = c.close(self.fd);
     }
 
     pub fn writeAll(self: TcpStream, data: []const u8) !void {
+        if (builtin.os.tag == .windows) return error.UnsupportedOnWindows;
         var sent: usize = 0;
         while (sent < data.len) {
             const n = c.write(self.fd, data[sent..].ptr, data.len - sent);
@@ -322,24 +447,28 @@ pub const TcpStream = struct {
     }
 
     pub fn read(self: TcpStream, buf: []u8) !usize {
+        if (builtin.os.tag == .windows) return error.UnsupportedOnWindows;
         const n = c.read(self.fd, buf.ptr, buf.len);
         if (n < 0) return error.ConnectionResetByPeer;
         return @intCast(n);
     }
 
     pub fn write(self: TcpStream, data: []const u8) !usize {
+        if (builtin.os.tag == .windows) return error.UnsupportedOnWindows;
         const n = c.write(self.fd, data.ptr, data.len);
         if (n <= 0) return error.BrokenPipe;
         return @intCast(n);
     }
 
     pub fn setSockOpt(self: TcpStream, level: i32, optname: u32, optval: []const u8) void {
+        if (builtin.os.tag == .windows) return;
         _ = c.setsockopt(self.fd, level, optname, optval.ptr, @intCast(optval.len));
     }
 };
 
 /// Connect to 127.0.0.1:port via TCP. Returns a TcpStream.
 pub fn tcpConnectToIp4(port: u16) !TcpStream {
+    if (builtin.os.tag == .windows) return error.UnsupportedOnWindows;
     const fd = c.socket(c.AF.INET, c.SOCK.STREAM, 0);
     if (fd < 0) return error.SocketCreateFailed;
 
@@ -372,18 +501,21 @@ pub const TcpServer = struct {
     };
 
     pub fn accept(self: TcpServer) !Connection {
+        if (builtin.os.tag == .windows) return error.UnsupportedOnWindows;
         const client_fd = c.accept(self.fd, null, null);
         if (client_fd < 0) return error.AcceptFailed;
         return .{ .stream = .{ .fd = client_fd } };
     }
 
     pub fn deinit(self: *TcpServer) void {
+        if (builtin.os.tag == .windows) return;
         _ = c.close(self.fd);
     }
 };
 
 /// Bind and listen on 127.0.0.1:port.
 pub fn tcpListen(port: u16) !TcpServer {
+    if (builtin.os.tag == .windows) return error.UnsupportedOnWindows;
     const fd = c.socket(c.AF.INET, c.SOCK.STREAM, 0);
     if (fd < 0) return error.SocketCreateFailed;
     errdefer _ = c.close(fd);
