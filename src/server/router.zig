@@ -896,9 +896,9 @@ fn sendSnapshotResponse(request: *std.http.Server.Request, arena: std.mem.Alloca
 
 fn cdpClickHttp(request: *std.http.Server.Request, arena: std.mem.Allocator, client: *CdpClient, object_id: []const u8, kind: @import("../cdp/actions.zig").ActionKind) void {
     const rect_js: []const u8 = switch (kind) {
-        .check => "function() { this.scrollIntoViewIfNeeded(); if (this.checked) return 'skip'; const r = this.getBoundingClientRect(); return r.x+r.width/2+','+r.y+r.height/2; }",
-        .uncheck => "function() { this.scrollIntoViewIfNeeded(); if (!this.checked) return 'skip'; const r = this.getBoundingClientRect(); return r.x+r.width/2+','+r.y+r.height/2; }",
-        else => "function() { this.scrollIntoViewIfNeeded(); const r = this.getBoundingClientRect(); return r.x+r.width/2+','+r.y+r.height/2; }",
+        .check => "function() { this.scrollIntoViewIfNeeded(); if (this.checked) return 'skip'; const r = this.getBoundingClientRect(); return (r.x+r.width/2)+','+(r.y+r.height/2); }",
+        .uncheck => "function() { this.scrollIntoViewIfNeeded(); if (!this.checked) return 'skip'; const r = this.getBoundingClientRect(); return (r.x+r.width/2)+','+(r.y+r.height/2); }",
+        else => "function() { this.scrollIntoViewIfNeeded(); const r = this.getBoundingClientRect(); return (r.x+r.width/2)+','+(r.y+r.height/2); }",
     };
 
     const escaped_rect = jsonEscapeAlloc(arena, rect_js) orelse {
@@ -1144,8 +1144,8 @@ fn handleAction(request: *std.http.Server.Request, arena: std.mem.Allocator, bri
                 resp.sendError(request, 400, "Missing value parameter for fill/type");
                 return;
             };
-            // realistic=true: use per-character key events for React/Vue compatibility
-            const use_realistic = if (realistic) |r| std.mem.eql(u8, r, "true") else false;
+            // Default to CDP key events for React/Vue compatibility (#164); opt out with realistic=false
+            const use_realistic = if (realistic) |r| !std.mem.eql(u8, r, "false") else true;
             if (use_realistic) {
                 // Focus the element first
                 const focus_fn =

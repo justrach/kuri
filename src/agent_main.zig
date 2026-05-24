@@ -491,12 +491,11 @@ fn autoSnap(arena: std.mem.Allocator, client: *CdpClient, session: *Session) voi
 
 fn cdpClick(arena: std.mem.Allocator, client: *CdpClient, object_id: []const u8, action: []const u8) !void {
     const rect_js = if (std.mem.eql(u8, action, "check"))
-        "function() { this.scrollIntoViewIfNeeded(); if (this.checked) return 'skip'; const r = this.getBoundingClientRect(); return r.x+r.width/2+','+r.y+r.height/2; }"
+        "function() { this.scrollIntoViewIfNeeded(); if (this.checked) return 'skip'; const r = this.getBoundingClientRect(); return (r.x+r.width/2)+','+(r.y+r.height/2); }"
     else if (std.mem.eql(u8, action, "uncheck"))
-        "function() { this.scrollIntoViewIfNeeded(); if (!this.checked) return 'skip'; const r = this.getBoundingClientRect(); return r.x+r.width/2+','+r.y+r.height/2; }"
+        "function() { this.scrollIntoViewIfNeeded(); if (!this.checked) return 'skip'; const r = this.getBoundingClientRect(); return (r.x+r.width/2)+','+(r.y+r.height/2); }"
     else
-        "function() { this.scrollIntoViewIfNeeded(); const r = this.getBoundingClientRect(); return r.x+r.width/2+','+r.y+r.height/2; }";
-
+        "function() { this.scrollIntoViewIfNeeded(); const r = this.getBoundingClientRect(); return (r.x+r.width/2)+','+(r.y+r.height/2); }";
     const escaped_rect = try escapeForJson(arena, rect_js);
     const rect_params = try std.fmt.allocPrint(arena,
         "{{\"objectId\":\"{s}\",\"functionDeclaration\":\"{s}\",\"returnByValue\":true}}", .{ object_id, escaped_rect });
@@ -547,6 +546,93 @@ fn cdpClick(arena: std.mem.Allocator, client: *CdpClient, object_id: []const u8,
     compat.writeToStdout(out);
 }
 
+fn cdpType(arena: std.mem.Allocator, client: *CdpClient, object_id: []const u8, text: []const u8, append: bool) !void {
+    const focus_js = if (append)
+        \\function() {
+        \\  const target = (() => {
+        \\    if (!this) return null;
+        \\    if (this instanceof HTMLLabelElement && this.control) return this.control;
+        \\    if (this instanceof HTMLInputElement || this instanceof HTMLTextAreaElement || this.isContentEditable) return this;
+        \\    if (typeof this.querySelector === "function") {
+        \\      const nested = this.querySelector("input,textarea,[contenteditable=\"true\"],[contenteditable=\"\"],[role=\"textbox\"]");
+        \\      if (nested) return nested;
+        \\    }
+        \\    return this;
+        \\  })();
+        \\  if (!target) return "missing-target";
+        \\  target.focus?.();
+        \\  return "focused";
+        \\}
+    else
+        \\function() {
+        \\  const target = (() => {
+        \\    if (!this) return null;
+        \\    if (this instanceof HTMLLabelElement && this.control) return this.control;
+        \\    if (this instanceof HTMLInputElement || this instanceof HTMLTextAreaElement || this.isContentEditable) return this;
+        \\    if (typeof this.querySelector === "function") {
+        \\      const nested = this.querySelector("input,textarea,[contenteditable=\"true\"],[contenteditable=\"\"],[role=\"textbox\"]");
+        \\      if (nested) return nested;
+        \\    }
+        \\    return this;
+        \\  })();
+        \\  if (!target) return "missing-target";
+        \\  target.focus?.();
+        \\  if (target.isContentEditable) {
+        \\    target.textContent = "";
+        \\  } else if ("value" in target) {
+        \\    target.value = "";
+        \\  }
+        \\  target.dispatchEvent(new Event("focus", {bubbles:true}));
+        \\  return "focused";
+        \\}
+    ;
+
+    const escaped_focus = try escapeForJson(arena, focus_js);
+    const focus_params = try std.fmt.allocPrint(arena,
+        "{{\"objectId\":\"{s}\",\"functionDeclaration\":\"{s}\",\"returnByValue\":true}}", .{ object_id, escaped_focus });
+    _ = client.send(arena, protocol.Methods.runtime_call_function_on, focus_params) catch |err| {
+        jsonError("focus failed: {s}", .{@errorName(err)});
+        std.process.exit(1);
+    };
+
+    for (text) |ch| {
+        const char_str = try std.fmt.allocPrint(arena, "{c}", .{ch});
+        const key_params = try std.fmt.allocPrint(arena,
+            "{{\"type\":\"keyDown\",\"text\":\"{s}\",\"key\":\"{s}\",\"unmodifiedText\":\"{s}\"}}", .{ char_str, char_str, char_str });
+        _ = client.send(arena, protocol.Methods.input_dispatch_key_event, key_params) catch continue;
+        const up_params = try std.fmt.allocPrint(arena,
+            "{{\"type\":\"keyUp\",\"key\":\"{s}\"}}", .{char_str});
+        _ = client.send(arena, protocol.Methods.input_dispatch_key_event, up_params) catch continue;
+    }
+
+    const change_js =
+        \\function() {
+        \\  const target = (() => {
+        \\    if (!this) return null;
+        \\    if (this instanceof HTMLLabelElement && this.control) return this.control;
+        \\    if (this instanceof HTMLInputElement || this instanceof HTMLTextAreaElement || this.isContentEditable) return this;
+        \\    if (typeof this.querySelector === "function") {
+        \\      const nested = this.querySelector("input,textarea,[contenteditable=\"true\"],[contenteditable=\"\"],[role=\"textbox\"]");
+        \\      if (nested) return nested;
+        \\    }
+        \\    return this;
+        \\  })();
+        \\  if (!target) return "missing-target";
+        \\  target.dispatchEvent(new Event("input", {bubbles:true}));
+        \\  target.dispatchEvent(new Event("change", {bubbles:true}));
+        \\  target.dispatchEvent(new Event("blur", {bubbles:true}));
+        \\  return "filled";
+        \\}
+    ;
+    const escaped_change = try escapeForJson(arena, change_js);
+    const change_params = try std.fmt.allocPrint(arena,
+        "{{\"objectId\":\"{s}\",\"functionDeclaration\":\"{s}\",\"returnByValue\":true}}", .{ object_id, escaped_change });
+    _ = client.send(arena, protocol.Methods.runtime_call_function_on, change_params) catch {};
+
+    compat.writeToStdout("{\"ok\":true,\"action\":\"filled\"}\n");
+}
+
+
 
 fn cmdAction(arena: std.mem.Allocator, client: *CdpClient, session: *Session, action: []const u8, ref: []const u8, value: ?[]const u8) !void {
     // Normalize ref: strip leading '@' if present
@@ -575,33 +661,6 @@ fn cmdAction(arena: std.mem.Allocator, client: *CdpClient, session: *Session, ac
         std.process.exit(1);
     };
 
-    const value_action_fn =
-        \\function(value, append) {
-        \\  const target = (() => {
-        \\    if (!this) return null;
-        \\    if (this instanceof HTMLLabelElement && this.control) return this.control;
-        \\    if (this instanceof HTMLInputElement || this instanceof HTMLTextAreaElement || this instanceof HTMLSelectElement) return this;
-        \\    if (this.isContentEditable) return this;
-        \\    if (typeof this.querySelector === "function") {
-        \\      const nested = this.querySelector("input,textarea,select,[contenteditable=\"true\"],[contenteditable=\"\"],[role=\"textbox\"]");
-        \\      if (nested) return nested;
-        \\    }
-        \\    return this;
-        \\  })();
-        \\  if (!target) return "missing-target";
-        \\  target.focus?.();
-        \\  if (target.isContentEditable) {
-        \\    const existing = typeof target.textContent === "string" ? target.textContent : "";
-        \\    target.textContent = append ? (existing + value) : value;
-        \\  } else if ("value" in target) {
-        \\    const existing = typeof target.value === "string" ? target.value : "";
-        \\    target.value = append ? (existing + value) : value;
-        \\  }
-        \\  target.dispatchEvent(new Event("input", {bubbles:true}));
-        \\  target.dispatchEvent(new Event("change", {bubbles:true}));
-        \\  return "filled";
-        \\}
-    ;
     const select_action_fn =
         \\function(value) {
         \\  const target = (() => {
@@ -640,19 +699,22 @@ fn cmdAction(arena: std.mem.Allocator, client: *CdpClient, session: *Session, ac
         return;
     }
 
+    // For type/fill, use CDP key events for React/Vue compatibility (#164)
+    if (std.mem.eql(u8, action, "type") or std.mem.eql(u8, action, "fill")) {
+        const v = value orelse {
+            jsonError("{s} requires a value", .{action});
+            std.process.exit(1);
+        };
+        const is_append = std.mem.eql(u8, action, "type");
+        try cdpType(arena, client, object_id, v, is_append);
+        return;
+    }
+
     const js_fn: []const u8 = blk: {
         if (std.mem.eql(u8, action, "hover")) break :blk "function() { this.dispatchEvent(new MouseEvent('mouseover', {bubbles:true})); return 'hovered'; }";
         if (std.mem.eql(u8, action, "focus")) break :blk "function() { this.focus(); return 'focused'; }";
         if (std.mem.eql(u8, action, "dblclick")) break :blk "function() { this.scrollIntoViewIfNeeded(); this.dispatchEvent(new MouseEvent('dblclick', {bubbles:true,cancelable:true})); return 'dblclicked'; }";
         if (std.mem.eql(u8, action, "blur")) break :blk "function() { this.blur(); return 'blurred'; }";
-        if (std.mem.eql(u8, action, "type") or std.mem.eql(u8, action, "fill")) {
-            const v = value orelse {
-                jsonError("{s} requires a value", .{action});
-                std.process.exit(1);
-            };
-            _ = v;
-            break :blk value_action_fn;
-        }
         if (std.mem.eql(u8, action, "select")) {
             const v = value orelse {
                 jsonError("select requires a value", .{});
@@ -669,18 +731,7 @@ fn cmdAction(arena: std.mem.Allocator, client: *CdpClient, session: *Session, ac
     const escaped_fn = try escapeForJson(arena, js_fn);
 
     // Step 3: call function on resolved object
-    const call_params = if (std.mem.eql(u8, action, "type") or std.mem.eql(u8, action, "fill")) blk: {
-        const v = value orelse {
-            jsonError("{s} requires a value", .{action});
-            std.process.exit(1);
-        };
-        const escaped_v = try escapeForJson(arena, v);
-        break :blk try std.fmt.allocPrint(
-            arena,
-            "{{\"objectId\":\"{s}\",\"functionDeclaration\":\"{s}\",\"arguments\":[{{\"value\":\"{s}\"}},{{\"value\":{s}}}],\"returnByValue\":true}}",
-            .{ object_id, escaped_fn, escaped_v, if (std.mem.eql(u8, action, "type")) "true" else "false" },
-        );
-    } else if (std.mem.eql(u8, action, "select")) blk: {
+    const call_params = if (std.mem.eql(u8, action, "select")) blk: {
         const v = value orelse {
             jsonError("select requires a value", .{});
             std.process.exit(1);
