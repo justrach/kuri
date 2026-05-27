@@ -2,6 +2,12 @@
 
 All notable changes to kuri are documented here.
 
+## [0.4.5] — 2026-05-27
+
+### Fixes
+- **CDP session auto-recovery** — When Chrome performs a cross-process renderer swap (e.g., navigating to Instagram), it detaches the old CDP target and assigns a new `webSocketDebuggerUrl`. Kuri now detects dead clients, re-fetches `/json/list`, and reconnects automatically instead of silently failing (#172)
+- **Dead client detection** — `CdpClient` now tracks whether its WebSocket connection is permanently broken, distinguishing transient disconnects from stale target URLs
+
 ## [0.4.4] — 2026-05-24
 
 ### Features — beyond parity (142 HTTP endpoints)

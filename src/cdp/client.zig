@@ -88,6 +88,7 @@ pub const CdpClient = struct {
     next_id: std.atomic.Value(u32),
     ws: ?WebSocketClient,
     connected: bool,
+    dead: bool,
     mu: compat.PthreadMutex,
 
     // Owned buffers for WebSocket I/O
@@ -103,6 +104,7 @@ pub const CdpClient = struct {
             .next_id = std.atomic.Value(u32).init(1),
             .ws = null,
             .connected = false,
+            .dead = false,
             .mu = .{},
             .ws_read_buf = undefined,
             .ws_write_buf = undefined,
@@ -147,8 +149,9 @@ pub const CdpClient = struct {
         defer allocator.free(msg);
 
         ws.sendText(msg) catch {
-            // Connection broke — mark disconnected so next call reconnects
+            // Connection broke — mark dead so the caller can invalidate this client
             self.connected = false;
+            self.dead = true;
             return error.ConnectionRefused;
         };
 
@@ -159,12 +162,14 @@ pub const CdpClient = struct {
             const response = ws.receiveMessageAlloc(allocator, 2 * 1024 * 1024) catch |err| switch (err) {
                 error.ConnectionClosed => {
                     self.connected = false;
+                    self.dead = true;
                     return error.ConnectionRefused;
                 },
                 else => {
                     // Timeout or read error — if we've read some events, retry a few more times
                     if (attempts > 0) continue;
                     self.connected = false;
+                    self.dead = true;
                     return error.ConnectionRefused;
                 },
             };
