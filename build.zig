@@ -4,6 +4,21 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    // Single source of truth for the version: build.zig.zon.
+    // Exposed to source via `@import("build_options").version` so the version
+    // string never has to be hand-edited in src/*.zig on a release.
+    const version = @import("build.zig.zon").version;
+    const build_options = b.addOptions();
+    build_options.addOption([]const u8, "version", version);
+
+    // nanostore: encrypted secret/connection vault (sibling library), used by
+    // the `kuri connect` feature for persisted, encrypted browser logins.
+    const nanostore_dep = b.dependency("nanostore", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    const nanostore_mod = nanostore_dep.module("nanostore");
+
     // Main executable
     const exe = b.addExecutable(.{
         .name = "kuri",
@@ -14,6 +29,8 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         }),
     });
+    exe.root_module.addOptions("build_options", build_options);
+    exe.root_module.addImport("nanostore", nanostore_mod);
 
     b.installArtifact(exe);
 
@@ -35,6 +52,8 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         }),
     });
+    unit_tests.root_module.addOptions("build_options", build_options);
+    unit_tests.root_module.addImport("nanostore", nanostore_mod);
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&b.addRunArtifact(unit_tests).step);
 
@@ -80,6 +99,7 @@ pub fn build(b: *std.Build) void {
         .name = "kuri-fetch",
         .root_module = fetch_mod,
     });
+    fetch_exe.root_module.addOptions("build_options", build_options);
     fetch_exe.root_module.linkLibrary(quickjs_dep.artifact("quickjs-ng"));
     b.installArtifact(fetch_exe);
     const run_fetch = b.addRunArtifact(fetch_exe);
@@ -101,6 +121,7 @@ pub fn build(b: *std.Build) void {
     const fetch_tests = b.addTest(.{
         .root_module = fetch_test_mod,
     });
+    fetch_tests.root_module.addOptions("build_options", build_options);
     fetch_tests.root_module.linkLibrary(quickjs_dep.artifact("quickjs-ng"));
     const run_fetch_tests = b.addRunArtifact(fetch_tests);
     const fetch_test_step = b.step("test-fetch", "Run kuri-fetch unit tests");
@@ -116,6 +137,7 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         }),
     });
+    browse_exe.root_module.addOptions("build_options", build_options);
     b.installArtifact(browse_exe);
     const run_browse = b.addRunArtifact(browse_exe);
     run_browse.step.dependOn(b.getInstallStep());
@@ -134,6 +156,7 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         }),
     });
+    browse_tests.root_module.addOptions("build_options", build_options);
     const run_browse_tests = b.addRunArtifact(browse_tests);
     const browse_test_step = b.step("test-browse", "Run kuri-browse unit tests");
     browse_test_step.dependOn(&run_browse_tests.step);
@@ -162,6 +185,8 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         }),
     });
+    agent_exe.root_module.addOptions("build_options", build_options);
+    agent_exe.root_module.addImport("nanostore", nanostore_mod);
     b.installArtifact(agent_exe);
     const run_agent = b.addRunArtifact(agent_exe);
     run_agent.step.dependOn(b.getInstallStep());
@@ -170,4 +195,25 @@ pub fn build(b: *std.Build) void {
     }
     const agent_step = b.step("agent", "Run kuri-agent scriptable CLI");
     agent_step.dependOn(&run_agent.step);
+
+    // kuri-connect-broker: key-holding broker daemon for the `connect` feature.
+    // Holds KURI_VAULT_PASSPHRASE so the agent never does, and exposes only
+    // inject/list/save/delete over a token-gated loopback API.
+    const broker_exe = b.addExecutable(.{
+        .name = "kuri-connect-broker",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/connect_broker.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    broker_exe.root_module.addOptions("build_options", build_options);
+    broker_exe.root_module.addImport("nanostore", nanostore_mod);
+    b.installArtifact(broker_exe);
+    const run_broker = b.addRunArtifact(broker_exe);
+    run_broker.step.dependOn(b.getInstallStep());
+    if (b.args) |args| run_broker.addArgs(args);
+    const broker_step = b.step("broker", "Run kuri-connect-broker daemon");
+    broker_step.dependOn(&run_broker.step);
 }
