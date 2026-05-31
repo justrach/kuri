@@ -10,7 +10,7 @@ pub const Launcher = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
     cdp_port: u16,
-    child_pid: ?std.c.pid_t,
+    child: ?std.process.Child,
     ws_url_buf: [512]u8,
     ws_url_len: usize,
     restarts: u8,
@@ -66,7 +66,7 @@ pub const Launcher = struct {
             .allocator = allocator,
             .io = io,
             .cdp_port = default_cdp_port,
-            .child_pid = null,
+            .child = null,
             .ws_url_buf = undefined,
             .ws_url_len = 0,
             .restarts = 0,
@@ -195,41 +195,17 @@ pub const Launcher = struct {
         // positional arg = URL Chrome opens at launch.
         try argv_list.append(self.allocator, "about:blank");
 
-        // Build null-terminated argv for execv
-        var argv_storage: std.ArrayList([:0]u8) = .empty;
-        defer {
-            for (argv_storage.items) |arg| self.allocator.free(arg);
-            argv_storage.deinit(self.allocator);
-        }
-        for (argv_list.items) |arg| {
-            const arg_z = try self.allocator.allocSentinel(u8, arg.len, 0);
-            @memcpy(arg_z[0..arg.len], arg);
-            try argv_storage.append(self.allocator, arg_z);
-        }
-
-        const argv_z = try self.allocator.alloc(?[*:0]const u8, argv_storage.items.len + 1);
-        defer self.allocator.free(argv_z);
-        for (argv_storage.items, 0..) |arg, i| {
-            argv_z[i] = arg.ptr;
-        }
-        argv_z[argv_storage.items.len] = null;
-
-        const pid = std.c.fork();
-        if (pid < 0) return error.ForkFailed;
-
-        if (pid == 0) {
-            // Child: redirect stdout/stderr to /dev/null
-            const devnull = std.c.open("/dev/null", .{ .ACCMODE = .WRONLY }, @as(c_uint, 0));
-            if (devnull >= 0) {
-                _ = std.c.dup2(devnull, 1);
-                _ = std.c.dup2(devnull, 2);
-                _ = std.c.close(devnull);
-            }
-            _ = compat.execvp(argv_z[0].?, @ptrCast(argv_z.ptr));
-            std.c.exit(127);
-        }
-
-        self.child_pid = pid;
+        // Spawn Chrome as a detached child via the Io process API. This is
+        // cross-platform — fork()+exec() on POSIX, CreateProcessW on Windows —
+        // and replaces the former POSIX-only fork()/execvp() path that could not
+        // compile for x86_64-windows. `.ignore` discards stdio (opens /dev/null
+        // on POSIX, NUL on Windows), matching the old dup2-to-/dev/null behavior.
+        self.child = std.process.spawn(self.io, .{
+            .argv = argv_list.items,
+            .stdin = .ignore,
+            .stdout = .ignore,
+            .stderr = .ignore,
+        }) catch return error.ForkFailed;
 
         // Free argv-owned strings now that fork+exec has completed.
         self.allocator.free(port_flag);
@@ -254,10 +230,7 @@ pub const Launcher = struct {
             }
         }
 
-        std.log.info("launched Chrome (pid={d}) on CDP port {d}", .{
-            pid,
-            self.cdp_port,
-        });
+        std.log.info("launched Chrome on CDP port {d}", .{self.cdp_port});
         if (builtin_path != null) {
             std.log.info("builtin extension loaded from {s}", .{self.builtin_ext_path.?});
         }
@@ -282,10 +255,10 @@ pub const Launcher = struct {
         const status = self.healthCheck();
         if (status.alive) return;
 
-        // Chrome appears dead
-        if (self.child_pid) |pid| {
-            _ = std.c.waitpid(pid, null, 0);
-            self.child_pid = null;
+        // Chrome appears dead — reap it cross-platform.
+        if (self.child) |*c| {
+            _ = c.wait(self.io) catch {};
+            self.child = null;
         }
 
         if (self.restarts >= max_restarts) {
@@ -304,10 +277,9 @@ pub const Launcher = struct {
 
     /// Shut down the managed Chrome process.
     pub fn deinit(self: *Launcher) void {
-        if (self.child_pid) |pid| {
-            _ = std.c.kill(pid, std.c.SIG.KILL);
-            _ = std.c.waitpid(pid, null, 0);
-            self.child_pid = null;
+        if (self.child) |*c| {
+            c.kill(self.io);
+            self.child = null;
         }
         if (self.builtin_ext_path) |bp| {
             self.allocator.free(bp);
@@ -725,7 +697,7 @@ test "healthCheck returns not alive for unbound port" {
     var launcher_inst = Launcher{
         .allocator = std.testing.allocator,
         .cdp_port = 19876,
-        .child_pid = null,
+        .child = null,
         .ws_url_buf = undefined,
         .ws_url_len = 0,
         .restarts = 0,

@@ -240,6 +240,11 @@ pub const WebSocketClient = struct {
     }
 
     fn rawRead(self: *WebSocketClient, buf: []u8) !usize {
+        // std.posix.read is a @compileError on Windows; connect() already
+        // returns ConnectionFailed there, so this path is unreachable on
+        // Windows but must still type-check. (Real winsock recv is the
+        // tracked follow-on for live browse on Windows.)
+        if (comptime @import("builtin").os.tag == .windows) return Error.ReadFailed;
         return std.posix.read(self.fd, buf) catch return Error.ReadFailed;
     }
 

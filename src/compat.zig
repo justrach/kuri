@@ -100,7 +100,25 @@ const thread_impl = if (is_windows) struct {
 
 pub fn threadSleep(ns: u64) void { thread_impl.threadSleep(ns); }
 
-pub const PthreadMutex = struct {
+// On Windows the pthread_* types resolve to `void` (no libc pthreads in Zig's
+// std.c), and Zig 0.16 removed std.Thread.Mutex in favor of the io-parameterized
+// std.Io.Mutex. The compat mutex API is io-free (lock()/unlock()), so on Windows
+// we back it with a minimal atomic spin-mutex — correct mutual exclusion for the
+// broker's short critical sections, needing no io handle. POSIX keeps the exact
+// pthread ABI. Same impl-struct pattern as time_impl.
+pub const PthreadMutex = if (is_windows) struct {
+    locked: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+
+    pub fn lock(m: *PthreadMutex) void {
+        while (m.locked.swap(true, .acquire)) std.atomic.spinLoopHint();
+    }
+    pub fn unlock(m: *PthreadMutex) void {
+        m.locked.store(false, .release);
+    }
+    pub fn tryLock(m: *PthreadMutex) bool {
+        return !m.locked.swap(true, .acquire);
+    }
+} else struct {
     inner: std.c.pthread_mutex_t = std.c.PTHREAD_MUTEX_INITIALIZER,
 
     pub fn lock(m: *PthreadMutex) void {
@@ -114,7 +132,28 @@ pub const PthreadMutex = struct {
     }
 };
 
-pub const PthreadRwLock = struct {
+pub const PthreadRwLock = if (is_windows) struct {
+    // Windows fallback: an exclusive atomic spin-lock for both read and write.
+    // Serializing readers is correct (just less concurrent) and avoids needing
+    // an io handle, which the io-free compat API cannot supply.
+    locked: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+
+    fn acquire(rw: *PthreadRwLock) void {
+        while (rw.locked.swap(true, .acquire)) std.atomic.spinLoopHint();
+    }
+    pub fn lock(rw: *PthreadRwLock) void {
+        rw.acquire();
+    }
+    pub fn unlock(rw: *PthreadRwLock) void {
+        rw.locked.store(false, .release);
+    }
+    pub fn lockShared(rw: *PthreadRwLock) void {
+        rw.acquire();
+    }
+    pub fn unlockShared(rw: *PthreadRwLock) void {
+        rw.locked.store(false, .release);
+    }
+} else struct {
     inner: std.c.pthread_rwlock_t = .{},
 
     pub fn lock(rw: *PthreadRwLock) void {

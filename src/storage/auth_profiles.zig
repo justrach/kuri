@@ -108,7 +108,7 @@ pub fn listProfiles(
     allocator: std.mem.Allocator,
     state_dir: []const u8,
 ) ![]AuthProfileMeta {
-    if (comptime @import("builtin").os.tag == .windows) return .{};
+    if (comptime @import("builtin").os.tag == .windows) return &.{};
     const dir_path = try authProfilesDir(allocator, state_dir);
     defer allocator.free(dir_path);
 

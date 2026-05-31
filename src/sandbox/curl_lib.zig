@@ -132,6 +132,7 @@ pub const Error = error{
     CurlPerformFailed,
     OutOfMemory,
     BadHeader,
+    NotImplementedOnWindows,
 };
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -141,6 +142,12 @@ pub const Error = error{
 /// Synchronous request with full Chrome (or Firefox/Safari) impersonation.
 /// Caller owns the returned Response and must call `deinit`.
 pub fn perform(allocator: std.mem.Allocator, req: Request) Error!Response {
+    // Windows: libcurl-impersonate is not linked (the vendored .lib archives are
+    // MSVC-ABI, incompatible with the x86_64-windows-gnu cross-target). Returning
+    // before any curl extern keeps those symbols unreferenced so the binary links;
+    // the sandbox replay path treats this like any other curl failure and falls
+    // back. CDP browse (go/snap/close) does not use this path.
+    if (comptime @import("builtin").os.tag == .windows) return error.NotImplementedOnWindows;
     const easy = c.curl_easy_init() orelse return error.CurlInitFailed;
     defer c.curl_easy_cleanup(easy);
 

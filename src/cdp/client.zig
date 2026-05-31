@@ -246,6 +246,10 @@ pub const CdpClient = struct {
     }
 
     pub fn drainWsEvents(self: *CdpClient, allocator: std.mem.Allocator, timeout_sec: i32) void {
+        // Windows: the CDP websocket never connects (winsock transport pending),
+        // and std.posix.setsockopt below is a @compileError there. No ws → nothing
+        // to drain, so return before the posix-only socket calls.
+        if (comptime @import("builtin").os.tag == .windows) return;
         self.mu.lock();
         defer self.mu.unlock();
 

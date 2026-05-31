@@ -1477,13 +1477,13 @@ pub fn discoverTabs(arena: std.mem.Allocator, bridge: *Bridge, cfg: Config, cdp_
 
 fn handleDiscover(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge, cfg: Config, cdp_port: u16) void {
     const registered = discoverTabs(arena, bridge, cfg, cdp_port) catch |err| {
-        switch (err) {
-            error.CannotResolveChromeAddress => resp.sendError(request, 502, "Cannot resolve Chrome address"),
-            error.CannotConnectToChrome => resp.sendError(request, 502, "Cannot connect to Chrome"),
-            error.EmptyResponseFromChrome => resp.sendError(request, 502, "Empty response from Chrome"),
-            error.InvalidChromeResponse => resp.sendError(request, 502, "Invalid response from Chrome"),
-            else => resp.sendError(request, 500, "Internal Server Error"),
-        }
+        // Switch on the error NAME (string), not the error value: discoverTabs'
+        // inferred error set differs by platform (on Windows it is just
+        // {NotImplementedOnWindows} because the body is comptime-pruned), so
+        // naming posix-only errors in a value switch would not type-check there.
+        const name = @errorName(err);
+        const code: u10 = if (std.mem.eql(u8, name, "NotImplementedOnWindows")) 501 else 502;
+        resp.sendError(request, code, name);
         return;
     };
 
