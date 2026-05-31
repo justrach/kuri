@@ -269,6 +269,15 @@ pub fn build(b: *std.Build) void {
     }
     const agent_step = b.step("agent", "Run kuri-agent scriptable CLI");
     agent_step.dependOn(&run_agent.step);
+
+    // The CDP websocket transport (src/cdp/websocket.zig) calls into winsock
+    // (ws2_32) on Windows. Link it for every binary that pulls in the CDP path.
+    if (target.result.os.tag == .windows) {
+        const ws_consumers = [_]*std.Build.Step.Compile{
+            exe, unit_tests, merjs_e2e, agent_exe, browse_exe, fetch_exe, bench, sandbox_tests, fetch_tests, browse_tests,
+        };
+        for (ws_consumers) |compile_step| compile_step.root_module.linkSystemLibrary("ws2_32", .{});
+    }
 }
 
 /// Map (cpu.arch, os.tag) → vendor/curl-impersonate subdir name.

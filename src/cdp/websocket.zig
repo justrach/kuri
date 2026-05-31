@@ -2,9 +2,46 @@ const std = @import("std");
 const crypto = std.crypto;
 const compat = @import("../compat.zig");
 
-const posix_net = if (@import("builtin").os.tag == .windows) struct {} else struct {
+const is_windows = @import("builtin").os.tag == .windows;
+
+const posix_net = if (is_windows) struct {} else struct {
     pub const c_connect = @extern(*const fn (std.c.fd_t, *const anyopaque, std.posix.socklen_t) callconv(.c) c_int, .{ .name = "connect" });
 };
+
+// Minimal winsock (ws2_32) bindings for the Windows CDP transport. Declared
+// here — like posix_net above — because Zig 0.16's std.os.windows.ws2_32 omits
+// these function externs. ws2_32 is linked for Windows in build.zig. A winsock
+// SOCKET is a usize handle; we stash it in the existing `fd: std.posix.fd_t`
+// field (a HANDLE/pointer on Windows) via int↔ptr casts so the struct shape is
+// unchanged across platforms.
+const wsock = if (is_windows) struct {
+    pub const SOCKET = usize;
+    pub const INVALID_SOCKET: SOCKET = ~@as(usize, 0);
+    pub const AF_INET: c_int = 2;
+    pub const SOCK_STREAM: c_int = 1;
+    pub const SOL_SOCKET: c_int = 0xffff;
+    pub const SO_RCVTIMEO: c_int = 0x1006;
+    pub const WSADATA = extern struct { _opaque: [512]u8 };
+    pub const sockaddr_in = extern struct {
+        family: u16 = AF_INET,
+        port: u16, // network byte order
+        addr: u32, // network byte order
+        zero: [8]u8 = .{ 0, 0, 0, 0, 0, 0, 0, 0 },
+    };
+    pub extern "ws2_32" fn WSAStartup(wVersionRequested: u16, lpWSAData: *WSADATA) callconv(.winapi) c_int;
+    pub extern "ws2_32" fn socket(af: c_int, typ: c_int, protocol: c_int) callconv(.winapi) SOCKET;
+    pub extern "ws2_32" fn connect(s: SOCKET, name: *const anyopaque, namelen: c_int) callconv(.winapi) c_int;
+    pub extern "ws2_32" fn send(s: SOCKET, buf: [*]const u8, len: c_int, flags: c_int) callconv(.winapi) c_int;
+    pub extern "ws2_32" fn recv(s: SOCKET, buf: [*]u8, len: c_int, flags: c_int) callconv(.winapi) c_int;
+    pub extern "ws2_32" fn setsockopt(s: SOCKET, level: c_int, optname: c_int, optval: [*]const u8, optlen: c_int) callconv(.winapi) c_int;
+    pub extern "ws2_32" fn closesocket(s: SOCKET) callconv(.winapi) c_int;
+    pub fn sockOf(fd: std.posix.fd_t) SOCKET {
+        return @intFromPtr(fd);
+    }
+    pub fn fdOf(s: SOCKET) std.posix.fd_t {
+        return @ptrFromInt(s);
+    }
+} else struct {};
 
 /// Pure Zig WebSocket client for CDP communication.
 /// Implements RFC 6455: HTTP upgrade handshake, masked client frames, unmasked server reads.
@@ -29,31 +66,58 @@ pub const WebSocketClient = struct {
 
     /// Connect to a loopback WebSocket endpoint. url must be like "ws://host:port/path".
     pub fn connect(allocator: std.mem.Allocator, url: []const u8, read_buf: []u8, write_buf: []u8) !WebSocketClient {
-        if (comptime @import("builtin").os.tag == .windows) return error.ConnectionFailed;
         const parsed = try parseWsUrl(url);
 
         // Resolve localhost to 127.0.0.1 — resolveIp fails on some systems
         const resolved_host = if (std.mem.eql(u8, parsed.host, "localhost")) "127.0.0.1" else parsed.host;
         const ip_addr = parseIp4(resolved_host) orelse return Error.ConnectionFailed;
 
-        const raw_fd = std.c.socket(std.posix.AF.INET, std.posix.SOCK.STREAM, 0);
-        if (raw_fd < 0) return Error.ConnectionFailed;
-        const fd: std.posix.fd_t = raw_fd;
-        errdefer _ = std.c.close(fd);
-
-        var addr: std.posix.sockaddr.in = .{
-            .port = std.mem.nativeToBig(u16, parsed.port),
-            .addr = ip_addr,
+        // Open + connect the TCP socket. POSIX uses libc socket()/connect();
+        // Windows uses winsock (ws2_32). Both store the handle in `fd`.
+        const fd: std.posix.fd_t = if (comptime is_windows) blk: {
+            var wsadata: wsock.WSADATA = undefined;
+            if (wsock.WSAStartup(0x0202, &wsadata) != 0) return Error.ConnectionFailed;
+            const s = wsock.socket(wsock.AF_INET, wsock.SOCK_STREAM, 0);
+            if (s == wsock.INVALID_SOCKET) return Error.ConnectionFailed;
+            var addr = wsock.sockaddr_in{
+                .port = std.mem.nativeToBig(u16, parsed.port),
+                .addr = ip_addr,
+            };
+            if (wsock.connect(s, @ptrCast(&addr), @sizeOf(wsock.sockaddr_in)) != 0) {
+                _ = wsock.closesocket(s);
+                return Error.ConnectionFailed;
+            }
+            // Windows SO_RCVTIMEO is a DWORD of milliseconds (not a timeval).
+            const tmo_ms: u32 = 10_000;
+            _ = wsock.setsockopt(s, wsock.SOL_SOCKET, wsock.SO_RCVTIMEO, std.mem.asBytes(&tmo_ms), @sizeOf(u32));
+            break :blk wsock.fdOf(s);
+        } else blk: {
+            const raw_fd = std.c.socket(std.posix.AF.INET, std.posix.SOCK.STREAM, 0);
+            if (raw_fd < 0) return Error.ConnectionFailed;
+            const fd: std.posix.fd_t = raw_fd;
+            var addr: std.posix.sockaddr.in = .{
+                .port = std.mem.nativeToBig(u16, parsed.port),
+                .addr = ip_addr,
+            };
+            if (posix_net.c_connect(fd, @ptrCast(&addr), @sizeOf(std.posix.sockaddr.in)) != 0) {
+                _ = std.c.close(fd);
+                return Error.ConnectionFailed;
+            }
+            // Set read timeout so we don't block forever
+            const timeout = std.posix.timeval{ .sec = 10, .usec = 0 };
+            std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch {
+                _ = std.c.close(fd);
+                return Error.ConnectionFailed;
+            };
+            break :blk fd;
         };
-        if (posix_net.c_connect(fd, @ptrCast(&addr), @sizeOf(std.posix.sockaddr.in)) != 0) {
-            return Error.ConnectionFailed;
+        errdefer {
+            if (comptime is_windows) {
+                _ = wsock.closesocket(wsock.sockOf(fd));
+            } else {
+                _ = std.c.close(fd);
+            }
         }
-
-        // Set read timeout so we don't block forever
-        const timeout = std.posix.timeval{ .sec = 10, .usec = 0 };
-        std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch {
-            return Error.ConnectionFailed;
-        };
 
         var ws = WebSocketClient{
             .allocator = allocator,
@@ -89,13 +153,16 @@ pub const WebSocketClient = struct {
     }
 
     pub fn close(self: *WebSocketClient) void {
-        if (comptime @import("builtin").os.tag == .windows) return;
         if (self.connected) {
             // Send close frame (opcode 8), best effort
             self.writeFrame(0x8, &.{}) catch {};
             self.connected = false;
         }
-        _ = std.c.close(self.fd);
+        if (comptime is_windows) {
+            _ = wsock.closesocket(wsock.sockOf(self.fd));
+        } else {
+            _ = std.c.close(self.fd);
+        }
     }
 
     // --- Internal ---
@@ -230,7 +297,16 @@ pub const WebSocketClient = struct {
     }
 
     fn writeAll(self: *WebSocketClient, data: []const u8) !void {
-        if (comptime @import("builtin").os.tag == .windows) return Error.WriteFailed;
+        if (comptime is_windows) {
+            const s = wsock.sockOf(self.fd);
+            var sent: usize = 0;
+            while (sent < data.len) {
+                const n = wsock.send(s, data.ptr + sent, @intCast(data.len - sent), 0);
+                if (n <= 0) return Error.WriteFailed;
+                sent += @intCast(n);
+            }
+            return;
+        }
         var sent: usize = 0;
         while (sent < data.len) {
             const n = std.c.write(self.fd, data.ptr + sent, data.len - sent);
@@ -240,11 +316,11 @@ pub const WebSocketClient = struct {
     }
 
     fn rawRead(self: *WebSocketClient, buf: []u8) !usize {
-        // std.posix.read is a @compileError on Windows; connect() already
-        // returns ConnectionFailed there, so this path is unreachable on
-        // Windows but must still type-check. (Real winsock recv is the
-        // tracked follow-on for live browse on Windows.)
-        if (comptime @import("builtin").os.tag == .windows) return Error.ReadFailed;
+        if (comptime is_windows) {
+            const n = wsock.recv(wsock.sockOf(self.fd), buf.ptr, @intCast(buf.len), 0);
+            if (n < 0) return Error.ReadFailed;
+            return @intCast(n);
+        }
         return std.posix.read(self.fd, buf) catch return Error.ReadFailed;
     }
 
