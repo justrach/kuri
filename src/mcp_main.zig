@@ -13,8 +13,6 @@ var g_base: []const u8 = "http://127.0.0.1:8080";
 var g_secret: ?[]const u8 = null;
 var g_out: ?*std.Io.Writer = null;
 
-const proto_version = "2024-11-05";
-
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const env = init.environ_map;
@@ -45,23 +43,52 @@ pub fn main(init: std.process.Init) !void {
     }
 }
 
+// Protocol versions we support, newest first. We echo the client's requested
+// version when recognized (old clients reject a newer version than they sent).
+const supported_versions = [_][]const u8{ "2025-06-18", "2025-03-26", "2024-11-05" };
+
+fn negotiateProtocolVersion(requested: []const u8) []const u8 {
+    if (requested.len == 0) return supported_versions[0];
+    for (supported_versions) |v| if (std.mem.eql(u8, v, requested)) return v;
+    // Unknown: future date => our newest; older => our oldest known.
+    if (std.mem.order(u8, requested, supported_versions[0]) == .gt) return supported_versions[0];
+    return supported_versions[supported_versions.len - 1];
+}
+
 fn handleMessage(arena: std.mem.Allocator, line: []const u8) void {
-    const parsed = std.json.parseFromSlice(std.json.Value, arena, line, .{}) catch return;
-    if (parsed.value != .object) return;
+    const trimmed = std.mem.trim(u8, line, " \t\r");
+    if (trimmed.len == 0) return;
+    const parsed = std.json.parseFromSlice(std.json.Value, arena, trimmed, .{}) catch {
+        respondError(arena, null, -32700, "Parse error");
+        return;
+    };
+    if (parsed.value != .object) {
+        respondError(arena, null, -32600, "Invalid Request");
+        return;
+    }
     const obj = parsed.value.object;
-    const method = strField(obj, "method") orelse return;
     const id_val = obj.get("id");
+    const method = strField(obj, "method") orelse return;
 
     if (std.mem.eql(u8, method, "initialize")) {
-        respondRaw(arena, id_val, "{\"protocolVersion\":\"" ++ proto_version ++ "\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"kuri\",\"version\":\"0.5.0\"}}");
+        // Negotiate: echo the client's requested protocolVersion when known.
+        var requested: []const u8 = "";
+        if (obj.get("params")) |p| if (p == .object) {
+            if (strField(p.object, "protocolVersion")) |rv| requested = rv;
+        };
+        const ver = negotiateProtocolVersion(requested);
+        const result = std.fmt.allocPrint(arena, "{{\"protocolVersion\":\"{s}\",\"capabilities\":{{\"tools\":{{}}}},\"serverInfo\":{{\"name\":\"kuri\",\"version\":\"0.5.0\"}}}}", .{ver}) catch return;
+        respondRaw(arena, id_val, result);
     } else if (std.mem.eql(u8, method, "tools/list")) {
-        respondRaw(arena, id_val, tools_list_json);
+        if (id_val != null) respondRaw(arena, id_val, tools_list_json);
     } else if (std.mem.eql(u8, method, "tools/call")) {
         callTool(arena, obj, id_val);
+    } else if (std.mem.eql(u8, method, "ping")) {
+        if (id_val != null) respondRaw(arena, id_val, "{}");
     } else if (std.mem.startsWith(u8, method, "notifications/")) {
         // no response
     } else if (id_val != null) {
-        respondError(arena, id_val, -32601, "method not found");
+        respondError(arena, id_val, -32601, "Method not found");
     }
 }
 
@@ -207,8 +234,8 @@ fn respondRaw(arena: std.mem.Allocator, id_val: ?std.json.Value, result_json: []
 }
 
 fn respondError(arena: std.mem.Allocator, id_val: ?std.json.Value, code: i32, message: []const u8) void {
-    if (id_val == null) return;
-    const id = idToString(arena, id_val.?);
+    // Errors carry id:null when the request id is absent/unparseable (JSON-RPC).
+    const id = if (id_val) |v| idToString(arena, v) else "null";
     const msg = std.fmt.allocPrint(arena, "{{\"jsonrpc\":\"2.0\",\"id\":{s},\"error\":{{\"code\":{d},\"message\":\"{s}\"}}}}\n", .{ id, code, message }) catch return;
     writeAll(msg);
 }
