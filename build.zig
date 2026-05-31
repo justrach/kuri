@@ -57,7 +57,6 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&b.addRunArtifact(unit_tests).step);
 
-
     // merjs E2E test binary
     const compat_mod = b.createModule(.{
         .root_source_file = b.path("src/compat.zig"),
@@ -195,6 +194,26 @@ pub fn build(b: *std.Build) void {
     }
     const agent_step = b.step("agent", "Run kuri-agent scriptable CLI");
     agent_step.dependOn(&run_agent.step);
+
+    // kuri-mcp: Model Context Protocol (stdio) server that forwards to the kuri
+    // HTTP API, exposing chrome-devtools-mcp-compatible tools with kuri's
+    // compact (token-efficient) accessibility snapshot.
+    const mcp_exe = b.addExecutable(.{
+        .name = "kuri-mcp",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/mcp_main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    mcp_exe.root_module.addOptions("build_options", build_options);
+    b.installArtifact(mcp_exe);
+    const run_mcp = b.addRunArtifact(mcp_exe);
+    run_mcp.step.dependOn(b.getInstallStep());
+    if (b.args) |args| run_mcp.addArgs(args);
+    const mcp_step = b.step("mcp", "Run kuri-mcp MCP server");
+    mcp_step.dependOn(&run_mcp.step);
 
     // kuri-connect-broker: key-holding broker daemon for the `connect` feature.
     // Holds KURI_VAULT_PASSPHRASE so the agent never does, and exposes only

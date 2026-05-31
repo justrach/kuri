@@ -1,0 +1,302 @@
+//! kuri-mcp — a Model Context Protocol (stdio JSON-RPC 2.0) server that exposes
+//! kuri's browser automation as MCP tools, with chrome-devtools-mcp-compatible
+//! tool names. It forwards each tool call to a running kuri HTTP server
+//! (KURI_BASE, default http://127.0.0.1:8080; optional KURI_SECRET bearer auth),
+//! so an MCP agent gets kuri's COMPACT accessibility snapshot — far fewer tokens
+//! than chrome-devtools-mcp's take_snapshot for the same page.
+//!
+//! Transport: newline-delimited JSON-RPC over stdin/stdout (std.Io, no libc).
+
+const std = @import("std");
+
+var g_base: []const u8 = "http://127.0.0.1:8080";
+var g_secret: ?[]const u8 = null;
+var g_out: ?*std.Io.Writer = null;
+
+const proto_version = "2024-11-05";
+
+pub fn main(init: std.process.Init) !void {
+    const gpa = init.gpa;
+    const env = init.environ_map;
+    if (env.get("KURI_BASE")) |b| g_base = b;
+    g_secret = env.get("KURI_SECRET");
+
+    var threaded: std.Io.Threaded = .init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const line_buf = try gpa.alloc(u8, 1 << 20);
+    defer gpa.free(line_buf);
+    const in_rbuf = try gpa.alloc(u8, 64 * 1024);
+    defer gpa.free(in_rbuf);
+    const out_wbuf = try gpa.alloc(u8, 64 * 1024);
+    defer gpa.free(out_wbuf);
+
+    var fr = std.Io.File.stdin().reader(io, in_rbuf);
+    var fw = std.Io.File.stdout().writer(io, out_wbuf);
+    g_out = &fw.interface;
+    const r = &fr.interface;
+
+    while (readLine(r, line_buf)) |line| {
+        if (line.len == 0) continue;
+        var arena_impl = std.heap.ArenaAllocator.init(gpa);
+        defer arena_impl.deinit();
+        handleMessage(arena_impl.allocator(), line);
+    }
+}
+
+fn handleMessage(arena: std.mem.Allocator, line: []const u8) void {
+    const parsed = std.json.parseFromSlice(std.json.Value, arena, line, .{}) catch return;
+    if (parsed.value != .object) return;
+    const obj = parsed.value.object;
+    const method = strField(obj, "method") orelse return;
+    const id_val = obj.get("id");
+
+    if (std.mem.eql(u8, method, "initialize")) {
+        respondRaw(arena, id_val, "{\"protocolVersion\":\"" ++ proto_version ++ "\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"kuri\",\"version\":\"0.5.0\"}}");
+    } else if (std.mem.eql(u8, method, "tools/list")) {
+        respondRaw(arena, id_val, tools_list_json);
+    } else if (std.mem.eql(u8, method, "tools/call")) {
+        callTool(arena, obj, id_val);
+    } else if (std.mem.startsWith(u8, method, "notifications/")) {
+        // no response
+    } else if (id_val != null) {
+        respondError(arena, id_val, -32601, "method not found");
+    }
+}
+
+fn callTool(arena: std.mem.Allocator, obj: std.json.ObjectMap, id_val: ?std.json.Value) void {
+    const params = obj.get("params");
+    if (params == null or params.? != .object) return respondError(arena, id_val, -32602, "invalid params");
+    const p = params.?.object;
+    const name = strField(p, "name") orelse return respondError(arena, id_val, -32602, "missing tool name");
+    const args: ?std.json.ObjectMap = if (p.get("arguments")) |av| (if (av == .object) av.object else null) else null;
+
+    // Map chrome-devtools-mcp-compatible tool names to kuri HTTP endpoints.
+    if (std.mem.eql(u8, name, "navigate_page")) {
+        const url = argStr(args, "url") orelse return toolError(arena, id_val, "missing 'url'");
+        forward(arena, id_val, "/navigate", &.{.{ "url", url }}, true);
+    } else if (std.mem.eql(u8, name, "take_snapshot")) {
+        forward(arena, id_val, "/snapshot", &.{.{ "format", "compact" }}, true);
+    } else if (std.mem.eql(u8, name, "click")) {
+        const uid = argStr(args, "uid") orelse return toolError(arena, id_val, "missing 'uid'");
+        forward(arena, id_val, "/action", &.{ .{ "action", "click" }, .{ "ref", uid } }, true);
+    } else if (std.mem.eql(u8, name, "fill")) {
+        const uid = argStr(args, "uid") orelse return toolError(arena, id_val, "missing 'uid'");
+        const value = argStr(args, "value") orelse "";
+        forward(arena, id_val, "/action", &.{ .{ "action", "fill" }, .{ "ref", uid }, .{ "value", value } }, true);
+    } else if (std.mem.eql(u8, name, "hover")) {
+        const uid = argStr(args, "uid") orelse return toolError(arena, id_val, "missing 'uid'");
+        forward(arena, id_val, "/action", &.{ .{ "action", "hover" }, .{ "ref", uid } }, true);
+    } else if (std.mem.eql(u8, name, "type_text")) {
+        const text = argStr(args, "text") orelse return toolError(arena, id_val, "missing 'text'");
+        forward(arena, id_val, "/keyboard/type", &.{.{ "text", text }}, true);
+    } else if (std.mem.eql(u8, name, "evaluate_script")) {
+        const expr = argStr(args, "expression") orelse argStr(args, "function") orelse return toolError(arena, id_val, "missing 'expression'");
+        forward(arena, id_val, "/evaluate", &.{.{ "expression", expr }}, true);
+    } else if (std.mem.eql(u8, name, "take_screenshot")) {
+        forward(arena, id_val, "/screenshot", &.{}, true);
+    } else if (std.mem.eql(u8, name, "list_pages")) {
+        forward(arena, id_val, "/tabs", &.{}, false);
+    } else if (std.mem.eql(u8, name, "new_page")) {
+        const url = argStr(args, "url") orelse "about:blank";
+        forward(arena, id_val, "/tab/new", &.{.{ "url", url }}, false);
+    } else if (std.mem.eql(u8, name, "list_network_requests")) {
+        forward(arena, id_val, "/network", &.{}, true);
+    } else if (std.mem.eql(u8, name, "wait_for")) {
+        const text = argStr(args, "text") orelse return toolError(arena, id_val, "missing 'text'");
+        forward(arena, id_val, "/find", &.{.{ "text", text }}, true);
+    } else {
+        respondError(arena, id_val, -32602, "unknown tool");
+    }
+}
+
+const Param = struct { []const u8, []const u8 };
+
+/// Resolve the current/first tab id from GET /tabs (kuri page-scoped endpoints
+/// need an explicit tab_id since each forwarded request is a fresh connection).
+fn resolveTabId(arena: std.mem.Allocator) ?[]const u8 {
+    const url = std.fmt.allocPrint(arena, "{s}/tabs", .{g_base}) catch return null;
+    const body = kuriGet(arena, url) catch return null;
+    const parsed = std.json.parseFromSlice(std.json.Value, arena, body, .{}) catch return null;
+    if (parsed.value != .array) return null;
+    const arr = parsed.value.array;
+    if (arr.items.len == 0) return null;
+    const first = arr.items[0];
+    if (first != .object) return null;
+    const idv = first.object.get("id") orelse return null;
+    return switch (idv) {
+        .string => |s| arena.dupe(u8, s) catch null,
+        else => null,
+    };
+}
+
+/// GET {base}{path}?k=v&... from the kuri server; return its body as MCP text.
+/// When `with_tab`, a resolved tab_id is added so page-scoped endpoints work.
+fn forward(arena: std.mem.Allocator, id_val: ?std.json.Value, path: []const u8, params: []const Param, with_tab: bool) void {
+    var url: std.ArrayListUnmanaged(u8) = .empty;
+    url.appendSlice(arena, g_base) catch return;
+    url.appendSlice(arena, path) catch return;
+    var first = true;
+    if (with_tab) {
+        if (resolveTabId(arena)) |tab| {
+            url.appendSlice(arena, "?tab_id=") catch return;
+            urlencode(&url, arena, tab) catch return;
+            first = false;
+        }
+    }
+    for (params) |kv| {
+        url.appendSlice(arena, if (first) "?" else "&") catch return;
+        first = false;
+        url.appendSlice(arena, kv[0]) catch return;
+        url.append(arena, '=') catch return;
+        urlencode(&url, arena, kv[1]) catch return;
+    }
+    const body = kuriGet(arena, url.items) catch |err| {
+        return toolError(arena, id_val, @errorName(err));
+    };
+    toolText(arena, id_val, body);
+}
+
+fn kuriGet(arena: std.mem.Allocator, url: []const u8) ![]const u8 {
+    var threaded: std.Io.Threaded = .init(arena, .{});
+    defer threaded.deinit();
+    var client: std.http.Client = .{ .allocator = arena, .io = threaded.io() };
+    defer client.deinit();
+    const uri = try std.Uri.parse(url);
+    var headers: std.ArrayListUnmanaged(std.http.Header) = .empty;
+    if (g_secret) |s| {
+        const bearer = try std.fmt.allocPrint(arena, "Bearer {s}", .{s});
+        try headers.append(arena, .{ .name = "authorization", .value = bearer });
+    }
+    var req = try client.request(.GET, uri, .{ .redirect_behavior = .unhandled, .extra_headers = headers.items });
+    defer req.deinit();
+    try req.sendBodiless();
+    var response = try req.receiveHead(&.{});
+    var rbody: std.ArrayList(u8) = .empty;
+    var tbuf: [16384]u8 = undefined;
+    var dc: std.http.Decompress = undefined;
+    var dbuf: [std.compress.flate.max_window_len]u8 = undefined;
+    const rd = response.readerDecompressing(&tbuf, &dc, &dbuf);
+    try rd.appendRemainingUnlimited(arena, &rbody);
+    return rbody.items;
+}
+
+// ---- JSON-RPC framing (single-line responses) ------------------------------
+
+const tools_list_json = "{\"tools\":[" ++
+    "{\"name\":\"navigate_page\",\"description\":\"Navigate the current page to a URL.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"url\":{\"type\":\"string\"}},\"required\":[\"url\"]}}," ++
+    "{\"name\":\"take_snapshot\",\"description\":\"Compact accessibility-tree snapshot of the page with @uid refs (token-efficient).\",\"inputSchema\":{\"type\":\"object\",\"properties\":{}}}," ++
+    "{\"name\":\"click\",\"description\":\"Click the element with the given uid.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"uid\":{\"type\":\"string\"}},\"required\":[\"uid\"]}}," ++
+    "{\"name\":\"fill\",\"description\":\"Type text into the input/select with the given uid.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"uid\":{\"type\":\"string\"},\"value\":{\"type\":\"string\"}},\"required\":[\"uid\",\"value\"]}}," ++
+    "{\"name\":\"hover\",\"description\":\"Hover the element with the given uid.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"uid\":{\"type\":\"string\"}},\"required\":[\"uid\"]}}," ++
+    "{\"name\":\"type_text\",\"description\":\"Type text into the focused element.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\"}},\"required\":[\"text\"]}}," ++
+    "{\"name\":\"evaluate_script\",\"description\":\"Evaluate JavaScript on the page.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"expression\":{\"type\":\"string\"}},\"required\":[\"expression\"]}}," ++
+    "{\"name\":\"take_screenshot\",\"description\":\"Capture a screenshot of the page.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{}}}," ++
+    "{\"name\":\"list_pages\",\"description\":\"List open pages/tabs.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{}}}," ++
+    "{\"name\":\"new_page\",\"description\":\"Open a new page at a URL.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"url\":{\"type\":\"string\"}}}}," ++
+    "{\"name\":\"list_network_requests\",\"description\":\"List captured network requests.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{}}}," ++
+    "{\"name\":\"wait_for\",\"description\":\"Wait for text to appear on the page.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\"}},\"required\":[\"text\"]}}" ++
+    "]}";
+
+fn respondRaw(arena: std.mem.Allocator, id_val: ?std.json.Value, result_json: []const u8) void {
+    if (id_val == null) return;
+    const id = idToString(arena, id_val.?);
+    const msg = std.fmt.allocPrint(arena, "{{\"jsonrpc\":\"2.0\",\"id\":{s},\"result\":{s}}}\n", .{ id, result_json }) catch return;
+    writeAll(msg);
+}
+
+fn respondError(arena: std.mem.Allocator, id_val: ?std.json.Value, code: i32, message: []const u8) void {
+    if (id_val == null) return;
+    const id = idToString(arena, id_val.?);
+    const msg = std.fmt.allocPrint(arena, "{{\"jsonrpc\":\"2.0\",\"id\":{s},\"error\":{{\"code\":{d},\"message\":\"{s}\"}}}}\n", .{ id, code, message }) catch return;
+    writeAll(msg);
+}
+
+fn toolText(arena: std.mem.Allocator, id_val: ?std.json.Value, text: []const u8) void {
+    const escaped = jsonEscape(arena, text) catch text;
+    const result = std.fmt.allocPrint(arena, "{{\"content\":[{{\"type\":\"text\",\"text\":\"{s}\"}}]}}", .{escaped}) catch return;
+    respondRaw(arena, id_val, result);
+}
+
+fn toolError(arena: std.mem.Allocator, id_val: ?std.json.Value, text: []const u8) void {
+    const escaped = jsonEscape(arena, text) catch text;
+    const result = std.fmt.allocPrint(arena, "{{\"content\":[{{\"type\":\"text\",\"text\":\"{s}\"}}],\"isError\":true}}", .{escaped}) catch return;
+    respondRaw(arena, id_val, result);
+}
+
+fn idToString(arena: std.mem.Allocator, id: std.json.Value) []const u8 {
+    return switch (id) {
+        .integer => |n| std.fmt.allocPrint(arena, "{d}", .{n}) catch "0",
+        .string => |s| std.fmt.allocPrint(arena, "\"{s}\"", .{s}) catch "\"0\"",
+        else => "null",
+    };
+}
+
+fn strField(obj: std.json.ObjectMap, key: []const u8) ?[]const u8 {
+    const v = obj.get(key) orelse return null;
+    return switch (v) {
+        .string => |s| s,
+        else => null,
+    };
+}
+
+fn argStr(args: ?std.json.ObjectMap, key: []const u8) ?[]const u8 {
+    const obj = args orelse return null;
+    return strField(obj, key);
+}
+
+fn jsonEscape(arena: std.mem.Allocator, s: []const u8) ![]const u8 {
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    for (s) |c| switch (c) {
+        '"' => try out.appendSlice(arena, "\\\""),
+        '\\' => try out.appendSlice(arena, "\\\\"),
+        '\n' => try out.appendSlice(arena, "\\n"),
+        '\r' => try out.appendSlice(arena, "\\r"),
+        '\t' => try out.appendSlice(arena, "\\t"),
+        else => if (c < 0x20) {
+            try out.appendSlice(arena, "\\u00");
+            const hex = "0123456789abcdef";
+            try out.append(arena, hex[c >> 4]);
+            try out.append(arena, hex[c & 0xf]);
+        } else try out.append(arena, c),
+    };
+    return out.items;
+}
+
+fn urlencode(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, s: []const u8) !void {
+    for (s) |c| {
+        const unreserved = (c >= 'A' and c <= 'Z') or (c >= 'a' and c <= 'z') or
+            (c >= '0' and c <= '9') or c == '-' or c == '_' or c == '.' or c == '~';
+        if (unreserved) {
+            try buf.append(a, c);
+        } else {
+            const hex = "0123456789ABCDEF";
+            try buf.append(a, '%');
+            try buf.append(a, hex[c >> 4]);
+            try buf.append(a, hex[c & 0x0F]);
+        }
+    }
+}
+
+// ---- stdio over std.Io (no libc) -------------------------------------------
+
+fn readLine(r: *std.Io.Reader, buf: []u8) ?[]const u8 {
+    var i: usize = 0;
+    while (i < buf.len) {
+        const b = r.takeByte() catch {
+            if (i == 0) return null;
+            return buf[0..i];
+        };
+        if (b == '\n') return buf[0..i];
+        buf[i] = b;
+        i += 1;
+    }
+    return buf[0..i];
+}
+
+fn writeAll(bytes: []const u8) void {
+    const w = g_out orelse return;
+    w.writeAll(bytes) catch return;
+    w.flush() catch return;
+}
