@@ -1372,39 +1372,26 @@ fn handleBrowdie(request: *std.http.Server.Request) void {
 }
 
 pub fn discoverTabs(arena: std.mem.Allocator, bridge: *Bridge, cfg: Config, cdp_port: u16) !usize {
-    if (comptime @import("builtin").os.tag == .windows) {
-        // TODO kuri-windows port: replace raw std.c.write socket I/O with
-        // Windows winsock equivalents. Wave-4+ ships compat.socketWrite via WSASend.
-        return error.NotImplementedOnWindows;
-    }
     const cdp_addr = parseCdpAddress(cfg.cdp_url, cdp_port);
     const host = cdp_addr.host;
     const port = cdp_addr.port;
 
-    const io = std.Io.Threaded.global_single_threaded.io();
-    const address = net.IpAddress.parseIp4(host, port) catch return error.CannotResolveChromeAddress;
-    const stream = net.IpAddress.connect(&address, io, .{ .mode = .stream }) catch return error.CannotConnectToChrome;
-    defer stream.close(io);
-
-    // Set read timeout (2 seconds) to avoid blocking forever
-    const timeout = std.posix.timeval{ .sec = 2, .usec = 0 };
-    std.posix.setsockopt(stream.socket.handle, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch {};
+    // GET /json/list over the cross-platform loopback TCP primitive
+    // (winsock on Windows, libc sockets on POSIX). Replaces the former
+    // std.Io.net + raw std.c.write/std.posix.read path that could not run on
+    // Windows (it returned NotImplementedOnWindows, aborting startup).
+    var stream = compat.tcpConnectToIp4(port) catch return error.CannotConnectToChrome;
+    defer stream.close();
 
     // HTTP/1.1 required — Chrome ignores HTTP/1.0
     const http_req = try std.fmt.allocPrint(arena, "GET /json/list HTTP/1.1\r\nHost: {s}:{d}\r\nConnection: close\r\n\r\n", .{ host, port });
-    // Write request using raw syscall
-    var written: usize = 0;
-    while (written < http_req.len) {
-        const rc = std.c.write(stream.socket.handle, http_req.ptr + written, http_req.len - written);
-        if (rc <= 0) return error.CannotConnectToChrome;
-        written += @intCast(rc);
-    }
+    stream.writeAll(http_req) catch return error.CannotConnectToChrome;
 
     // Read response with Content-Length awareness
     var response_buf: [65536]u8 = undefined;
     var total: usize = 0;
     while (total < response_buf.len) {
-        const n = std.posix.read(stream.socket.handle, response_buf[total..]) catch break;
+        const n = stream.read(response_buf[total..]) catch break;
         if (n == 0) break;
         total += n;
         // Once we have headers, check Content-Length to know when body is complete
