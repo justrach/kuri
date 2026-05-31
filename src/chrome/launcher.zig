@@ -3,6 +3,10 @@ const config = @import("../bridge/config.zig");
 const extensions_mod = @import("extensions.zig");
 const compat = @import("../compat.zig");
 
+// Backing storage for the runtime-built %LOCALAPPDATA% Chrome path on Windows
+// (see findChromeBinary). File-scoped so the returned slice outlives the call.
+var win_chrome_path_buf: [512]u8 = undefined;
+
 /// 🧁 Chrome lifecycle manager — launch, supervise, restart.
 /// Handles spawning headless Chrome with CDP debugging port,
 /// health-checking via /json/version, and auto-restart on crash.
@@ -50,6 +54,11 @@ pub const Launcher = struct {
     const chrome_paths = switch (@import("builtin").os.tag) {
         .macos => &[_][]const u8{
             "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        },
+        .windows => &[_][]const u8{
+            "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+            "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
+            "C:\\Program Files\\Chromium\\Application\\chrome.exe",
         },
         else => &[_][]const u8{
             "chrome",
@@ -290,6 +299,20 @@ pub const Launcher = struct {
     /// Find the first Chrome binary that exists on this system.
     /// Find the first Chrome binary that exists on this system.
     fn findChromeBinary() ?[]const u8 {
+        // Per-user Chrome install lives under %LOCALAPPDATA% (not a compile-time
+        // constant). Check it first on Windows; the buffer is file-scoped so the
+        // returned slice stays valid for the process lifetime.
+        if (comptime @import("builtin").os.tag == .windows) {
+            if (compat.getenv("LOCALAPPDATA")) |local| {
+                const suffix = "\\Google\\Chrome\\Application\\chrome.exe";
+                if (local.len + suffix.len < win_chrome_path_buf.len) {
+                    @memcpy(win_chrome_path_buf[0..local.len], local);
+                    @memcpy(win_chrome_path_buf[local.len..][0..suffix.len], suffix);
+                    const candidate = win_chrome_path_buf[0 .. local.len + suffix.len];
+                    if (isExecutablePath(candidate)) return candidate;
+                }
+            }
+        }
         return findExecutableCandidate(chrome_paths, compat.getenv("PATH"));
     }
 
@@ -556,7 +579,11 @@ fn joinPath(buf: []u8, raw_dir: []const u8, name: []const u8) ?[]const u8 {
 }
 
 fn isExecutablePath(path: []const u8) bool {
-    if (comptime @import("builtin").os.tag == .windows) return false; // POSIX access/chmod/fork chain
+    if (comptime @import("builtin").os.tag == .windows) {
+        // No POSIX exec bit on Windows; an .exe is "executable" if it exists.
+        // compat.cwdAccess uses mingw's access(F_OK) — an existence probe.
+        return compat.cwdAccess(path);
+    }
     if (path.len == 0 or path.len >= 4096) return false;
 
     var path_buf: [4096]u8 = undefined;
