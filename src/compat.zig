@@ -425,16 +425,57 @@ pub fn isPortInUse(port: u16) bool {
 }
 
 /// A minimal TCP stream wrapping a C socket fd.
+// Winsock (ws2_32) bindings for the Windows TCP path. ws2_32 is linked for the
+// relevant binaries in build.zig. A SOCKET (usize) is stashed in the fd_t field
+// (a HANDLE/pointer on Windows) via int↔ptr casts so TcpStream is shape-stable.
+const wsock = if (is_windows) struct {
+    pub const SOCKET = usize;
+    pub const INVALID_SOCKET: SOCKET = ~@as(usize, 0);
+    pub const AF_INET: c_int = 2;
+    pub const SOCK_STREAM: c_int = 1;
+    pub const WSADATA = extern struct { _opaque: [512]u8 };
+    pub const sockaddr_in = extern struct {
+        family: u16 = AF_INET,
+        port: u16,
+        addr: u32,
+        zero: [8]u8 = .{ 0, 0, 0, 0, 0, 0, 0, 0 },
+    };
+    pub extern "ws2_32" fn WSAStartup(v: u16, d: *WSADATA) callconv(.winapi) c_int;
+    pub extern "ws2_32" fn socket(af: c_int, t: c_int, p: c_int) callconv(.winapi) SOCKET;
+    pub extern "ws2_32" fn connect(s: SOCKET, name: *const anyopaque, namelen: c_int) callconv(.winapi) c_int;
+    pub extern "ws2_32" fn send(s: SOCKET, buf: [*]const u8, len: c_int, flags: c_int) callconv(.winapi) c_int;
+    pub extern "ws2_32" fn recv(s: SOCKET, buf: [*]u8, len: c_int, flags: c_int) callconv(.winapi) c_int;
+    pub extern "ws2_32" fn closesocket(s: SOCKET) callconv(.winapi) c_int;
+    pub fn sockOf(fd: fd_t) SOCKET {
+        return @intFromPtr(fd);
+    }
+    pub fn fdOf(s: SOCKET) fd_t {
+        return @ptrFromInt(s);
+    }
+} else struct {};
+
 pub const TcpStream = struct {
     fd: fd_t,
 
     pub fn close(self: TcpStream) void {
-        if (comptime is_windows) return;
+        if (comptime is_windows) {
+            _ = wsock.closesocket(wsock.sockOf(self.fd));
+            return;
+        }
         _ = c.close(self.fd);
     }
 
     pub fn writeAll(self: TcpStream, data: []const u8) !void {
-        if (comptime is_windows) return error.NotImplementedOnWindows;
+        if (comptime is_windows) {
+            const s = wsock.sockOf(self.fd);
+            var sent: usize = 0;
+            while (sent < data.len) {
+                const n = wsock.send(s, data.ptr + sent, @intCast(data.len - sent), 0);
+                if (n <= 0) return error.BrokenPipe;
+                sent += @intCast(n);
+            }
+            return;
+        }
         var sent: usize = 0;
         while (sent < data.len) {
             const n = c.write(self.fd, data[sent..].ptr, data.len - sent);
@@ -444,28 +485,50 @@ pub const TcpStream = struct {
     }
 
     pub fn read(self: TcpStream, buf: []u8) !usize {
-        if (comptime is_windows) return error.NotImplementedOnWindows;
+        if (comptime is_windows) {
+            const n = wsock.recv(wsock.sockOf(self.fd), buf.ptr, @intCast(buf.len), 0);
+            if (n < 0) return error.ConnectionResetByPeer;
+            return @intCast(n);
+        }
         const n = c.read(self.fd, buf.ptr, buf.len);
         if (n < 0) return error.ConnectionResetByPeer;
         return @intCast(n);
     }
 
     pub fn write(self: TcpStream, data: []const u8) !usize {
-        if (comptime is_windows) return error.NotImplementedOnWindows;
+        if (comptime is_windows) {
+            const n = wsock.send(wsock.sockOf(self.fd), data.ptr, @intCast(data.len), 0);
+            if (n <= 0) return error.BrokenPipe;
+            return @intCast(n);
+        }
         const n = c.write(self.fd, data.ptr, data.len);
         if (n <= 0) return error.BrokenPipe;
         return @intCast(n);
     }
 
     pub fn setSockOpt(self: TcpStream, level: i32, optname: u32, optval: []const u8) void {
-        if (comptime is_windows) return;
+        if (comptime is_windows) return; // optional tuning; safe to skip on Windows
         _ = c.setsockopt(self.fd, level, optname, optval.ptr, @intCast(optval.len));
     }
 };
 
 /// Connect to 127.0.0.1:port via TCP. Returns a TcpStream.
 pub fn tcpConnectToIp4(port: u16) !TcpStream {
-    if (comptime is_windows) return error.NotImplementedOnWindows;
+    if (comptime is_windows) {
+        var wsadata: wsock.WSADATA = undefined;
+        if (wsock.WSAStartup(0x0202, &wsadata) != 0) return error.SocketCreateFailed;
+        const s = wsock.socket(wsock.AF_INET, wsock.SOCK_STREAM, 0);
+        if (s == wsock.INVALID_SOCKET) return error.SocketCreateFailed;
+        var addr = wsock.sockaddr_in{
+            .port = htons(port),
+            .addr = 0x0100007F, // 127.0.0.1
+        };
+        if (wsock.connect(s, @ptrCast(&addr), @sizeOf(wsock.sockaddr_in)) != 0) {
+            _ = wsock.closesocket(s);
+            return error.ConnectionRefused;
+        }
+        return .{ .fd = wsock.fdOf(s) };
+    }
     const fd = c.socket(c.AF.INET, c.SOCK.STREAM, 0);
     if (fd < 0) return error.SocketCreateFailed;
 
