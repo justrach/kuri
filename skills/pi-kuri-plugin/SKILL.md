@@ -5,9 +5,31 @@ description: Kuri browser automation for pi.dev agents — navigate, screenshot,
 
 # Pi Kuri Plugin
 
-Kuri is a Zig-native browser automation server. This plugin provides a CLI
-wrapper (`kuri-skill`) and on-demand reference docs for agent-driven browser
-automation via Kuri's HTTP API.
+Kuri is a Zig-native browser automation server. This plugin provides:
+- A Pi agent extension (`pi-kuri.ts`) with registered tools for agent-driven
+  browser automation — navigate, screenshot, snap, click, type, evaluate, etc.
+- A CLI wrapper (`kuri-skill`) for human use in the terminal
+- On-demand reference docs for both tiers
+
+### Two Ways to Use Kuri
+
+| Method | What it gives you | When to use |
+|--------|-------------------|-------------|
+| **Pi extension** 🧠 | Registered tools: `kuri_navigate`, `kuri_snap`, `kuri_screenshot`, `kuri_text`, `kuri_evaluate`, `kuri_click`, `kuri_console_errors`, etc. | The agent drives the browser directly via tool calls |
+| **CLI** ⌨️ | `kuri-skill` command: navigate, screenshot, text, markdown, snap, click, type | Human-in-the-loop or scripts |
+
+The extension is the primary interface for pi.dev agents. The CLI is for
+manual use, debugging, and scripting.
+
+### Install the Extension
+
+Symlink `pi-kuri.ts` into your pi.dev agent extensions directory:
+
+```bash
+ln -s $(pwd)/pi-kuri.ts ~/.pi/agent/extensions/pi-kuri.ts
+```
+
+After restarting pi.dev, the agent will have all Kuri tools available.
 
 ### Getting `kuri-skill` on PATH
 

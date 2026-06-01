@@ -5,6 +5,9 @@ screenshot, extract page content, and interact with web pages via Kuri's HTTP AP
 
 This package provides:
 
+- **`pi-kuri.ts`** — Pi agent extension registering Kuri tools (`kuri_navigate`,
+  `kuri_snap`, `kuri_screenshot`, `kuri_text`, `kuri_evaluate`, `kuri_click`,
+  `kuri_console_errors`, etc.) for agent-driven browser automation
 - **`kuri-skill` CLI** — a portable Node.js wrapper around Kuri's HTTP API
 - **`SKILL.md`** — pi.dev agent skill with two-tier progressive disclosure
 - **`references/ADVANCED.md`** — on-demand reference for click, type, JS eval, etc.
@@ -27,6 +30,16 @@ pi install npm:pi-kuri-skill
 ```bash
 npm install -g pi-kuri-skill
 ```
+
+### Extension setup
+
+To make the Pi extension available to your agent:
+
+```bash
+ln -s $(pwd)/pi-kuri.ts ~/.pi/agent/extensions/pi-kuri.ts
+```
+
+Then restart pi.dev. The agent will have all Kuri tools registered.
 
 Then use the `kuri-skill` command:
 
