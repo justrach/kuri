@@ -29,9 +29,7 @@
  *   kuri-skill advanced               # Print reference to ADVANCED.md
  */
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
-import { createWriteStream } from "node:fs";
-import { get } from "node:https";
+import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -78,7 +76,7 @@ function headers(session) {
 
 function isKuriInstalled() {
   try {
-    execSync("which kuri", { stdio: "ignore" });
+    execSync("command -v kuri", { stdio: "ignore" });
     return true;
   } catch {
     return false;
@@ -247,7 +245,7 @@ async function cmdTabs() {
 
 async function cmdTabNew(url) {
   const params = {};
-  if (url) params.url = encodeURI(url);
+  if (url) params.url = url;
   const data = await kuriFetch("/tab/new", params);
   const tabId = data?.result?.tabId || data?.result?.id || data?.id || "";
   if (tabId) {
@@ -298,20 +296,8 @@ async function resolveTabId(requested) {
 async function cmdPageInfo(tabId) {
   const params = {};
   if (tabId) params.tab_id = tabId;
-  // Kuri v0.4.1+ may not have /page-info; fall back to /tabs filtered by tab
-  try {
-    const data = await kuriFetch("/page-info", params);
-    printJson(data);
-  } catch (err) {
-    // Fallback: list tabs and find the requested one
-    const tabs = await kuriFetch("/tabs");
-    const list = Array.isArray(tabs) ? tabs : (tabs.tabs || tabs.result || []);
-    if (tabId) {
-      const tab = list.find((t) => t.id === tabId);
-      if (tab) {
-        console.log(JSON.stringify({ url: tab.url, title: tab.title, current: tab.current || false }, null, 2));
-        return;
-      }
+  const data = await kuriFetch("/page/info", params);
+  printJson(data);
     }
     // Show current tab info
     const current = list.find((t) => t.current);
@@ -588,15 +574,29 @@ Utilities:
         // Parse remaining args: action <subcommand> [key=value...]
         const sub = args[0];
         const actionArgs = {};
+        const actionSchemas = {
+          // Schema: [paramName, ...] for positional filling
+          // null means all remaining become expression
+          click: ["ref"],
+          type: ["ref", "value"],
+          fill: ["ref", "value"],
+          select: ["ref", "value"],
+          scroll: ["direction", "amount"],
+          evaluate: null,
+          "close-tab": ["tab_id"],
+        };
         for (let i = 1; i < args.length; i++) {
           if (args[i].includes("=")) {
             const [k, ...v] = args[i].split("=");
             actionArgs[k] = v.join("=");
-          } else if (!actionArgs.ref && !["back", "forward", "reload"].includes(sub)) {
-            // Positional args fill in as needed
-            if (!actionArgs.ref) actionArgs.ref = args[i];
-            else if (!actionArgs.value) actionArgs.value = args[i];
-            else if (!actionArgs.direction) actionArgs.direction = args[i];
+          } else if (actionSchemas[sub]) {
+            // Positional: fill schema slots in order
+            const slot = actionSchemas[sub][Object.keys(actionArgs).length];
+            if (slot) actionArgs[slot] = args[i];
+          } else if (actionSchemas[sub] === null) {
+            // evaluate: join all remaining as expression
+            actionArgs.expression = args.slice(1).join(" ");
+            break;
           }
         }
         await cmdAction(sub, actionArgs);
