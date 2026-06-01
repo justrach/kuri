@@ -502,6 +502,8 @@ The lowest-friction server loop is:
 The repo includes a user-extensible skill area:
 
 - `skills/kuri-skill.md` is the base Kuri HTTP-agent skill
+- `skills/pi-kuri-skills.md` is a two-tier pi.dev skill (core operations + compact advanced hint)
+- `skills/pi-kuri-advanced.md` is the companion advanced reference for pi.dev (click, type, scroll, JS eval, cookies, audit, HAR, etc.)
 - `skills/custom/` is reserved for your own project-specific skills
 - `skills/custom/hackernews-page-2.md` is a concrete example custom skill
 - `.claude/skills/kuri-server/SKILL.md` stays in sync for Claude-style repo skills
