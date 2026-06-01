@@ -1,4 +1,5 @@
 zig-out/
+zig-pkg/
 .zig-cache/
 __pycache__/
 *.pyc

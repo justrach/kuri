@@ -982,6 +982,7 @@ kuri/
 | `PORT` | `8080` | Server port |
 | `CDP_URL` | *(none)* | Connect to existing Chrome (`ws://...` or `http://127.0.0.1:9222`) |
 | `KURI_SECRET` | *(none)* | Auth secret for API requests |
+| `KURI_ALLOW_PRIVATE` | *(none)* | Set to `1` or `true` to bypass localhost/private-IP SSRF blocking (for local dev/testing) |
 | `STATE_DIR` | `.kuri` | Session state directory |
 | `REQUEST_TIMEOUT_MS` | `30000` | HTTP request timeout |
 | `NAVIGATE_TIMEOUT_MS` | `30000` | Navigation timeout |

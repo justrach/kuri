@@ -22,20 +22,28 @@ pub fn validateUrl(url: []const u8) ValidationError!void {
     var normalized_host_buf: [256]u8 = undefined;
     const host = normalizeHost(raw_host, &normalized_host_buf) orelse return ValidationError.InvalidUrl;
 
-    if (isLocalhostAlias(host) or std.mem.eql(u8, host, "127.0.0.1") or std.mem.eql(u8, host, "::1")) {
-        return ValidationError.LocalhostBlocked;
-    }
+    // KURI_ALLOW_PRIVATE=1 bypasses localhost and private-IP checks for local dev/testing.
+    const allow_private = if (compat.getenv("KURI_ALLOW_PRIVATE")) |val|
+        std.mem.eql(u8, val, "1") or std.mem.eql(u8, val, "true")
+    else
+        false;
 
-    if (isMetadataIpv4(host) or std.mem.eql(u8, host, "100.100.100.200")) {
-        return ValidationError.MetadataIpBlocked;
-    }
+    if (!allow_private) {
+        if (isLocalhostAlias(host) or std.mem.eql(u8, host, "127.0.0.1") or std.mem.eql(u8, host, "::1")) {
+            return ValidationError.LocalhostBlocked;
+        }
 
-    if (isPrivateIpv4(host)) {
-        return ValidationError.PrivateIp;
-    }
+        if (isMetadataIpv4(host) or std.mem.eql(u8, host, "100.100.100.200")) {
+            return ValidationError.MetadataIpBlocked;
+        }
 
-    if (isPrivateIpv6(host)) {
-        return ValidationError.PrivateIp;
+        if (isPrivateIpv4(host)) {
+            return ValidationError.PrivateIp;
+        }
+
+        if (isPrivateIpv6(host)) {
+            return ValidationError.PrivateIp;
+        }
     }
 }
 
@@ -338,4 +346,62 @@ test "extractHost" {
     try std.testing.expectEqualStrings("example.com", extractHost("https://user:pass@example.com/path").?);
     try std.testing.expectEqualStrings("::1", extractHost("http://[::1]").?);
     try std.testing.expectEqualStrings("fe80::1", extractHost("http://[fe80::1]").?);
+}
+
+extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+
+const env_set = struct {
+    fn set(name: []const u8, value: []const u8) void {
+        var name_buf: [256]u8 = undefined;
+        var value_buf: [256]u8 = undefined;
+        @memcpy(name_buf[0..name.len], name);
+        name_buf[name.len] = 0;
+        @memcpy(value_buf[0..value.len], value);
+        value_buf[value.len] = 0;
+        _ = setenv(name_buf[0..name.len :0], value_buf[0..value.len :0], 1);
+    }
+    fn unset(name: []const u8) void {
+        var name_buf: [256]u8 = undefined;
+        @memcpy(name_buf[0..name.len], name);
+        name_buf[name.len] = 0;
+        _ = unsetenv(name_buf[0..name.len :0]);
+    }
+};
+
+test "KURI_ALLOW_PRIVATE=1 allows localhost" {
+    env_set.set("KURI_ALLOW_PRIVATE", "1");
+    defer env_set.unset("KURI_ALLOW_PRIVATE");
+    try validateUrl("http://localhost");
+    try validateUrl("http://127.0.0.1");
+    try validateUrl("http://[::1]");
+}
+
+test "KURI_ALLOW_PRIVATE=1 allows private IPv4" {
+    env_set.set("KURI_ALLOW_PRIVATE", "1");
+    defer env_set.unset("KURI_ALLOW_PRIVATE");
+    try validateUrl("http://10.0.0.1");
+    try validateUrl("http://172.16.0.1");
+    try validateUrl("http://192.168.1.1");
+}
+
+test "KURI_ALLOW_PRIVATE=1 allows metadata IPs" {
+    env_set.set("KURI_ALLOW_PRIVATE", "1");
+    defer env_set.unset("KURI_ALLOW_PRIVATE");
+    try validateUrl("http://169.254.169.254");
+    try validateUrl("http://100.100.100.200");
+}
+
+test "KURI_ALLOW_PRIVATE=1 allows private IPv6" {
+    env_set.set("KURI_ALLOW_PRIVATE", "1");
+    defer env_set.unset("KURI_ALLOW_PRIVATE");
+    try validateUrl("http://[fe80::1]");
+    try validateUrl("http://[fc00::1]");
+}
+
+test "KURI_ALLOW_PRIVATE=true also works" {
+    env_set.set("KURI_ALLOW_PRIVATE", "true");
+    defer env_set.unset("KURI_ALLOW_PRIVATE");
+    try validateUrl("http://localhost");
+    try validateUrl("http://10.0.0.1");
 }
