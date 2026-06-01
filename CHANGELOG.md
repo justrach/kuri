@@ -2,6 +2,11 @@
 
 All notable changes to kuri are documented here.
 
+## [Unreleased]
+
+### Features
+- **`KURI_ALLOW_PRIVATE` env var** — set `KURI_ALLOW_PRIVATE=1` or `=true` to bypass the SSRF localhost and private-IP block. Useful for local development and testing where kuri needs to reach servers on localhost or private networks.
+
 ## [0.4.4] — 2026-05-24
 
 ### Features — beyond parity (142 HTTP endpoints)
