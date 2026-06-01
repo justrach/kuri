@@ -1,0 +1,23 @@
+{
+  "name": "pi-kuri-skill",
+  "version": "1.0.0",
+  "description": "Pi skill for Kuri browser automation — navigate, screenshot, interact, extract. Installable pi.dev plugin for the Kuri Zig-native browser automation server.",
+  "keywords": ["pi-package", "agent-skills", "kuri", "browser-automation"],
+  "type": "module",
+  "bin": {
+    "kuri-skill": "./scripts/kuri.js"
+  },
+  "pi": {
+    "extensions": ["./pi-kuri.ts"],
+    "skills": ["."]
+  },
+  "scripts": {
+    "test": "node scripts/kuri.js health",
+    "start": "node scripts/kuri.js"
+  },
+  "dependencies": {},
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  }
+}
