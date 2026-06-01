@@ -1,22 +1,25 @@
 ---
-name: pi-kuri-skills
-description: Kuri browser automation for pi.dev agents — navigate, screenshot, extract content, and interact with web pages via the Kuri HTTP server. Use when an agent needs to browse the web, read pages, take screenshots, or perform browser interactions. Commands use the `kuri-skill` CLI from `skills/pi-kuri-plugin/`. For advanced operations (click, type, scroll, etc.) read `skills/pi-kuri-advanced.md`.
+name: pi-kuri
+description: Kuri browser automation for pi.dev agents — navigate, screenshot, extract content, and interact with web pages via the Kuri HTTP server. Use when an agent needs to browse the web, read pages, take screenshots, or perform browser interactions. This is the pi.dev plugin skill — see skills/pi-kuri-skills.md for the canonical reference.
 ---
 
-# Pi Kuri Skills
+# Pi Kuri Plugin
 
-Kuri is a Zig-native browser automation server. This skill uses the
-`kuri-skill` CLI wrapper from `skills/pi-kuri-plugin/` to drive Kuri's
-HTTP API — no curl, no manual HTTP calls.
+Kuri is a Zig-native browser automation server. This plugin provides a CLI
+wrapper (`kuri-skill`) and on-demand reference docs for agent-driven browser
+automation via Kuri's HTTP API.
 
-If `kuri-skill` is not available globally, install it:
+### Getting `kuri-skill` on PATH
 
 ```bash
-cd skills/pi-kuri-plugin
-npm install
-npm link            # makes `kuri-skill` available on PATH
-# or
-node scripts/kuri.js <command>
+# From the plugin directory (when installed from npm):
+npm link
+
+# Or run directly:
+node path/to/scripts/kuri.js <command>
+
+# When installed globally:
+npm install -g pi-kuri-skill
 ```
 
 This skill has two tiers:
@@ -24,7 +27,10 @@ This skill has two tiers:
 | Tier | Covered here | When to use |
 |------|-------------|-------------|
 | **Core** 🟢 | Server health check, start, navigate, screenshot, page info, text & markdown extraction, links, accessibility snapshots | Most tasks |
-| **Advanced** 🔵 | Click, type, fill, select, scroll, JS eval, cookies, audit, HAR, session mgmt | Read `skills/pi-kuri-advanced.md` on demand |
+| **Advanced** 🔵 | Click, type, fill, select, scroll, JS eval, cookies, audit, HAR, session mgmt | Run `kuri-skill advanced` or read `skills/pi-kuri-advanced.md` |
+
+> **Direct HTTP alternative:** If you don't have Node.js, all operations work
+> via direct HTTP calls — see `skills/pi-kuri-skills.md` for details.
 
 ---
 
@@ -71,6 +77,8 @@ Returns the active session's tabs with their IDs, URLs, and titles.
 ---
 
 ## 2. Core Operations
+
+All examples use the `kuri-skill` CLI.
 
 ### Create a tab and navigate
 
@@ -121,11 +129,19 @@ become stale once the page updates.
 ## 3. Advanced Operations
 
 For click, type, fill, select, scroll, JavaScript evaluation, cookies, security
-audits, HAR recording, and session management, read:
+audits, HAR recording, and session management:
 
+```bash
+kuri-skill advanced          # Print the path to the advanced reference
 ```
-skills/pi-kuri-advanced.md
+
+Or read the reference directly:
+
+```bash
+read skills/pi-kuri-plugin/references/ADVANCED.md
 ```
+
+The canonical advanced reference is at `skills/pi-kuri-advanced.md`.
 
 **What's available at a glance:**
 
@@ -139,23 +155,22 @@ skills/pi-kuri-advanced.md
 | 🔒 Security | audit headers, cookies, HTTPS, mixed content |
 | 📡 HAR | HTTP archive recording (start, stop, export) |
 | 📑 Tabs & Sessions | multi-tab, multi-session orchestration |
-| 🧪 Experimental | kuri-browser render, bench, parity, serve-cdp |
-
-Read the advanced file only when you need one of those capabilities.
 
 ---
 
 ## Tips
 
-- **Prefer `kuri-skill` with sessions** — set `KURI_SESSION` env var to group
-  tabs without repeating `tab_id` on every call.
-- **Call `kuri-skill page-info` before acting** — confirm the right page is loaded.
-- **Treat refs as snapshot-local** — refresh after navigation or DOM updates.
-- **`KURI_ALLOW_PRIVATE=1`** — if you need to reach localhost or private IPs
-  during development, set this before starting the Kuri server.
+- **Prefer sessions** — set `KURI_SESSION` env var to group tabs without
+  repeating `tab_id` on every call.
+- **Call `page-info` before acting** — confirm the right page is loaded.
+- **Use `KURI_ALLOW_PRIVATE=1`** — if you need to reach localhost or private
+  IPs during development, set this before starting the Kuri server.
 
-## Plugin reference
+## Configuration
 
-- `skills/pi-kuri-plugin/` — the npm-installable plugin with `kuri-skill` CLI
-- `skills/pi-kuri-plugin/package.json` — `pi.skills` field for pi auto-discovery
-- `skills/pi-kuri-plugin/SKILL.md` — pi agent skill (synchronized with this file)
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `KURI_BASE_URL` | `http://127.0.0.1:8080` | Kuri server URL |
+| `KURI_SESSION` | `pi-kuri-skill` | Active session ID |
+| `KURI_API_TOKEN` | (from `~/.kuri/api.token`) | API auth token |
+| `KURI_OUTPUT` | `/tmp/kuri-*.png` | Screenshot output path |
