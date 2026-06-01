@@ -33,13 +33,9 @@ npm install -g pi-kuri-skill
 
 ### Extension setup
 
-To make the Pi extension available to your agent:
-
-```bash
-ln -s $(pwd)/pi-kuri.ts ~/.pi/agent/extensions/pi-kuri.ts
-```
-
-Then restart pi.dev. The agent will have all Kuri tools registered.
+That's it. `pi install` handles everything — it registers the extension (tools like
+`kuri_navigate`, `kuri_snap`, `kuri_screenshot`, etc.) and the skill (`SKILL.md`)
+in one step. Restart pi.dev and the agent will have all Kuri tools available.
 
 Then use the `kuri-skill` command:
 

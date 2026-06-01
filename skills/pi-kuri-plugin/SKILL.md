@@ -23,13 +23,9 @@ manual use, debugging, and scripting.
 
 ### Install the Extension
 
-Symlink `pi-kuri.ts` into your pi.dev agent extensions directory:
-
-```bash
-ln -s $(pwd)/pi-kuri.ts ~/.pi/agent/extensions/pi-kuri.ts
-```
-
-After restarting pi.dev, the agent will have all Kuri tools available.
+The package registers itself. `pi install npm:pi-kuri-skill` handles the
+extension — no manual symlink needed. Restart pi.dev and the agent will
+have all Kuri tools available.
 
 ### Getting `kuri-skill` on PATH
 

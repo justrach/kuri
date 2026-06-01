@@ -43,7 +43,8 @@ within minutes. No separate submission is needed.
   "version": "1.0.0",
   "keywords": ["pi-package", "agent-skills", "kuri", "browser-automation"],
   "pi": {
-    "skills": ["."]           ← tells pi.dev to find SKILL.md in package root
+    "extensions": ["./pi-kuri.ts"],   ← registers Kuri tools
+    "skills": ["."]                     ← registers SKILL.md
   }
 }
 ```
@@ -56,12 +57,20 @@ For gallery previews, you can add optional metadata:
 ```json
 {
   "pi": {
+    "extensions": ["./pi-kuri.ts"],
     "skills": ["."],
     "image": "https://kuri.gg/screenshot.png",
     "video": "https://kuri.gg/demo.mp4"
   }
 }
 ```
+
+### Extension auto-registration
+
+Because `package.json` declares `"extensions": ["./pi-kuri.ts"]`, running
+`pi install npm:pi-kuri-skill` automatically registers all Kuri tools
+(`kuri_navigate`, `kuri_snap`, `kuri_screenshot`, etc.) — no manual symlink
+or copy step needed.
 
 ## Step-by-Step: Publish a Release
 

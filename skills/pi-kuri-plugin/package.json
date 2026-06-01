@@ -8,6 +8,7 @@
     "kuri-skill": "./scripts/kuri.js"
   },
   "pi": {
+    "extensions": ["./pi-kuri.ts"],
     "skills": ["."]
   },
   "scripts": {
