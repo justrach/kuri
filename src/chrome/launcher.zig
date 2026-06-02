@@ -152,9 +152,17 @@ pub const Launcher = struct {
             try argv_list.append(self.allocator, "--headless=new");
             try argv_list.append(self.allocator, "--disable-gpu");
         } else {
-            // Visible mode: needs a data dir for CDP to work on macOS
+            // Visible mode: needs a data dir for CDP to work on macOS. Use a
+            // PER-PORT profile, not one shared $HOME/.kuri/chrome-profile:
+            // concurrent visible Chromes (each on its own CDP port, e.g. during
+            // interactive logins across parallel sessions) used to share one
+            // profile, so Chrome's SingletonLock + cookie-DB clobber-on-close made
+            // one session overwrite another's login -> the "logins constantly
+            // purged / logged out" bug. Per-port isolates concurrent instances;
+            // cross-session cookie persistence is the auth-profile vault's job
+            // (authProfileLoad on browse_go re-injects each domain's cookies).
             const home = compat.getenv("HOME") orelse "/tmp";
-            const data_dir = try std.fmt.allocPrint(self.allocator, "--user-data-dir={s}/.kuri/chrome-profile", .{home});
+            const data_dir = try std.fmt.allocPrint(self.allocator, "--user-data-dir={s}/.kuri/chrome-profile-{d}", .{ home, self.cdp_port });
             try argv_list.append(self.allocator, data_dir);
         }
         // Only use --no-sandbox on Linux (needed for containers), it's a detection signal on macOS
