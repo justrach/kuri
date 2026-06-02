@@ -1,4 +1,5 @@
 const std = @import("std");
+const compat = @import("../compat.zig");
 
 /// Builtin extension files — embedded at compile time, zero runtime I/O to read them.
 const builtin_manifest = @embedFile("js/extensions/kuri-builtin/manifest.json");
@@ -22,13 +23,13 @@ const builtin_files = [_]BuiltinFile{
 /// Writes to `<state_dir>/builtin-ext/`. Overwrites existing files
 /// so the extension stays in sync with the binary version.
 /// Returns an allocator-owned path string the caller must free.
-pub fn extractBuiltinExtension(allocator: std.mem.Allocator, state_dir: []const u8) ![]const u8 {
-    const home = std.posix.getenv("HOME") orelse "/tmp";
+pub fn extractBuiltinExtension(allocator: std.mem.Allocator, io: std.Io, state_dir: []const u8) ![]const u8 {
+    const home = compat.getenv("HOME") orelse "/tmp";
     const ext_dir = try std.fmt.allocPrint(allocator, "{s}/{s}/builtin-ext", .{ home, state_dir });
     errdefer allocator.free(ext_dir);
 
     // Ensure directory exists
-    std.fs.cwd().makePath(ext_dir) catch |err| {
+    std.Io.Dir.cwd().createDirPath(io, ext_dir) catch |err| {
         std.log.err("failed to create builtin extension dir {s}: {}", .{ ext_dir, err });
         return err;
     };
@@ -38,12 +39,7 @@ pub fn extractBuiltinExtension(allocator: std.mem.Allocator, state_dir: []const 
         const file_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ ext_dir, file.name });
         defer allocator.free(file_path);
 
-        const out = std.fs.cwd().createFile(file_path, .{}) catch |err| {
-            std.log.err("failed to write {s}: {}", .{ file_path, err });
-            return err;
-        };
-        defer out.close();
-        out.writeAll(file.data) catch |err| {
+        compat.cwdWriteFile(file_path, file.data) catch |err| {
             std.log.err("failed to write {s}: {}", .{ file_path, err });
             return err;
         };
@@ -70,13 +66,13 @@ test "extractBuiltinExtension creates files" {
     // Use a temp dir to avoid polluting ~/.kuri
     const ext_dir = try extractBuiltinExtension(allocator, ".kuri-test");
     defer allocator.free(ext_dir);
-    defer std.fs.cwd().deleteTree(ext_dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(std.testing.io, ext_dir) catch {};
 
     // Verify all files exist
     for (builtin_files) |file| {
         const path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ ext_dir, file.name });
         defer allocator.free(path);
-        const stat = try std.fs.cwd().statFile(path);
+        const stat = try std.Io.Dir.cwd().statFile(std.testing.io, path);
         try std.testing.expect(stat.size > 0);
     }
 }

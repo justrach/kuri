@@ -1,5 +1,6 @@
 const std = @import("std");
 const Config = @import("../bridge/config.zig").Config;
+const compat = @import("../compat.zig");
 
 /// Check auth header against configured secret.
 /// Returns true if no secret is configured or if the header matches.
@@ -35,7 +36,7 @@ test "constantTimeEql" {
 /// Generate a request ID as a 16-char hex string from 8 random bytes.
 /// Caller owns the returned slice.
 pub fn generateRequestId(allocator: std.mem.Allocator) ![]u8 {
-    var rng = std.Random.DefaultPrng.init(@as(u64, @intCast(@abs(std.time.nanoTimestamp()))));
+    var rng = std.Random.DefaultPrng.init(@as(u64, @intCast(@abs(compat.nanoTimestamp()))));
     var bytes: [8]u8 = undefined;
     rng.random().bytes(&bytes);
     const hex = std.fmt.bytesToHex(bytes, .lower);
@@ -47,11 +48,11 @@ pub const RequestTimer = struct {
     start_ns: i128,
 
     pub fn start() RequestTimer {
-        return .{ .start_ns = std.time.nanoTimestamp() };
+        return .{ .start_ns = compat.nanoTimestamp() };
     }
 
     pub fn elapsed(self: RequestTimer) u64 {
-        const diff = std.time.nanoTimestamp() - self.start_ns;
+        const diff = compat.nanoTimestamp() - self.start_ns;
         return if (diff > 0) @as(u64, @intCast(diff)) else 0;
     }
 };

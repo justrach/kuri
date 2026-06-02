@@ -1,13 +1,53 @@
 const std = @import("std");
-const net = std.net;
-const Io = std.Io;
 const crypto = std.crypto;
+const compat = @import("../compat.zig");
+
+const is_windows = @import("builtin").os.tag == .windows;
+
+const posix_net = if (is_windows) struct {} else struct {
+    pub const c_connect = @extern(*const fn (std.c.fd_t, *const anyopaque, std.posix.socklen_t) callconv(.c) c_int, .{ .name = "connect" });
+};
+
+// Minimal winsock (ws2_32) bindings for the Windows CDP transport. Declared
+// here — like posix_net above — because Zig 0.16's std.os.windows.ws2_32 omits
+// these function externs. ws2_32 is linked for Windows in build.zig. A winsock
+// SOCKET is a usize handle; we stash it in the existing `fd: std.posix.fd_t`
+// field (a HANDLE/pointer on Windows) via int↔ptr casts so the struct shape is
+// unchanged across platforms.
+const wsock = if (is_windows) struct {
+    pub const SOCKET = usize;
+    pub const INVALID_SOCKET: SOCKET = ~@as(usize, 0);
+    pub const AF_INET: c_int = 2;
+    pub const SOCK_STREAM: c_int = 1;
+    pub const SOL_SOCKET: c_int = 0xffff;
+    pub const SO_RCVTIMEO: c_int = 0x1006;
+    pub const WSADATA = extern struct { _opaque: [512]u8 };
+    pub const sockaddr_in = extern struct {
+        family: u16 = AF_INET,
+        port: u16, // network byte order
+        addr: u32, // network byte order
+        zero: [8]u8 = .{ 0, 0, 0, 0, 0, 0, 0, 0 },
+    };
+    pub extern "ws2_32" fn WSAStartup(wVersionRequested: u16, lpWSAData: *WSADATA) callconv(.winapi) c_int;
+    pub extern "ws2_32" fn socket(af: c_int, typ: c_int, protocol: c_int) callconv(.winapi) SOCKET;
+    pub extern "ws2_32" fn connect(s: SOCKET, name: *const anyopaque, namelen: c_int) callconv(.winapi) c_int;
+    pub extern "ws2_32" fn send(s: SOCKET, buf: [*]const u8, len: c_int, flags: c_int) callconv(.winapi) c_int;
+    pub extern "ws2_32" fn recv(s: SOCKET, buf: [*]u8, len: c_int, flags: c_int) callconv(.winapi) c_int;
+    pub extern "ws2_32" fn setsockopt(s: SOCKET, level: c_int, optname: c_int, optval: [*]const u8, optlen: c_int) callconv(.winapi) c_int;
+    pub extern "ws2_32" fn closesocket(s: SOCKET) callconv(.winapi) c_int;
+    pub fn sockOf(fd: std.posix.fd_t) SOCKET {
+        return @intFromPtr(fd);
+    }
+    pub fn fdOf(s: SOCKET) std.posix.fd_t {
+        return @ptrFromInt(s);
+    }
+} else struct {};
 
 /// Pure Zig WebSocket client for CDP communication.
 /// Implements RFC 6455: HTTP upgrade handshake, masked client frames, unmasked server reads.
 pub const WebSocketClient = struct {
     allocator: std.mem.Allocator,
-    stream: net.Stream,
+    fd: std.posix.fd_t,
     connected: bool,
 
     // Buffers owned by caller (stack or heap)
@@ -24,25 +64,64 @@ pub const WebSocketClient = struct {
         InvalidFrame,
     };
 
-    /// Connect to a WebSocket endpoint. url must be like "ws://host:port/path".
+    /// Connect to a loopback WebSocket endpoint. url must be like "ws://host:port/path".
     pub fn connect(allocator: std.mem.Allocator, url: []const u8, read_buf: []u8, write_buf: []u8) !WebSocketClient {
         const parsed = try parseWsUrl(url);
 
         // Resolve localhost to 127.0.0.1 — resolveIp fails on some systems
         const resolved_host = if (std.mem.eql(u8, parsed.host, "localhost")) "127.0.0.1" else parsed.host;
-        const address = net.Address.parseIp4(resolved_host, parsed.port) catch return Error.ConnectionFailed;
-        const stream = net.tcpConnectToAddress(address) catch return Error.ConnectionFailed;
-        errdefer stream.close();
+        const ip_addr = parseIp4(resolved_host) orelse return Error.ConnectionFailed;
 
-        // Set read timeout so we don't block forever
-        const timeout = std.posix.timeval{ .sec = 10, .usec = 0 };
-        std.posix.setsockopt(stream.handle, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch |err| {
-            std.log.warn("websocket: failed to set read timeout: {s}", .{@errorName(err)});
+        // Open + connect the TCP socket. POSIX uses libc socket()/connect();
+        // Windows uses winsock (ws2_32). Both store the handle in `fd`.
+        const fd: std.posix.fd_t = if (comptime is_windows) blk: {
+            var wsadata: wsock.WSADATA = undefined;
+            if (wsock.WSAStartup(0x0202, &wsadata) != 0) return Error.ConnectionFailed;
+            const s = wsock.socket(wsock.AF_INET, wsock.SOCK_STREAM, 0);
+            if (s == wsock.INVALID_SOCKET) return Error.ConnectionFailed;
+            var addr = wsock.sockaddr_in{
+                .port = std.mem.nativeToBig(u16, parsed.port),
+                .addr = ip_addr,
+            };
+            if (wsock.connect(s, @ptrCast(&addr), @sizeOf(wsock.sockaddr_in)) != 0) {
+                _ = wsock.closesocket(s);
+                return Error.ConnectionFailed;
+            }
+            // Windows SO_RCVTIMEO is a DWORD of milliseconds (not a timeval).
+            const tmo_ms: u32 = 10_000;
+            _ = wsock.setsockopt(s, wsock.SOL_SOCKET, wsock.SO_RCVTIMEO, std.mem.asBytes(&tmo_ms), @sizeOf(u32));
+            break :blk wsock.fdOf(s);
+        } else blk: {
+            const raw_fd = std.c.socket(std.posix.AF.INET, std.posix.SOCK.STREAM, 0);
+            if (raw_fd < 0) return Error.ConnectionFailed;
+            const fd: std.posix.fd_t = raw_fd;
+            var addr: std.posix.sockaddr.in = .{
+                .port = std.mem.nativeToBig(u16, parsed.port),
+                .addr = ip_addr,
+            };
+            if (posix_net.c_connect(fd, @ptrCast(&addr), @sizeOf(std.posix.sockaddr.in)) != 0) {
+                _ = std.c.close(fd);
+                return Error.ConnectionFailed;
+            }
+            // Set read timeout so we don't block forever
+            const timeout = std.posix.timeval{ .sec = 10, .usec = 0 };
+            std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch {
+                _ = std.c.close(fd);
+                return Error.ConnectionFailed;
+            };
+            break :blk fd;
         };
+        errdefer {
+            if (comptime is_windows) {
+                _ = wsock.closesocket(wsock.sockOf(fd));
+            } else {
+                _ = std.c.close(fd);
+            }
+        }
 
         var ws = WebSocketClient{
             .allocator = allocator,
-            .stream = stream,
+            .fd = fd,
             .connected = false,
             .read_buf = read_buf,
             .write_buf = write_buf,
@@ -79,7 +158,11 @@ pub const WebSocketClient = struct {
             self.writeFrame(0x8, &.{}) catch {};
             self.connected = false;
         }
-        self.stream.close();
+        if (comptime is_windows) {
+            _ = wsock.closesocket(wsock.sockOf(self.fd));
+        } else {
+            _ = std.c.close(self.fd);
+        }
     }
 
     // --- Internal ---
@@ -90,7 +173,9 @@ pub const WebSocketClient = struct {
         path: []const u8,
     };
 
-    fn parseWsUrl(url: []const u8) !WsUrl {
+    pub fn parseWsUrl(url: []const u8) !WsUrl {
+        if (std.mem.startsWith(u8, url, "wss://")) return error.UnsupportedWsScheme;
+
         // Strip "ws://"
         const after_scheme = if (std.mem.startsWith(u8, url, "ws://"))
             url[5..]
@@ -102,27 +187,87 @@ pub const WebSocketClient = struct {
         const host_port = after_scheme[0..path_start];
         const path = if (path_start < after_scheme.len) after_scheme[path_start..] else "/";
 
-        // Split host:port
-        if (std.mem.indexOfScalar(u8, host_port, ':')) |colon| {
-            const host = host_port[0..colon];
-            const port = std.fmt.parseInt(u16, host_port[colon + 1 ..], 10) catch return error.InvalidCharacter;
-            return .{ .host = host, .port = port, .path = path };
-        } else {
-            return .{ .host = host_port, .port = 80, .path = path };
+        const host_port_parsed = parseHostPort(host_port) orelse return error.InvalidCharacter;
+        if (!isSupportedLoopbackHost(host_port_parsed.host)) return error.UnsupportedWsHost;
+
+        return .{
+            .host = host_port_parsed.host,
+            .port = host_port_parsed.port,
+            .path = path,
+        };
+    }
+
+    fn parseHostPort(host_port: []const u8) ?struct { host: []const u8, port: u16 } {
+        if (host_port.len == 0) return null;
+
+        var host = host_port;
+        var port: u16 = 80;
+
+        if (host_port[0] == '[') {
+            const bracket_end = std.mem.indexOfScalar(u8, host_port, ']') orelse return null;
+            host = host_port[1..bracket_end];
+            const suffix = host_port[bracket_end + 1 ..];
+            if (suffix.len > 0) {
+                if (suffix[0] != ':' or suffix.len == 1) return null;
+                port = std.fmt.parseInt(u16, suffix[1..], 10) catch return null;
+            }
+        } else if (std.mem.lastIndexOfScalar(u8, host_port, ':')) |colon| {
+            host = host_port[0..colon];
+            if (std.mem.indexOfScalar(u8, host, ':') != null) return null;
+            const port_text = host_port[colon + 1 ..];
+            if (port_text.len == 0) return null;
+            port = std.fmt.parseInt(u16, port_text, 10) catch return null;
         }
+
+        if (host.len == 0) return null;
+        return .{ .host = host, .port = port };
+    }
+
+    fn isSupportedLoopbackHost(host: []const u8) bool {
+        return std.mem.eql(u8, host, "localhost") or std.mem.eql(u8, host, "127.0.0.1");
+    }
+
+    /// Parse an IPv4 dotted-decimal string into a network-byte-order u32.
+    fn parseIp4(s: []const u8) ?u32 {
+        var octets: [4]u8 = undefined;
+        var octet_idx: usize = 0;
+        var cur: u16 = 0;
+        var digit_count: u8 = 0;
+        for (s) |ch| {
+            if (ch == '.') {
+                if (digit_count == 0 or octet_idx >= 3) return null;
+                octets[octet_idx] = @intCast(cur);
+                octet_idx += 1;
+                cur = 0;
+                digit_count = 0;
+            } else if (ch >= '0' and ch <= '9') {
+                cur = cur * 10 + (ch - '0');
+                if (cur > 255) return null;
+                digit_count += 1;
+            } else {
+                return null;
+            }
+        }
+        if (digit_count == 0 or octet_idx != 3) return null;
+        octets[3] = @intCast(cur);
+        const host_order =
+            @as(u32, octets[0]) << 24 |
+            @as(u32, octets[1]) << 16 |
+            @as(u32, octets[2]) << 8 |
+            @as(u32, octets[3]);
+        return std.mem.nativeToBig(u32, host_order);
     }
 
     fn doHandshake(self: *WebSocketClient, host: []const u8, port: u16, path: []const u8) !void {
         // Generate random key for Sec-WebSocket-Key
         var key_bytes: [16]u8 = undefined;
-        crypto.random.bytes(&key_bytes);
+        compat.randomBytes(&key_bytes);
         var key_buf: [24]u8 = undefined;
         const key = std.base64.standard.Encoder.encode(&key_buf, &key_bytes);
 
         // Build HTTP upgrade request
         var req_buf: [2048]u8 = undefined;
-        const req = std.fmt.bufPrint(&req_buf,
-            "GET {s} HTTP/1.1\r\n" ++
+        const req = std.fmt.bufPrint(&req_buf, "GET {s} HTTP/1.1\r\n" ++
             "Host: {s}:{d}\r\n" ++
             "Upgrade: websocket\r\n" ++
             "Connection: Upgrade\r\n" ++
@@ -131,16 +276,52 @@ pub const WebSocketClient = struct {
             "\r\n", .{ path, host, port, key }) catch return Error.HandshakeFailed;
 
         // Send upgrade request via raw write
-        self.stream.writeAll(req) catch return Error.WriteFailed;
+        self.writeAll(req) catch return Error.WriteFailed;
 
         // Read response - look for "101 Switching Protocols"
-        const n = self.stream.read(self.read_buf) catch return Error.ReadFailed;
+        const n = self.rawRead(self.read_buf) catch return Error.ReadFailed;
         if (n == 0) return Error.HandshakeFailed;
 
         const response = self.read_buf[0..n];
         if (!std.mem.startsWith(u8, response, "HTTP/1.1 101")) {
             return Error.HandshakeFailed;
         }
+
+        // Verify Upgrade header is present (case-insensitive check)
+        if (std.mem.indexOf(u8, response, "websocket") == null and
+            std.mem.indexOf(u8, response, "WebSocket") == null and
+            std.mem.indexOf(u8, response, "Websocket") == null)
+        {
+            return Error.HandshakeFailed;
+        }
+    }
+
+    fn writeAll(self: *WebSocketClient, data: []const u8) !void {
+        if (comptime is_windows) {
+            const s = wsock.sockOf(self.fd);
+            var sent: usize = 0;
+            while (sent < data.len) {
+                const n = wsock.send(s, data.ptr + sent, @intCast(data.len - sent), 0);
+                if (n <= 0) return Error.WriteFailed;
+                sent += @intCast(n);
+            }
+            return;
+        }
+        var sent: usize = 0;
+        while (sent < data.len) {
+            const n = std.c.write(self.fd, data.ptr + sent, data.len - sent);
+            if (n <= 0) return Error.WriteFailed;
+            sent += @intCast(n);
+        }
+    }
+
+    fn rawRead(self: *WebSocketClient, buf: []u8) !usize {
+        if (comptime is_windows) {
+            const n = wsock.recv(wsock.sockOf(self.fd), buf.ptr, @intCast(buf.len), 0);
+            if (n < 0) return Error.ReadFailed;
+            return @intCast(n);
+        }
+        return std.posix.read(self.fd, buf) catch return Error.ReadFailed;
     }
 
     fn writeFrame(self: *WebSocketClient, opcode: u8, data: []const u8) !void {
@@ -169,12 +350,12 @@ pub const WebSocketClient = struct {
 
         // Generate masking key
         var mask_key: [4]u8 = undefined;
-        crypto.random.bytes(&mask_key);
+        compat.randomBytes(&mask_key);
         @memcpy(frame_buf[header_len .. header_len + 4], &mask_key);
         header_len += 4;
 
         // Send header
-        self.stream.writeAll(frame_buf[0..header_len]) catch return Error.WriteFailed;
+        self.writeAll(frame_buf[0..header_len]) catch return Error.WriteFailed;
 
         // Send masked payload in chunks to avoid allocating
         var chunk: [4096]u8 = undefined;
@@ -187,7 +368,7 @@ pub const WebSocketClient = struct {
             for (0..chunk_size) |i| {
                 chunk[i] ^= mask_key[(offset + i) % 4];
             }
-            self.stream.writeAll(chunk[0..chunk_size]) catch return Error.WriteFailed;
+            self.writeAll(chunk[0..chunk_size]) catch return Error.WriteFailed;
             offset += chunk_size;
         }
     }
@@ -222,26 +403,23 @@ pub const WebSocketClient = struct {
 
         // Handle ping - send pong
         if (opcode == 0x9) {
-            if (payload_len <= self.read_buf.len) {
-                const len: usize = @intCast(payload_len);
-                self.readExact(self.read_buf[0..len]) catch return Error.ReadFailed;
-                self.writeFrame(0xA, self.read_buf[0..len]) catch {};
-            }
+            if (payload_len > std.math.maxInt(usize) or payload_len > self.read_buf.len) return self.readFrame();
+            const len: usize = @intCast(payload_len);
+            self.readExact(self.read_buf[0..len]) catch return Error.ReadFailed;
+            self.writeFrame(0xA, self.read_buf[0..len]) catch {};
             return self.readFrame(); // recurse for next real message
         }
 
         // Skip pong
         if (opcode == 0xA) {
-            if (payload_len > 0) {
+            if (payload_len > 0 and payload_len <= std.math.maxInt(usize) and payload_len <= self.read_buf.len) {
                 const len: usize = @intCast(payload_len);
-                if (len <= self.read_buf.len) {
-                    self.readExact(self.read_buf[0..len]) catch return Error.ReadFailed;
-                }
+                self.readExact(self.read_buf[0..len]) catch return Error.ReadFailed;
             }
             return self.readFrame();
         }
 
-        if (payload_len > self.read_buf.len) return Error.MessageTooLarge;
+        if (payload_len > std.math.maxInt(usize) or payload_len > self.read_buf.len) return Error.MessageTooLarge;
         const len: usize = @intCast(payload_len);
 
         // Read mask key if present (server shouldn't mask, but handle it)
@@ -291,7 +469,7 @@ pub const WebSocketClient = struct {
         }
         if (opcode == 0x9 or opcode == 0xA) {
             // Skip ping/pong payload
-            if (payload_len > 0 and payload_len <= self.read_buf.len) {
+            if (payload_len > 0 and payload_len <= std.math.maxInt(usize) and payload_len <= self.read_buf.len) {
                 const len: usize = @intCast(payload_len);
                 self.readExact(self.read_buf[0..len]) catch return Error.ReadFailed;
                 if (opcode == 0x9) self.writeFrame(0xA, self.read_buf[0..len]) catch {};
@@ -325,7 +503,7 @@ pub const WebSocketClient = struct {
     fn readExact(self: *WebSocketClient, buf: []u8) !void {
         var total: usize = 0;
         while (total < buf.len) {
-            const n = self.stream.read(buf[total..]) catch return Error.ReadFailed;
+            const n = self.rawRead(buf[total..]) catch return Error.ReadFailed;
             if (n == 0) return Error.ConnectionClosed;
             total += n;
         }
@@ -340,8 +518,8 @@ test "parseWsUrl basic" {
 }
 
 test "parseWsUrl default port" {
-    const parsed = try WebSocketClient.parseWsUrl("ws://example.com/path");
-    try std.testing.expectEqualStrings("example.com", parsed.host);
+    const parsed = try WebSocketClient.parseWsUrl("ws://localhost/path");
+    try std.testing.expectEqualStrings("localhost", parsed.host);
     try std.testing.expectEqual(@as(u16, 80), parsed.port);
     try std.testing.expectEqualStrings("/path", parsed.path);
 }
@@ -349,4 +527,32 @@ test "parseWsUrl default port" {
 test "parseWsUrl invalid scheme" {
     const result = WebSocketClient.parseWsUrl("http://localhost:9222");
     try std.testing.expectError(error.InvalidCharacter, result);
+}
+
+test "parseWsUrl valid URL" {
+    const parsed = try WebSocketClient.parseWsUrl("ws://127.0.0.1:9222/devtools/browser/abc");
+    try std.testing.expectEqualStrings("127.0.0.1", parsed.host);
+    try std.testing.expectEqual(@as(u16, 9222), parsed.port);
+    try std.testing.expectEqualStrings("/devtools/browser/abc", parsed.path);
+}
+
+test "parseWsUrl rejects non-ws scheme" {
+    try std.testing.expectError(error.InvalidCharacter, WebSocketClient.parseWsUrl("http://localhost:9222/path"));
+}
+
+test "parseWsUrl rejects secure websocket scheme" {
+    try std.testing.expectError(error.UnsupportedWsScheme, WebSocketClient.parseWsUrl("wss://localhost:9222/path"));
+}
+
+test "parseWsUrl rejects remote host" {
+    try std.testing.expectError(error.UnsupportedWsHost, WebSocketClient.parseWsUrl("ws://example.com:9222/path"));
+}
+
+test "parseWsUrl rejects ipv6 host" {
+    try std.testing.expectError(error.UnsupportedWsHost, WebSocketClient.parseWsUrl("ws://[::1]:9222/path"));
+}
+
+test "parseIp4 stores bytes in network order" {
+    const ip = WebSocketClient.parseIp4("127.0.0.1") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualSlices(u8, &.{ 127, 0, 0, 1 }, std.mem.asBytes(&ip));
 }

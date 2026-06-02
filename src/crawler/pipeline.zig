@@ -21,7 +21,7 @@ pub const WorkItem = struct {
 pub const ThreadPool = struct {
     threads: []std.Thread,
     queue: std.ArrayList(WorkItem),
-    mutex: std.Thread.Mutex,
+    mutex: @import("../compat.zig").PthreadMutex,
     allocator: std.mem.Allocator,
     active: std.atomic.Value(u32),
     shutdown: std.atomic.Value(bool),

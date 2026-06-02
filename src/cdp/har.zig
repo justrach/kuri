@@ -1,5 +1,6 @@
 const std = @import("std");
 const CdpClient = @import("client.zig").CdpClient;
+const compat = @import("../compat.zig");
 
 /// HAR (HTTP Archive) recorder using CDP Network domain events.
 /// Captures request/response pairs with timing, headers, and status.
@@ -21,6 +22,8 @@ pub const HarRecorder = struct {
         url: []const u8,
         method: []const u8,
         timestamp: i64,
+        headers_json: []const u8,
+        post_data: []const u8,
     };
 
     pub const HarEntry = struct {
@@ -33,6 +36,8 @@ pub const HarRecorder = struct {
         duration_ms: i64,
         request_size: usize,
         response_size: usize,
+        request_headers: []const u8,
+        post_data: []const u8,
     };
 
     pub fn init(allocator: std.mem.Allocator) HarRecorder {
@@ -53,6 +58,8 @@ pub const HarRecorder = struct {
             self.allocator.free(entry.method);
             self.allocator.free(entry.status_text);
             self.allocator.free(entry.mime_type);
+            if (entry.request_headers.len > 0) self.allocator.free(entry.request_headers);
+            if (entry.post_data.len > 0) self.allocator.free(entry.post_data);
         }
         self.entries.clearRetainingCapacity();
 
@@ -61,6 +68,8 @@ pub const HarRecorder = struct {
             self.allocator.free(kv.key_ptr.*);
             self.allocator.free(kv.value_ptr.url);
             self.allocator.free(kv.value_ptr.method);
+            if (kv.value_ptr.headers_json.len > 0) self.allocator.free(kv.value_ptr.headers_json);
+            if (kv.value_ptr.post_data.len > 0) self.allocator.free(kv.value_ptr.post_data);
         }
         self.pending_requests.clearRetainingCapacity();
 
@@ -94,6 +103,10 @@ pub const HarRecorder = struct {
         errdefer self.allocator.free(owned_status_text);
         const owned_mime_type = try self.allocator.dupe(u8, entry.mime_type);
         errdefer self.allocator.free(owned_mime_type);
+        const owned_headers = if (entry.request_headers.len > 0) try self.allocator.dupe(u8, entry.request_headers) else "";
+        errdefer if (owned_headers.len > 0) self.allocator.free(owned_headers);
+        const owned_post = if (entry.post_data.len > 0) try self.allocator.dupe(u8, entry.post_data) else "";
+        errdefer if (owned_post.len > 0) self.allocator.free(owned_post);
         const owned = HarEntry{
             .url = owned_url,
             .method = owned_method,
@@ -104,6 +117,8 @@ pub const HarRecorder = struct {
             .duration_ms = entry.duration_ms,
             .request_size = entry.request_size,
             .response_size = entry.response_size,
+            .request_headers = owned_headers,
+            .post_data = owned_post,
         };
         try self.entries.append(self.allocator, owned);
     }
@@ -121,13 +136,13 @@ pub const HarRecorder = struct {
     /// Serialize current entries to HAR 1.2 JSON format.
     pub fn toJson(self: *HarRecorder) ![]const u8 {
         var buf: std.ArrayList(u8) = .empty;
-        const w = buf.writer(self.allocator);
 
-        try w.writeAll("{\"log\":{\"version\":\"1.2\",\"creator\":{\"name\":\"browdie\",\"version\":\"0.1.0\"},\"entries\":[");
+        try buf.appendSlice(self.allocator, "{\"log\":{\"version\":\"1.2\",\"creator\":{\"name\":\"browdie\",\"version\":\"0.3.3\"},\"entries\":[");
 
         for (self.entries.items, 0..) |entry, i| {
-            if (i > 0) try w.writeAll(",");
-            try w.print(
+            if (i > 0) try buf.appendSlice(self.allocator, ",");
+            try buf.print(
+                self.allocator,
                 "{{\"startedDateTime\":\"{d}\",\"time\":{d}," ++
                     "\"request\":{{\"method\":\"{s}\",\"url\":\"{s}\",\"bodySize\":{d}}}," ++
                     "\"response\":{{\"status\":{d},\"statusText\":\"{s}\",\"content\":{{\"mimeType\":\"{s}\",\"size\":{d}}}}}}}",
@@ -145,7 +160,7 @@ pub const HarRecorder = struct {
             );
         }
 
-        try w.writeAll("]}}");
+        try buf.appendSlice(self.allocator, "]}}");
         return buf.toOwnedSlice(self.allocator);
     }
 
@@ -184,15 +199,25 @@ pub const HarRecorder = struct {
                 self.allocator.free(owned_url);
                 return;
             };
+            // Capture request headers JSON blob
+            const headers_json = extractHeadersObject(request_obj) orelse "";
+            const owned_headers = if (headers_json.len > 0) self.allocator.dupe(u8, headers_json) catch "" else "";
+            // Capture POST body if present
+            const post_data = extractField(request_obj, "postData") orelse "";
+            const owned_post = if (post_data.len > 0) self.allocator.dupe(u8, post_data) catch "" else "";
             const pending = PendingRequest{
                 .url = owned_url,
                 .method = owned_method,
-                .timestamp = std.time.timestamp(),
+                .timestamp = compat.milliTimestamp(),
+                .headers_json = owned_headers,
+                .post_data = owned_post,
             };
             self.pending_requests.put(owned_id, pending) catch {
                 self.allocator.free(owned_id);
                 self.allocator.free(owned_url);
                 self.allocator.free(owned_method);
+                if (owned_headers.len > 0) self.allocator.free(owned_headers);
+                if (owned_post.len > 0) self.allocator.free(owned_post);
             };
         } else if (std.mem.indexOf(u8, event_json, "\"Network.responseReceived\"") != null) {
             const request_id = extractField(event_json, "requestId") orelse return;
@@ -202,6 +227,8 @@ pub const HarRecorder = struct {
                 self.allocator.free(pending_kv.key);
                 self.allocator.free(pending.url);
                 self.allocator.free(pending.method);
+                if (pending.headers_json.len > 0) self.allocator.free(pending.headers_json);
+                if (pending.post_data.len > 0) self.allocator.free(pending.post_data);
             }
 
             // Extract status and mimeType from the nested "response" object
@@ -213,7 +240,7 @@ pub const HarRecorder = struct {
             else
                 200;
             const mime = extractField(search_json, "mimeType") orelse "application/octet-stream";
-            const status_text = if (status >= 200 and status < 300) "OK" else if (status >= 300 and status < 400) "Redirect" else if (status >= 400) "Error" else "Unknown";
+            const status_text = extractField(search_json, "statusText") orelse if (status >= 200 and status < 300) "OK" else if (status >= 300 and status < 400) "Redirect" else if (status >= 400) "Error" else "Unknown";
 
             self.addEntry(.{
                 .url = pending.url,
@@ -222,14 +249,32 @@ pub const HarRecorder = struct {
                 .status_text = status_text,
                 .mime_type = mime,
                 .timestamp = pending.timestamp,
-                .duration_ms = std.time.timestamp() - pending.timestamp,
+                .duration_ms = compat.milliTimestamp() - pending.timestamp,
                 .request_size = 0,
                 .response_size = 0,
+                .request_headers = pending.headers_json,
+                .post_data = pending.post_data,
             }) catch return;
         }
     }
 
-    /// Extract a simple string field value from JSON: finds "field":"value" pattern.
+    /// Extract the "headers":{...} object as a raw JSON string from a CDP request object.
+    fn extractHeadersObject(json: []const u8) ?[]const u8 {
+        const key = "\"headers\":{";
+        const key_pos = std.mem.indexOf(u8, json, key) orelse return null;
+        const obj_start = key_pos + key.len - 1; // include the {
+        var depth: usize = 0;
+        var i = obj_start;
+        while (i < json.len) : (i += 1) {
+            if (json[i] == '{') depth += 1 else if (json[i] == '}') {
+                depth -= 1;
+                if (depth == 0) return json[obj_start .. i + 1];
+            }
+        }
+        return null;
+    }
+
+    /// Extract a simple string or scalar field value from JSON.
     fn extractField(json: []const u8, field: []const u8) ?[]const u8 {
         var search_buf: [256]u8 = undefined;
         const prefix = std.fmt.bufPrint(&search_buf, "\"{s}\"", .{field}) catch return null;
@@ -240,9 +285,23 @@ pub const HarRecorder = struct {
         // Skip colon and whitespace
         var i = after_field;
         while (i < json.len and (json[i] == ':' or json[i] == ' ' or json[i] == '\t')) : (i += 1) {}
-        if (i >= json.len or json[i] != '"') return null;
-        const val_start = i + 1;
-        const val_end = std.mem.indexOfScalarPos(u8, json, val_start, '"') orelse return null;
+        if (i >= json.len) return null;
+
+        if (json[i] == '"') {
+            const val_start = i + 1;
+            const val_end = std.mem.indexOfScalarPos(u8, json, val_start, '"') orelse return null;
+            return json[val_start..val_end];
+        }
+
+        const val_start = i;
+        var val_end = i;
+        while (val_end < json.len) : (val_end += 1) {
+            switch (json[val_end]) {
+                ',', '}', ']', ' ', '\t', '\r', '\n' => break,
+                else => {},
+            }
+        }
+        if (val_end == val_start) return null;
         return json[val_start..val_end];
     }
 
@@ -252,6 +311,8 @@ pub const HarRecorder = struct {
             self.allocator.free(entry.method);
             self.allocator.free(entry.status_text);
             self.allocator.free(entry.mime_type);
+            if (entry.request_headers.len > 0) self.allocator.free(entry.request_headers);
+            if (entry.post_data.len > 0) self.allocator.free(entry.post_data);
         }
         self.entries.deinit(self.allocator);
 
@@ -289,6 +350,8 @@ test "HarRecorder addEntry and toJson" {
         .duration_ms = 42,
         .request_size = 0,
         .response_size = 15000,
+        .request_headers = "",
+        .post_data = "",
     });
 
     try rec.addEntry(.{
@@ -301,6 +364,8 @@ test "HarRecorder addEntry and toJson" {
         .duration_ms = 100,
         .request_size = 256,
         .response_size = 512,
+        .request_headers = "",
+        .post_data = "",
     });
 
     try std.testing.expectEqual(@as(usize, 2), rec.entryCount());
@@ -335,7 +400,7 @@ test "HarRecorder toJson empty" {
     const json = try rec.toJson();
     defer std.testing.allocator.free(json);
 
-    try std.testing.expectEqualStrings("{\"log\":{\"version\":\"1.2\",\"creator\":{\"name\":\"browdie\",\"version\":\"0.1.0\"},\"entries\":[]}}", json);
+    try std.testing.expectEqualStrings("{\"log\":{\"version\":\"1.2\",\"creator\":{\"name\":\"browdie\",\"version\":\"0.3.3\"},\"entries\":[]}}", json);
 }
 
 test "HarRecorder handleCdpEvent processes request and response" {
@@ -355,14 +420,18 @@ test "HarRecorder handleCdpEvent processes request and response" {
     try std.testing.expectEqual(@as(usize, 2), rec.pending_requests.count());
 
     // Send responseReceived with nested "response" object
-    rec.handleCdpEvent("{\"method\":\"Network.responseReceived\",\"params\":{\"requestId\":\"req2\",\"response\":{\"status\":200,\"mimeType\":\"application/json\"}}}");
+    rec.handleCdpEvent("{\"method\":\"Network.responseReceived\",\"params\":{\"requestId\":\"req2\",\"response\":{\"status\":200,\"statusText\":\"OK\",\"mimeType\":\"application/json\"}}}");
     try std.testing.expectEqual(@as(usize, 1), rec.entryCount());
     try std.testing.expectEqual(@as(usize, 1), rec.pending_requests.count());
+    try std.testing.expectEqual(@as(u16, 200), rec.entries.items[0].status);
+    try std.testing.expectEqualStrings("OK", rec.entries.items[0].status_text);
 
     // Complete the first request too
-    rec.handleCdpEvent("{\"method\":\"Network.responseReceived\",\"params\":{\"requestId\":\"req1\",\"response\":{\"status\":304,\"mimeType\":\"text/html\"}}}");
+    rec.handleCdpEvent("{\"method\":\"Network.responseReceived\",\"params\":{\"requestId\":\"req1\",\"response\":{\"status\":304,\"statusText\":\"Not Modified\",\"mimeType\":\"text/html\"}}}");
     try std.testing.expectEqual(@as(usize, 2), rec.entryCount());
     try std.testing.expectEqual(@as(usize, 0), rec.pending_requests.count());
+    try std.testing.expectEqual(@as(u16, 304), rec.entries.items[1].status);
+    try std.testing.expectEqualStrings("Not Modified", rec.entries.items[1].status_text);
 }
 
 test "HarRecorder start clears stale pending requests before enabling network" {
@@ -376,6 +445,8 @@ test "HarRecorder start clears stale pending requests before enabling network" {
         .url = owned_url,
         .method = owned_method,
         .timestamp = 123,
+        .headers_json = "",
+        .post_data = "",
     });
 
     rec.recording = true;
@@ -405,6 +476,18 @@ test "HarRecorder extractField helper" {
     try std.testing.expect(missing == null);
 }
 
+test "HarRecorder extractField parses numeric values" {
+    const json = "{\"status\":304,\"encodedDataLength\":512}";
+
+    const status = HarRecorder.extractField(json, "status");
+    try std.testing.expect(status != null);
+    try std.testing.expectEqualStrings("304", status.?);
+
+    const length = HarRecorder.extractField(json, "encodedDataLength");
+    try std.testing.expect(length != null);
+    try std.testing.expectEqualStrings("512", length.?);
+}
+
 test "HarRecorder parses nested CDP request fields" {
     var rec = HarRecorder.init(std.testing.allocator);
     defer rec.deinit();
@@ -422,4 +505,29 @@ test "HarRecorder parses nested CDP request fields" {
     try std.testing.expectEqualStrings("GET", entry.method);
     try std.testing.expectEqual(@as(u16, 200), entry.status);
     try std.testing.expectEqualStrings("text/css", entry.mime_type);
+}
+
+test "HarRecorder records non-200 status and millisecond duration" {
+    var rec = HarRecorder.init(std.testing.allocator);
+    defer rec.deinit();
+
+    const owned_id = try std.testing.allocator.dupe(u8, "req-ms");
+    const owned_url = try std.testing.allocator.dupe(u8, "https://example.com/cache.css");
+    const owned_method = try std.testing.allocator.dupe(u8, "GET");
+    try rec.pending_requests.put(owned_id, .{
+        .url = owned_url,
+        .method = owned_method,
+        .timestamp = compat.milliTimestamp() - 50,
+        .headers_json = "",
+        .post_data = "",
+    });
+
+    rec.handleCdpEvent("{\"method\":\"Network.responseReceived\",\"params\":{\"requestId\":\"req-ms\",\"response\":{\"status\":304,\"statusText\":\"Not Modified\",\"mimeType\":\"text/css\"}}}");
+
+    try std.testing.expectEqual(@as(usize, 1), rec.entryCount());
+
+    const entry = rec.entries.items[0];
+    try std.testing.expectEqual(@as(u16, 304), entry.status);
+    try std.testing.expectEqualStrings("Not Modified", entry.status_text);
+    try std.testing.expect(entry.duration_ms >= 50);
 }

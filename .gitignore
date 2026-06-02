@@ -1,10 +1,17 @@
 zig-out/
 .zig-cache/
+__pycache__/
+*.pyc
 *.o
 *.swp
 .browdie/
 tweet.md
 .benchmarks/
+# QuickJS-NG sources auto-fetched by `zig build` into a content-addressed
+# subdir under zig-pkg/. The vendored `vendor/curl-impersonate/` IS tracked,
+# but anything starting with `N-V-__` or matching the zig pkg-hash format
+# is build cache. zig-pkg/ as a whole is not tracked except for vendor/.
+zig-pkg/N-V-__*/
 benchmarks/results/*
 !benchmarks/results/README.md
 !benchmarks/results/20260327-111742-https_vercel.com/

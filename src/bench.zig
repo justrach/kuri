@@ -1,4 +1,5 @@
 const std = @import("std");
+const compat = @import("compat.zig");
 const a11y = @import("snapshot/a11y.zig");
 const markdown = @import("crawler/markdown.zig");
 const fetcher = @import("crawler/fetcher.zig");
@@ -25,9 +26,9 @@ const Bench = struct {
         for (0..@min(n / 10, 10)) |_| func();
 
         for (0..n) |i| {
-            const start = @as(u64, @intCast(@max(std.time.nanoTimestamp(), 0)));
+            const start = @as(u64, @intCast(@max(compat.nanoTimestamp(), 0)));
             func();
-            const end = @as(u64, @intCast(@max(std.time.nanoTimestamp(), 0)));
+            const end = @as(u64, @intCast(@max(compat.nanoTimestamp(), 0)));
             times[i] = end -| start;
         }
 
@@ -217,7 +218,7 @@ fn benchEventBuffer() void {
 
     for (0..32) |_| {
         const ev = gpa.dupe(u8, "{\"method\":\"Network.dataReceived\",\"params\":{}}") catch return;
-        buf.push(ev);
+        buf.push(gpa, ev);
     }
     std.mem.doNotOptimizeAway(buf.hasEvent("Page.loadEventFired"));
     std.mem.doNotOptimizeAway(buf.hasEvent("Network.dataReceived"));

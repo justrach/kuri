@@ -4,6 +4,8 @@
 set -e
 
 REPO="justrach/kuri"
+CHANNEL="${KURI_CHANNEL:-stable}"
+BASE_URL="${KURI_RELEASE_BASE:-https://raw.githubusercontent.com/${REPO}/release-channel/${CHANNEL}}"
 INSTALL_DIR="${KURI_INSTALL_DIR:-$HOME/.local/bin}"
 
 # ── Detect platform ───────────────────────────────────────────────────────────
@@ -22,26 +24,48 @@ case "$ARCH" in
   *) echo "Unsupported arch: $ARCH" >&2; exit 1 ;;
 esac
 
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+
 TARGET="${ARCH_NAME}-${OS_NAME}"
 
-# ── Fetch latest release tag ──────────────────────────────────────────────────
-echo "Fetching latest kuri release..."
-VERSION=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" \
-  | grep '"tag_name"' | head -1 | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')
+# ── Fetch channel manifest ────────────────────────────────────────────────────
+echo "Fetching kuri ${CHANNEL} channel manifest..."
+MANIFEST_URL="${BASE_URL}/latest.json"
+curl -fsSL "$MANIFEST_URL" -o "$TMP/latest.json"
 
-if [ -z "$VERSION" ]; then
-  echo "Error: could not determine latest version" >&2
+VERSION="$(grep '"version"' "$TMP/latest.json" | head -1 | sed 's/.*"version": *"\([^"]*\)".*/\1/')"
+ASSET_BLOCK="$(sed -n "/\"${TARGET}\"[[:space:]]*:/,/}/p" "$TMP/latest.json")"
+URL="$(printf '%s\n' "$ASSET_BLOCK" | grep '"url"' | head -1 | sed 's/.*"url": *"\([^"]*\)".*/\1/')"
+SHA256="$(printf '%s\n' "$ASSET_BLOCK" | grep '"sha256"' | head -1 | sed 's/.*"sha256": *"\([^"]*\)".*/\1/')"
+
+if [ -z "$VERSION" ] || [ -z "$URL" ]; then
+  echo "Error: no ${TARGET} asset in ${MANIFEST_URL}" >&2
   exit 1
 fi
 
 echo "Installing kuri ${VERSION} (${TARGET})..."
 
-# ── Download & unpack ─────────────────────────────────────────────────────────
-TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
+# ── Download, verify & unpack ─────────────────────────────────────────────────
+curl -fL "$URL" -o "$TMP/kuri.tar.gz"
 
-URL="https://github.com/${REPO}/releases/download/${VERSION}/kuri-${VERSION}-${TARGET}.tar.gz"
-curl -fsSL "$URL" -o "$TMP/kuri.tar.gz"
+if [ -n "$SHA256" ]; then
+  ACTUAL=""
+  if command -v shasum >/dev/null 2>&1; then
+    ACTUAL="$(shasum -a 256 "$TMP/kuri.tar.gz" 2>/dev/null | awk '{print $1}')" || ACTUAL=""
+  fi
+  if [ -z "$ACTUAL" ] && command -v sha256sum >/dev/null 2>&1; then
+    ACTUAL="$(sha256sum "$TMP/kuri.tar.gz" 2>/dev/null | awk '{print $1}')" || ACTUAL=""
+  fi
+  if [ -z "$ACTUAL" ] && command -v openssl >/dev/null 2>&1; then
+    ACTUAL="$(openssl dgst -sha256 "$TMP/kuri.tar.gz" 2>/dev/null | awk '{print $NF}')" || ACTUAL=""
+  fi
+  if [ -n "$ACTUAL" ] && [ "$ACTUAL" != "$SHA256" ]; then
+    echo "Error: checksum mismatch for ${TARGET}" >&2
+    exit 1
+  fi
+fi
+
 tar -xzf "$TMP/kuri.tar.gz" -C "$TMP"
 
 # ── Install binaries ──────────────────────────────────────────────────────────
@@ -65,6 +89,8 @@ done
 echo ""
 echo "Installed:$INSTALLED"
 echo "Location:  $INSTALL_DIR"
+echo "Channel:   $CHANNEL"
+echo "Version:   $VERSION"
 echo ""
 
 case ":$PATH:" in

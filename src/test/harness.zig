@@ -1,5 +1,5 @@
 const std = @import("std");
-const net = std.net;
+const compat = @import("../compat.zig");
 
 /// Test harness for agent-led browser automation testing.
 /// Provides helpers to launch Chrome, start Browdie, and hit API endpoints.
@@ -21,13 +21,12 @@ pub const TestHarness = struct {
 
     /// Send an HTTP GET request to Browdie and return the response body.
     pub fn get(self: *TestHarness, path: []const u8) ![]const u8 {
-        const address = try net.Address.parseIp4("127.0.0.1", self.browdie_port);
-        const stream = try net.tcpConnectToAddress(address);
+        const stream = try compat.tcpConnectToIp4(self.browdie_port);
         defer stream.close();
 
         // Set read timeout
         const timeout = std.posix.timeval{ .sec = 10, .usec = 0 };
-        std.posix.setsockopt(stream.handle, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch {};
+        stream.setSockOpt(std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&timeout));
 
         const req = try std.fmt.allocPrint(self.allocator, "GET {s} HTTP/1.1\r\nHost: 127.0.0.1:{d}\r\nConnection: close\r\n\r\n", .{ path, self.browdie_port });
         defer self.allocator.free(req);
@@ -106,7 +105,7 @@ pub const TestHarness = struct {
         defer self.allocator.free(action_result);
 
         // Wait for page to settle
-        std.Thread.sleep(500 * std.time.ns_per_ms);
+        compat.threadSleep(500 * std.time.ns_per_ms);
 
         // After snapshot
         const after = try self.get(snap_path);

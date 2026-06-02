@@ -1,4 +1,5 @@
 const std = @import("std");
+const compat = @import("../compat.zig");
 const CdpClient = @import("../cdp/client.zig").CdpClient;
 const HarRecorder = @import("../cdp/har.zig").HarRecorder;
 const A11yNode = @import("../snapshot/a11y.zig").A11yNode;
@@ -10,6 +11,13 @@ pub const TabEntry = struct {
     ws_url: []const u8,
     created_at: i64,
     last_accessed: i64,
+};
+
+const PersistedTab = struct {
+    id: []const u8,
+    url: []const u8 = "",
+    title: []const u8 = "",
+    ws_url: []const u8 = "",
 };
 
 pub const RefCache = struct {
@@ -41,17 +49,19 @@ pub const RefCache = struct {
 pub const Bridge = struct {
     allocator: std.mem.Allocator,
     tabs: std.StringHashMap(TabEntry),
+    current_tabs: std.StringHashMap([]const u8),
     snapshots: std.StringHashMap(RefCache),
     prev_snapshots: std.StringHashMap([]const A11yNode),
     cdp_clients: std.StringHashMap(*CdpClient),
     har_recorders: std.StringHashMap(*HarRecorder),
     debug_script_ids: std.StringHashMap([]const u8),
-    mu: std.Thread.RwLock,
+    mu: compat.PthreadRwLock,
 
     pub fn init(allocator: std.mem.Allocator) Bridge {
         return .{
             .allocator = allocator,
             .tabs = std.StringHashMap(TabEntry).init(allocator),
+            .current_tabs = std.StringHashMap([]const u8).init(allocator),
             .snapshots = std.StringHashMap(RefCache).init(allocator),
             .prev_snapshots = std.StringHashMap([]const A11yNode).init(allocator),
             .cdp_clients = std.StringHashMap(*CdpClient).init(allocator),
@@ -62,6 +72,13 @@ pub const Bridge = struct {
     }
 
     pub fn deinit(self: *Bridge) void {
+        var current_it = self.current_tabs.iterator();
+        while (current_it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+            self.allocator.free(entry.value_ptr.*);
+        }
+        self.current_tabs.deinit();
+
         var debug_it = self.debug_script_ids.iterator();
         while (debug_it.next()) |entry| {
             self.allocator.free(entry.key_ptr.*);
@@ -156,6 +173,22 @@ pub const Bridge = struct {
         self.mu.lock();
         defer self.mu.unlock();
 
+        while (true) {
+            var session_to_clear: ?[]const u8 = null;
+            var current_it = self.current_tabs.iterator();
+            while (current_it.next()) |entry| {
+                if (std.mem.eql(u8, entry.value_ptr.*, tab_id)) {
+                    session_to_clear = entry.key_ptr.*;
+                    break;
+                }
+            }
+            const session_id = session_to_clear orelse break;
+            if (self.current_tabs.fetchRemove(session_id)) |kv| {
+                self.allocator.free(kv.key);
+                self.allocator.free(kv.value);
+            }
+        }
+
         // Grab owned strings before removing from map
         const tab = self.tabs.get(tab_id) orelse {
             if (self.snapshots.getPtr(tab_id)) |cache| cache.deinit();
@@ -218,6 +251,68 @@ pub const Bridge = struct {
         return list.toOwnedSlice(allocator);
     }
 
+    pub fn setCurrentTab(self: *Bridge, session_id: []const u8, tab_id: []const u8) !void {
+        self.mu.lock();
+        defer self.mu.unlock();
+
+        if (self.current_tabs.fetchRemove(session_id)) |old| {
+            self.allocator.free(old.key);
+            self.allocator.free(old.value);
+        }
+
+        try self.current_tabs.put(
+            try self.allocator.dupe(u8, session_id),
+            try self.allocator.dupe(u8, tab_id),
+        );
+
+        if (self.tabs.getPtr(tab_id)) |entry| {
+            entry.last_accessed = compat.timestampSeconds();
+        }
+    }
+
+    pub fn getCurrentTab(self: *Bridge, allocator: std.mem.Allocator, session_id: []const u8) ?[]u8 {
+        self.mu.lockShared();
+        defer self.mu.unlockShared();
+        const tab_id = self.current_tabs.get(session_id) orelse return null;
+        return allocator.dupe(u8, tab_id) catch null;
+    }
+
+    pub fn clearCurrentTab(self: *Bridge, session_id: []const u8) void {
+        self.mu.lock();
+        defer self.mu.unlock();
+        if (self.current_tabs.fetchRemove(session_id)) |kv| {
+            self.allocator.free(kv.key);
+            self.allocator.free(kv.value);
+        }
+    }
+
+    pub fn touchTab(self: *Bridge, tab_id: []const u8) bool {
+        self.mu.lock();
+        defer self.mu.unlock();
+        const entry = self.tabs.getPtr(tab_id) orelse return false;
+        entry.last_accessed = compat.timestampSeconds();
+        return true;
+    }
+
+    pub fn updateTabMetadata(self: *Bridge, tab_id: []const u8, url: []const u8, title: []const u8) !bool {
+        self.mu.lock();
+        defer self.mu.unlock();
+
+        const entry = self.tabs.getPtr(tab_id) orelse return false;
+
+        const owned_url = try self.allocator.dupe(u8, url);
+        errdefer self.allocator.free(owned_url);
+        const owned_title = try self.allocator.dupe(u8, title);
+        errdefer self.allocator.free(owned_title);
+
+        self.allocator.free(entry.url);
+        self.allocator.free(entry.title);
+        entry.url = owned_url;
+        entry.title = owned_title;
+        entry.last_accessed = compat.timestampSeconds();
+        return true;
+    }
+
     /// Get or create a CDP client for a tab.
     /// Returns a stable heap-allocated pointer that survives HashMap resizes.
     pub fn getCdpClient(self: *Bridge, tab_id: []const u8) ?*CdpClient {
@@ -249,61 +344,44 @@ pub const Bridge = struct {
         self.mu.lockShared();
         defer self.mu.unlockShared();
 
-        var json_buf: std.ArrayList(u8) = .empty;
-        const writer = json_buf.writer(allocator);
-        try writer.writeAll("[");
+        const persisted_tabs = try allocator.alloc(PersistedTab, self.tabs.count());
+        defer allocator.free(persisted_tabs);
+
         var it = self.tabs.valueIterator();
-        var first = true;
-        while (it.next()) |tab| {
-            if (!first) try writer.writeAll(",");
-            first = false;
-            try writer.print("{{\"id\":\"{s}\",\"url\":\"{s}\",\"title\":\"{s}\",\"ws_url\":\"{s}\"}}", .{ tab.id, tab.url, tab.title, tab.ws_url });
+        var i: usize = 0;
+        while (it.next()) |tab| : (i += 1) {
+            persisted_tabs[i] = .{
+                .id = tab.id,
+                .url = tab.url,
+                .title = tab.title,
+                .ws_url = tab.ws_url,
+            };
         }
-        try writer.writeAll("]");
-        return json_buf.toOwnedSlice(allocator);
+
+        return std.json.Stringify.valueAlloc(allocator, persisted_tabs, .{});
     }
 
     pub fn importState(self: *Bridge, json: []const u8, allocator: std.mem.Allocator) !usize {
-        _ = allocator;
-        var count: usize = 0;
-        var pos: usize = 0;
+        var parse_arena = std.heap.ArenaAllocator.init(allocator);
+        defer parse_arena.deinit();
 
-        while (pos < json.len) {
-            const obj_start = std.mem.indexOfScalarPos(u8, json, pos, '{') orelse break;
-            const obj_end = std.mem.indexOfScalarPos(u8, json, obj_start, '}') orelse break;
-            const obj = json[obj_start .. obj_end + 1];
+        const persisted_tabs = try std.json.parseFromSliceLeaky([]PersistedTab, parse_arena.allocator(), json, .{
+            .ignore_unknown_fields = true,
+        });
+        const now = compat.timestampSeconds();
 
-            const id = extractField(obj, "\"id\"") orelse {
-                pos = obj_end + 1;
-                continue;
-            };
-            const url = extractField(obj, "\"url\"") orelse "";
-            const title = extractField(obj, "\"title\"") orelse "";
-            const ws_url = extractField(obj, "\"ws_url\"") orelse "";
-
+        for (persisted_tabs) |tab| {
             try self.putTab(.{
-                .id = id,
-                .url = url,
-                .title = title,
-                .ws_url = ws_url,
-                .created_at = std.time.timestamp(),
-                .last_accessed = std.time.timestamp(),
+                .id = tab.id,
+                .url = tab.url,
+                .title = tab.title,
+                .ws_url = tab.ws_url,
+                .created_at = now,
+                .last_accessed = now,
             });
-            count += 1;
-            pos = obj_end + 1;
         }
-        return count;
-    }
 
-    fn extractField(json: []const u8, field: []const u8) ?[]const u8 {
-        const field_pos = std.mem.indexOf(u8, json, field) orelse return null;
-        const colon = std.mem.indexOfScalarPos(u8, json, field_pos + field.len, ':') orelse return null;
-        var i = colon + 1;
-        while (i < json.len and (json[i] == ' ' or json[i] == '"')) : (i += 1) {}
-        if (i >= json.len) return null;
-        const val_start = i;
-        const val_end = std.mem.indexOfScalarPos(u8, json, val_start, '"') orelse return null;
-        return json[val_start..val_end];
+        return persisted_tabs.len;
     }
 
     /// Get or create a HAR recorder for a tab.
@@ -372,6 +450,8 @@ pub const Bridge = struct {
                 self.allocator.free(node.role);
                 self.allocator.free(node.name);
                 self.allocator.free(node.value);
+                self.allocator.free(node.description);
+                self.allocator.free(node.state);
             }
         }
 
@@ -381,6 +461,8 @@ pub const Bridge = struct {
                 .role = try self.allocator.dupe(u8, node.role),
                 .name = try self.allocator.dupe(u8, node.name),
                 .value = try self.allocator.dupe(u8, node.value),
+                .description = try self.allocator.dupe(u8, node.description),
+                .state = try self.allocator.dupe(u8, node.state),
                 .backend_node_id = node.backend_node_id,
                 .depth = node.depth,
             };
@@ -397,6 +479,8 @@ fn freeSnapshot(allocator: std.mem.Allocator, snapshot: []const A11yNode) void {
         allocator.free(node.role);
         allocator.free(node.name);
         allocator.free(node.value);
+        allocator.free(node.description);
+        allocator.free(node.state);
     }
     allocator.free(snapshot);
 }
@@ -444,6 +528,57 @@ test "importState round-trip" {
     try std.testing.expectEqualStrings("https://a.com", tab.?.url);
 }
 
+test "session persistence preserves escaped JSON values" {
+    var source = Bridge.init(std.testing.allocator);
+    defer source.deinit();
+
+    try source.putTab(.{
+        .id = "tab-escaped",
+        .url = "data:text/html,{\"message\":\"hello\\\\world\"}",
+        .title = "Brace } and quote \" and slash \\\\",
+        .ws_url = "ws://localhost:9222/devtools/page/tab-escaped?label=\"quoted\"",
+        .created_at = 1000,
+        .last_accessed = 1000,
+    });
+
+    const json = try source.exportState(std.testing.allocator);
+    defer std.testing.allocator.free(json);
+
+    var target = Bridge.init(std.testing.allocator);
+    defer target.deinit();
+
+    const count = try target.importState(json, std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 1), count);
+
+    const tab = target.getTab("tab-escaped").?;
+    try std.testing.expectEqualStrings("data:text/html,{\"message\":\"hello\\\\world\"}", tab.url);
+    try std.testing.expectEqualStrings("Brace } and quote \" and slash \\\\", tab.title);
+    try std.testing.expectEqualStrings("ws://localhost:9222/devtools/page/tab-escaped?label=\"quoted\"", tab.ws_url);
+}
+
+test "importState rejects malformed ws_url values" {
+    var bridge = Bridge.init(std.testing.allocator);
+    defer bridge.deinit();
+
+    const input =
+        \\[
+        \\  {
+        \\    "id": "tab-1",
+        \\    "url": "https://example.com",
+        \\    "title": "Example",
+        \\    "ws_url": {"nested": "ws://unexpected"}
+        \\  }
+        \\]
+    ;
+
+    if (bridge.importState(input, std.testing.allocator)) |_| {
+        return error.TestExpectedImportFailure;
+    } else |_| {}
+
+    try std.testing.expectEqual(@as(usize, 0), bridge.tabCount());
+    try std.testing.expect(bridge.getTab("tab-1") == null);
+}
+
 test "bridge tab CRUD" {
     var bridge = Bridge.init(std.testing.allocator);
     defer bridge.deinit();
@@ -465,4 +600,44 @@ test "bridge tab CRUD" {
 
     bridge.removeTab("tab-1");
     try std.testing.expectEqual(@as(usize, 0), bridge.tabCount());
+}
+
+test "bridge current tab session mapping" {
+    var bridge = Bridge.init(std.testing.allocator);
+    defer bridge.deinit();
+
+    try bridge.putTab(.{
+        .id = "tab-1",
+        .url = "https://example.com",
+        .title = "Example",
+        .ws_url = "",
+        .created_at = 1000,
+        .last_accessed = 1000,
+    });
+
+    try bridge.setCurrentTab("session-a", "tab-1");
+    const current = bridge.getCurrentTab(std.testing.allocator, "session-a").?;
+    defer std.testing.allocator.free(current);
+    try std.testing.expectEqualStrings("tab-1", current);
+
+    bridge.clearCurrentTab("session-a");
+    try std.testing.expect(bridge.getCurrentTab(std.testing.allocator, "session-a") == null);
+}
+
+test "bridge removeTab clears current-tab session mapping" {
+    var bridge = Bridge.init(std.testing.allocator);
+    defer bridge.deinit();
+
+    try bridge.putTab(.{
+        .id = "tab-1",
+        .url = "https://example.com",
+        .title = "Example",
+        .ws_url = "",
+        .created_at = 1000,
+        .last_accessed = 1000,
+    });
+    try bridge.setCurrentTab("session-a", "tab-1");
+
+    bridge.removeTab("tab-1");
+    try std.testing.expect(bridge.getCurrentTab(std.testing.allocator, "session-a") == null);
 }

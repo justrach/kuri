@@ -1,4 +1,6 @@
 const std = @import("std");
+const builtin = @import("builtin");
+const compat = @import("../compat.zig");
 
 pub const ValidationError = error{
     InvalidScheme,
@@ -16,9 +18,11 @@ pub fn validateUrl(url: []const u8) ValidationError!void {
         return ValidationError.InvalidScheme;
     }
 
-    const host = extractHost(url) orelse return ValidationError.InvalidUrl;
+    const raw_host = extractHost(url) orelse return ValidationError.InvalidUrl;
+    var normalized_host_buf: [256]u8 = undefined;
+    const host = normalizeHost(raw_host, &normalized_host_buf) orelse return ValidationError.InvalidUrl;
 
-    if (std.mem.eql(u8, host, "localhost") or std.mem.eql(u8, host, "127.0.0.1") or std.mem.eql(u8, host, "::1")) {
+    if (isLocalhostAlias(host) or std.mem.eql(u8, host, "127.0.0.1") or std.mem.eql(u8, host, "::1")) {
         return ValidationError.LocalhostBlocked;
     }
 
@@ -52,40 +56,85 @@ pub fn validateOutputPath(path: []const u8) ValidationError!void {
         }
     }
 
-    // Symlink check via lstat
-    const stat = std.fs.cwd().statFile(path) catch |err| switch (err) {
-        // File doesn't exist yet — safe to create
-        error.FileNotFound => return,
-        // Access denied or other OS errors — reject conservatively
-        else => return ValidationError.InvalidPath,
-    };
+    // For existing files, check symlink via lstat (race-free for existing paths).
+    // Note: TOCTOU gap remains for files created between check and use.
+    // Callers should open with O_NOFOLLOW where the OS supports it.
+    var path_buf: [4096]u8 = undefined;
+    if (path.len >= path_buf.len) return ValidationError.InvalidPath;
+    @memcpy(path_buf[0..path.len], path);
+    path_buf[path.len] = 0;
+    const path_z: [*:0]const u8 = path_buf[0..path.len :0];
 
-    if (stat.kind == .sym_link) {
+    if (pathIsSymlink(path_z)) {
         return ValidationError.SymlinkNotAllowed;
     }
 }
 
-fn extractHost(url: []const u8) ?[]const u8 {
-    const scheme_end = std.mem.indexOf(u8, url, "://") orelse return null;
-    const after_scheme = url[scheme_end + 3 ..];
+fn pathIsSymlink(path_z: [*:0]const u8) bool {
+    return switch (builtin.os.tag) {
+        .linux => linuxPathIsSymlink(path_z),
+        else => posixPathIsSymlink(path_z),
+    };
+}
 
-    const after_auth = if (std.mem.indexOfScalar(u8, after_scheme, '@')) |idx| after_scheme[idx + 1 ..] else after_scheme;
+fn linuxPathIsSymlink(path_z: [*:0]const u8) bool {
+    const linux = std.os.linux;
+    var statx = std.mem.zeroes(linux.Statx);
+    const flags = linux.AT.NO_AUTOMOUNT | linux.AT.SYMLINK_NOFOLLOW;
 
-    // Handle IPv6 [::1] notation
-    if (after_auth.len > 0 and after_auth[0] == '[') {
-        if (std.mem.indexOfScalar(u8, after_auth, ']')) |bracket_end| {
-            return after_auth[1..bracket_end];
-        }
-        return null;
+    switch (linux.errno(linux.statx(linux.AT.FDCWD, path_z, flags, .{ .TYPE = true }, &statx))) {
+        .SUCCESS => return linux.S.ISLNK(statx.mode),
+        else => return false,
+    }
+}
+
+fn posixPathIsSymlink(path_z: [*:0]const u8) bool {
+    if (comptime @import("builtin").os.tag == .windows) return false; // POSIX fstatat
+    var stat_buf: std.c.Stat = undefined;
+    if (std.c.fstatat(std.c.AT.FDCWD, path_z, &stat_buf, std.c.AT.SYMLINK_NOFOLLOW) != 0) {
+        return false;
     }
 
-    var end = after_auth.len;
-    if (std.mem.indexOfScalar(u8, after_auth, ':')) |idx| end = @min(end, idx);
-    if (std.mem.indexOfScalar(u8, after_auth, '/')) |idx| end = @min(end, idx);
-    if (std.mem.indexOfScalar(u8, after_auth, '?')) |idx| end = @min(end, idx);
+    return std.c.S.ISLNK(@intCast(stat_buf.mode));
+}
 
-    if (end == 0) return null;
-    return after_auth[0..end];
+fn extractHost(url: []const u8) ?[]const u8 {
+    const uri = std.Uri.parse(url) catch return null;
+    const host = uri.host orelse return null;
+
+    return switch (host) {
+        .raw => |raw| stripIpv6Brackets(raw),
+        .percent_encoded => |encoded| stripIpv6Brackets(encoded),
+    };
+}
+
+fn stripIpv6Brackets(host: []const u8) []const u8 {
+    if (host.len >= 2 and host[0] == '[' and host[host.len - 1] == ']') {
+        return host[1 .. host.len - 1];
+    }
+    return host;
+}
+
+fn normalizeHost(host: []const u8, buf: []u8) ?[]const u8 {
+    var trimmed = host;
+    while (trimmed.len > 0 and trimmed[trimmed.len - 1] == '.') {
+        trimmed = trimmed[0 .. trimmed.len - 1];
+    }
+
+    if (trimmed.len == 0 or trimmed.len > buf.len) return null;
+
+    for (trimmed, 0..) |c, i| {
+        buf[i] = std.ascii.toLower(c);
+    }
+
+    return buf[0..trimmed.len];
+}
+
+fn isLocalhostAlias(host: []const u8) bool {
+    return std.mem.eql(u8, host, "localhost") or
+        std.mem.eql(u8, host, "localhost.localdomain") or
+        std.mem.endsWith(u8, host, ".localhost") or
+        std.mem.endsWith(u8, host, ".localhost.localdomain");
 }
 
 fn isPrivateIpv4(host: []const u8) bool {
@@ -183,6 +232,14 @@ test "validateUrl blocks localhost" {
     try std.testing.expectError(ValidationError.LocalhostBlocked, validateUrl("http://localhost"));
     try std.testing.expectError(ValidationError.LocalhostBlocked, validateUrl("http://127.0.0.1"));
     try std.testing.expectError(ValidationError.LocalhostBlocked, validateUrl("http://[::1]"));
+}
+
+test "validateUrl blocks normalized localhost aliases" {
+    try std.testing.expectError(ValidationError.LocalhostBlocked, validateUrl("http://LOCALHOST/"));
+    try std.testing.expectError(ValidationError.LocalhostBlocked, validateUrl("http://localhost./"));
+    try std.testing.expectError(ValidationError.LocalhostBlocked, validateUrl("http://app.localhost/"));
+    try std.testing.expectError(ValidationError.LocalhostBlocked, validateUrl("http://LOCALHOST.localdomain./"));
+    try std.testing.expectError(ValidationError.LocalhostBlocked, validateUrl("http://LOCALHOST#fragment"));
 }
 
 test "validateUrl blocks private IPs" {

@@ -1,6 +1,10 @@
 const builtin = @import("builtin");
 const std = @import("std");
 const json_util = @import("../util/json.zig");
+const compat = @import("../compat.zig");
+
+extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+extern "c" fn unsetenv(name: [*:0]const u8) c_int;
 
 pub const Backend = enum {
     keychain,
@@ -33,7 +37,7 @@ pub fn saveProfile(
 
     const dir_path = try authProfilesDir(allocator, state_dir);
     defer allocator.free(dir_path);
-    try std.fs.cwd().makePath(dir_path);
+    try compat.cwdMakePath(dir_path);
 
     switch (backend) {
         .keychain => {
@@ -46,7 +50,7 @@ pub fn saveProfile(
     try writeMetaFile(allocator, dir_path, safe_name, .{
         .name = name,
         .origin = origin,
-        .saved_at = std.time.timestamp(),
+        .saved_at = compat.timestampSeconds(),
         .backend = backend,
     });
 
@@ -64,7 +68,22 @@ pub fn loadProfile(
     const dir_path = try authProfilesDir(allocator, state_dir);
     defer allocator.free(dir_path);
 
-    const meta = try readMetaFile(allocator, dir_path, safe_name);
+    const meta = readMetaFile(allocator, dir_path, safe_name) catch |err| {
+        // Desync recovery — the meta file can go missing while the keychain
+        // still holds the secret: saveProfile writes the keychain entry first
+        // (keychainUpsert) and the meta file second (writeMetaFile); if the
+        // meta write fails or is later lost, the cookies are orphaned —
+        // loadProfile can't find them and the user appears logged out though
+        // the cookies are right there in the keychain ("constant logout").
+        // Before failing, try the keychain directly by the original name under
+        // the default (keychain) backend. No-op on the file backend.
+        if (preferredBackend() == .keychain) {
+            if (keychainRead(allocator, name)) |secret| {
+                return secret;
+            } else |_| {}
+        }
+        return err;
+    };
     defer freeMeta(allocator, meta);
 
     return switch (meta.backend) {
@@ -97,33 +116,35 @@ pub fn deleteProfile(
 
     const meta_path = try metaFilePath(allocator, dir_path, safe_name);
     defer allocator.free(meta_path);
-    std.fs.cwd().deleteFile(meta_path) catch |err| switch (err) {
-        error.FileNotFound => {},
-        else => return err,
-    };
+    compat.cwdDeleteFile(meta_path) catch {};
 }
 
 pub fn listProfiles(
     allocator: std.mem.Allocator,
     state_dir: []const u8,
 ) ![]AuthProfileMeta {
+    if (comptime @import("builtin").os.tag == .windows) return &.{};
     const dir_path = try authProfilesDir(allocator, state_dir);
     defer allocator.free(dir_path);
 
-    var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch |err| switch (err) {
-        error.FileNotFound => return allocator.alloc(AuthProfileMeta, 0),
-        else => return err,
-    };
-    defer dir.close();
+    var path_buf: [4096]u8 = undefined;
+    if (dir_path.len >= path_buf.len) return error.NameTooLong;
+    @memcpy(path_buf[0..dir_path.len], dir_path);
+    path_buf[dir_path.len] = 0;
+    const dir_z: [*:0]const u8 = path_buf[0..dir_path.len :0];
+
+    const dp = std.c.opendir(dir_z) orelse return allocator.alloc(AuthProfileMeta, 0);
+    defer _ = std.c.closedir(dp);
 
     var list: std.ArrayList(AuthProfileMeta) = .empty;
     defer list.deinit(allocator);
 
-    var iter = dir.iterate();
-    while (try iter.next()) |entry| {
-        if (!std.mem.endsWith(u8, entry.name, ".meta.json")) continue;
+    while (std.c.readdir(dp)) |entry| {
+        const name_ptr: [*:0]const u8 = @ptrCast(&entry.name);
+        const name = std.mem.sliceTo(name_ptr, 0);
+        if (!std.mem.endsWith(u8, name, ".meta.json")) continue;
 
-        const safe_name = entry.name[0 .. entry.name.len - ".meta.json".len];
+        const safe_name = name[0 .. name.len - ".meta.json".len];
         const meta = readMetaFile(allocator, dir_path, safe_name) catch continue;
         try list.append(allocator, meta);
     }
@@ -221,13 +242,43 @@ fn readMetaFile(
     const path = try metaFilePath(allocator, dir_path, safe_name);
     defer allocator.free(path);
 
-    const body = try std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024);
+    const body = try compat.cwdReadFile(allocator, path, 1024 * 1024);
     defer allocator.free(body);
 
-    const name = extractStringField(body, "\"name\"") orelse return error.InvalidProfileMeta;
-    const origin = extractStringField(body, "\"origin\"") orelse return error.InvalidProfileMeta;
-    const backend_raw = extractStringField(body, "\"backend\"") orelse "file";
-    const saved_at = extractIntField(body, "\"saved_at\"") orelse return error.InvalidProfileMeta;
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+
+    const parsed = std.json.parseFromSliceLeaky(std.json.Value, arena_state.allocator(), body, .{}) catch {
+        return error.InvalidProfileMeta;
+    };
+    const object = switch (parsed) {
+        .object => |obj| obj,
+        else => return error.InvalidProfileMeta,
+    };
+
+    const name_value = object.get("name") orelse return error.InvalidProfileMeta;
+    const name = switch (name_value) {
+        .string => |value| value,
+        else => return error.InvalidProfileMeta,
+    };
+
+    const origin_value = object.get("origin") orelse return error.InvalidProfileMeta;
+    const origin = switch (origin_value) {
+        .string => |value| value,
+        else => return error.InvalidProfileMeta,
+    };
+
+    const saved_at_value = object.get("saved_at") orelse return error.InvalidProfileMeta;
+    const saved_at = switch (saved_at_value) {
+        .integer => |value| value,
+        .number_string => |value| std.fmt.parseInt(i64, value, 10) catch return error.InvalidProfileMeta,
+        else => return error.InvalidProfileMeta,
+    };
+
+    const backend_raw = if (object.get("backend")) |backend_value| switch (backend_value) {
+        .string => |value| value,
+        else => return error.InvalidProfileMeta,
+    } else "file";
 
     return .{
         .name = try allocator.dupe(u8, name),
@@ -255,7 +306,7 @@ fn readSecretFile(
 ) ![]u8 {
     const path = try secretFilePath(allocator, dir_path, safe_name);
     defer allocator.free(path);
-    return std.fs.cwd().readFileAlloc(allocator, path, 8 * 1024 * 1024);
+    return compat.cwdReadFile(allocator, path, 8 * 1024 * 1024);
 }
 
 fn deleteSecretFile(
@@ -265,35 +316,11 @@ fn deleteSecretFile(
 ) !void {
     const path = try secretFilePath(allocator, dir_path, safe_name);
     defer allocator.free(path);
-    std.fs.cwd().deleteFile(path) catch |err| switch (err) {
-        error.FileNotFound => {},
-        else => return err,
-    };
+    compat.cwdDeleteFile(path) catch {};
 }
 
 fn writeFile(path: []const u8, contents: []const u8) !void {
-    const file = try std.fs.cwd().createFile(path, .{ .truncate = true });
-    defer file.close();
-    try file.writeAll(contents);
-}
-
-fn extractStringField(json: []const u8, field: []const u8) ?[]const u8 {
-    const field_pos = std.mem.indexOf(u8, json, field) orelse return null;
-    const colon = std.mem.indexOfScalarPos(u8, json, field_pos + field.len, ':') orelse return null;
-    const quote_start = std.mem.indexOfScalarPos(u8, json, colon + 1, '"') orelse return null;
-    const value_start = quote_start + 1;
-    const value_end = std.mem.indexOfScalarPos(u8, json, value_start, '"') orelse return null;
-    return json[value_start..value_end];
-}
-
-fn extractIntField(json: []const u8, field: []const u8) ?i64 {
-    const field_pos = std.mem.indexOf(u8, json, field) orelse return null;
-    const colon = std.mem.indexOfScalarPos(u8, json, field_pos + field.len, ':') orelse return null;
-    var start = colon + 1;
-    while (start < json.len and (json[start] == ' ' or json[start] == '\n' or json[start] == '\r')) : (start += 1) {}
-    var end = start;
-    while (end < json.len and (json[end] == '-' or std.ascii.isDigit(json[end]))) : (end += 1) {}
-    return std.fmt.parseInt(i64, json[start..end], 10) catch null;
+    try compat.cwdWriteFile(path, contents);
 }
 
 fn keychainUpsert(allocator: std.mem.Allocator, name: []const u8, payload_json: []const u8) !void {
@@ -337,44 +364,49 @@ fn keychainDelete(allocator: std.mem.Allocator, name: []const u8) !void {
 }
 
 fn runCommand(allocator: std.mem.Allocator, argv: []const []const u8) ![]u8 {
-    const result = try std.process.Child.run(.{
-        .allocator = allocator,
-        .argv = argv,
-        .max_output_bytes = 8 * 1024 * 1024,
-    });
-    defer allocator.free(result.stderr);
-    errdefer allocator.free(result.stdout);
-
-    switch (result.term) {
-        .Exited => |code| {
-            if (code != 0) return error.CommandFailed;
-        },
-        else => return error.CommandFailed,
+    const result = try compat.runCommand(allocator, argv, 8 * 1024 * 1024);
+    if ((result.term & 0x7f) != 0 or ((result.term >> 8) & 0xff) != 0) {
+        allocator.free(result.stdout);
+        return error.CommandFailed;
     }
 
     const trimmed = std.mem.trim(u8, result.stdout, "\r\n");
     if (trimmed.len == result.stdout.len) return result.stdout;
 
-    const duped = try allocator.dupe(u8, trimmed);
+    const output = try allocator.dupe(u8, trimmed);
     allocator.free(result.stdout);
-    return duped;
+    return output;
 }
 
-test "sanitizeName normalizes unsafe characters" {
+fn deleteTreeAbsolute(dir: []const u8) void {
+    if (comptime @import("builtin").os.tag == .windows) return;
+    var buf: [4096]u8 = undefined;
+    const cmd = std.fmt.bufPrint(&buf, "rm -rf {s}", .{dir}) catch return;
+    buf[cmd.len] = 0;
+    const pid = std.c.fork();
+    if (pid == 0) {
+        const argv = [_:null]?[*:0]const u8{ "/bin/sh", "-c", buf[0..cmd.len :0], null };
+        _ = std.c.execve("/bin/sh", &argv, @ptrCast(std.c.environ));
+        std.c.exit(127);
+    }
+    if (pid > 0) _ = std.c.waitpid(pid, null, 0);
+}
+
+test "auth profile sanitizeName normalizes unsafe characters" {
     const value = try sanitizeName(std.testing.allocator, "prod/google oauth");
     defer std.testing.allocator.free(value);
     try std.testing.expectEqualStrings("prod_google_oauth", value);
 }
 
-test "file-backed auth profile round trip" {
+test "auth profile file-backed round trip" {
     const allocator = std.testing.allocator;
-    const dir = try std.fmt.allocPrint(allocator, "/tmp/kuri_auth_profile_test_{d}", .{std.time.timestamp()});
+    const dir = try std.fmt.allocPrint(allocator, "/tmp/kuri_auth_profile_test_{d}", .{compat.timestampSeconds()});
     defer allocator.free(dir);
-    defer std.fs.deleteTreeAbsolute(dir) catch {};
+    defer deleteTreeAbsolute(dir);
 
     const profiles_dir = try authProfilesDir(allocator, dir);
     defer allocator.free(profiles_dir);
-    try std.fs.cwd().makePath(profiles_dir);
+    try compat.cwdMakePath(profiles_dir);
 
     const safe_name = try sanitizeName(allocator, "demo");
     defer allocator.free(safe_name);
@@ -395,4 +427,92 @@ test "file-backed auth profile round trip" {
     defer freeProfiles(allocator, profiles);
     try std.testing.expectEqual(@as(usize, 1), profiles.len);
     try std.testing.expectEqualStrings("demo", profiles[0].name);
+}
+
+test "auth profile metadata round trip preserves escaped JSON strings" {
+    const allocator = std.testing.allocator;
+    const dir = try std.fmt.allocPrint(
+        allocator,
+        "/tmp/kuri_auth_profile_meta_test_{d}_{d}",
+        .{ compat.timestampSeconds(), std.c.getpid() },
+    );
+    defer allocator.free(dir);
+    defer deleteTreeAbsolute(dir);
+
+    const profiles_dir = try authProfilesDir(allocator, dir);
+    defer allocator.free(profiles_dir);
+    try compat.cwdMakePath(profiles_dir);
+
+    const name = "demo \"qa\"\\profile";
+    const origin = "https://example.com/callback?label=\"qa\"&path=C:\\Users\\demo";
+    const safe_name = try sanitizeName(allocator, name);
+    defer allocator.free(safe_name);
+
+    try writeMetaFile(allocator, profiles_dir, safe_name, .{
+        .name = name,
+        .origin = origin,
+        .saved_at = 456,
+        .backend = .keychain,
+    });
+
+    const meta = try readMetaFile(allocator, profiles_dir, safe_name);
+    defer freeMeta(allocator, meta);
+
+    try std.testing.expectEqualStrings(name, meta.name);
+    try std.testing.expectEqualStrings(origin, meta.origin);
+    try std.testing.expectEqual(@as(i64, 456), meta.saved_at);
+    try std.testing.expectEqual(Backend.keychain, meta.backend);
+}
+
+test "auth profile runCommand resolves executables from PATH" {
+    const allocator = std.testing.allocator;
+    const dir = try std.fmt.allocPrint(
+        allocator,
+        "/tmp/kuri_auth_profile_path_test_{d}_{d}",
+        .{ compat.timestampSeconds(), std.c.getpid() },
+    );
+    defer allocator.free(dir);
+    defer deleteTreeAbsolute(dir);
+
+    try compat.cwdMakePath(dir);
+
+    const script_path = try std.fs.path.join(allocator, &.{ dir, "kuri-path-check" });
+    defer allocator.free(script_path);
+    try writeFile(script_path, "#!/bin/sh\nprintf path-ok\n");
+
+    const script_path_z = try allocator.allocSentinel(u8, script_path.len, 0);
+    defer allocator.free(script_path_z);
+    @memcpy(script_path_z[0..script_path.len], script_path);
+    try std.testing.expectEqual(@as(c_int, 0), std.c.chmod(script_path_z, 0o755));
+
+    const path_name = "PATH";
+    const path_name_z = try allocator.allocSentinel(u8, path_name.len, 0);
+    defer allocator.free(path_name_z);
+    @memcpy(path_name_z[0..path_name.len], path_name);
+
+    const old_path = compat.getenv(path_name);
+    const old_path_copy = if (old_path) |value| try allocator.dupe(u8, value) else null;
+    defer if (old_path_copy) |value| allocator.free(value);
+    const old_path_z = if (old_path_copy) |value| blk: {
+        const value_z = try allocator.allocSentinel(u8, value.len, 0);
+        @memcpy(value_z[0..value.len], value);
+        break :blk value_z;
+    } else null;
+    defer if (old_path_z) |value| allocator.free(value);
+    defer {
+        if (old_path_z) |value| {
+            _ = setenv(path_name_z, value, 1);
+        } else {
+            _ = unsetenv(path_name_z);
+        }
+    }
+
+    const dir_z = try allocator.allocSentinel(u8, dir.len, 0);
+    defer allocator.free(dir_z);
+    @memcpy(dir_z[0..dir.len], dir);
+    try std.testing.expectEqual(@as(c_int, 0), setenv(path_name_z, dir_z, 1));
+
+    const output = try runCommand(allocator, &.{"kuri-path-check"});
+    defer allocator.free(output);
+    try std.testing.expectEqualStrings("path-ok", output);
 }
