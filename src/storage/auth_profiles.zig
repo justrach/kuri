@@ -68,7 +68,22 @@ pub fn loadProfile(
     const dir_path = try authProfilesDir(allocator, state_dir);
     defer allocator.free(dir_path);
 
-    const meta = try readMetaFile(allocator, dir_path, safe_name);
+    const meta = readMetaFile(allocator, dir_path, safe_name) catch |err| {
+        // Desync recovery — the meta file can go missing while the keychain
+        // still holds the secret: saveProfile writes the keychain entry first
+        // (keychainUpsert) and the meta file second (writeMetaFile); if the
+        // meta write fails or is later lost, the cookies are orphaned —
+        // loadProfile can't find them and the user appears logged out though
+        // the cookies are right there in the keychain ("constant logout").
+        // Before failing, try the keychain directly by the original name under
+        // the default (keychain) backend. No-op on the file backend.
+        if (preferredBackend() == .keychain) {
+            if (keychainRead(allocator, name)) |secret| {
+                return secret;
+            } else |_| {}
+        }
+        return err;
+    };
     defer freeMeta(allocator, meta);
 
     return switch (meta.backend) {
