@@ -1,7 +1,9 @@
 const std = @import("std");
 const json_util = @import("../util/json.zig");
+const telemetry = @import("../telemetry.zig");
 
 pub fn sendJson(request: *std.http.Server.Request, body: []const u8) void {
+    telemetry.noteResponse(200, body.len);
     request.respond(body, .{
         .extra_headers = &.{
             .{ .name = "content-type", .value = "application/json" },
@@ -23,6 +25,7 @@ pub fn sendError(request: *std.http.Server.Request, status_code: u10, message: [
     else
         "{\"error\":\"Internal Server Error\"}";
 
+    telemetry.noteResponse(status_code, body.len);
     request.respond(body, .{
         .status = status,
         .extra_headers = &.{

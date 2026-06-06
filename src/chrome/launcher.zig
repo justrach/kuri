@@ -156,6 +156,13 @@ pub const Launcher = struct {
         try argv_list.append(self.allocator, "--disable-background-networking");
         try argv_list.append(self.allocator, "--disable-dev-shm-usage");
         try argv_list.append(self.allocator, "--window-size=1920,1080");
+        // Use an in-memory mock keychain so Chrome never prompts for macOS
+        // Keychain access ("Chrome Safe Storage") on launch. Each fresh profile
+        // (--user-data-dir) would otherwise pop a Keychain dialog — and every
+        // gateway worker uses a new profile, so this is one prompt per spawn.
+        // --password-store=basic is the Linux analogue (no GNOME keyring/kwallet).
+        try argv_list.append(self.allocator, "--use-mock-keychain");
+        try argv_list.append(self.allocator, "--password-store=basic");
 
         if (self.proxy) |proxy_url| {
             const proxy_flag = try std.fmt.allocPrint(self.allocator, "--proxy-server={s}", .{proxy_url});

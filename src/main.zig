@@ -6,8 +6,9 @@ const Bridge = @import("bridge/bridge.zig").Bridge;
 const launcher = @import("chrome/launcher.zig");
 const api_token = @import("server/api_token.zig");
 const lifecycle = @import("lifecycle.zig");
+const telemetry = @import("telemetry.zig");
 
-const version = "0.4.1";
+const version = @import("build_options").version;
 
 const CliAction = enum {
     run,
@@ -108,6 +109,14 @@ pub fn main(init: std.process.Init.Minimal) !void {
     const startup_discovered = try server.discoverTabs(startup_arena_impl.allocator(), &bridge, runtime_cfg, start_result.cdp_port);
     std.log.info("startup discovery registered {d} tabs", .{startup_discovered});
 
+    // Anonymous, opt-out usage telemetry (KURI_NO_TELEMETRY / --no-telemetry).
+    // Records route names, latency, status, and byte counts only — never URLs,
+    // page content, or anything that identifies a user. See src/telemetry.zig.
+    telemetry.init(gpa, telemetryDisabled(args));
+    defer telemetry.deinit();
+    telemetry.startSyncThread();
+    telemetry.recordSessionStart();
+
     // Print the Jupyter-style banner *just* before the server loop blocks.
     // Token visibility is redacted when stderr isn't a TTY (see api_token.zig).
     var banner_buf: [2048]u8 = undefined;
@@ -135,7 +144,21 @@ fn parseCliAction(args: []const []const u8) !CliAction {
         return .token;
     }
 
+    // Server-mode flags (e.g. `kuri --no-telemetry`) don't switch the action.
+    if (std.mem.eql(u8, args[1], "--no-telemetry")) {
+        return .run;
+    }
+
     return error.UnknownArgument;
+}
+
+/// Whether to disable usage telemetry: `--no-telemetry` on the command line
+/// (KURI_NO_TELEMETRY is checked inside telemetry.init).
+fn telemetryDisabled(args: []const []const u8) bool {
+    for (args[1..]) |a| {
+        if (std.mem.eql(u8, a, "--no-telemetry")) return true;
+    }
+    return false;
 }
 
 /// Locate `kuri-mobile` next to this binary (or in PATH) and execvp it.
@@ -189,6 +212,7 @@ fn printUsage() void {
         \\    kuri android <cmd>       Drive Android devices (delegates to kuri-mobile)
         \\    kuri ios <cmd>           Drive iOS sims/devices (delegates to kuri-mobile)
         \\    kuri token               Print the API token (creates one if missing)
+        \\    kuri --no-telemetry      Start the server with usage telemetry disabled
         \\    kuri -h, --help          Show this help
         \\    kuri -V, --version       Print version and exit
         \\
@@ -202,6 +226,8 @@ fn printUsage() void {
         \\    KURI_SECRET              Legacy alias of KURI_API_TOKEN (also: BROWDIE_SECRET)
         \\    KURI_EXTENSIONS          Comma-separated Chrome extensions
         \\    KURI_PROXY               Proxy URL for managed Chrome
+        \\    KURI_NO_TELEMETRY        Disable anonymous usage telemetry (or use --no-telemetry)
+        \\    KURI_TELEMETRY_URL       Override the telemetry ingest endpoint (OTLP/HTTP logs)
         \\    STALE_TAB_INTERVAL_S     Tab staleness interval (default: 30)
         \\    REQUEST_TIMEOUT_MS       Default request timeout (default: 30000)
         \\    NAVIGATE_TIMEOUT_MS      Default navigate timeout (default: 30000)
@@ -261,5 +287,6 @@ test {
     _ = @import("test/integration.zig");
     _ = @import("storage/local.zig");
     _ = @import("storage/auth_profiles.zig");
+    _ = @import("storage/connect_store.zig");
     _ = @import("util/tls.zig");
 }

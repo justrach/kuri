@@ -2,6 +2,14 @@
 
 All notable changes to kuri are documented here.
 
+## [Unreleased]
+
+### Features
+- **Anonymous usage telemetry (opt-out)** — kuri now records aggregate, non-identifying usage signal (route name, method, status, latency, response byte count, platform, version, and a random per-install id) and ships it as an OpenTelemetry-aligned `kuri.telemetry.v1` payload. On by default; disable with `KURI_NO_TELEMETRY=1` or `--no-telemetry`. Override the endpoint with `KURI_TELEMETRY_URL`. **Never** collects URLs, page content, cookies, selectors, or anything that identifies a user — the query string is stripped before telemetry sees a request. See [docs/telemetry.md](docs/telemetry.md).
+
+### Fixes
+- **Version single-sourced from `build.zig.zon`** — `kuri`, `kuri-fetch`, and `kuri-browse` now read their version from a `build_options` module fed by `build.zig.zon`, instead of hardcoded strings that drifted out of sync (the binary reported `0.4.1` at the `0.4.5` release). Bump the version in one place now (#170)
+
 ## [0.4.5] — 2026-05-27
 
 ### Fixes

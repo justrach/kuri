@@ -235,4 +235,39 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| run_broker.addArgs(args);
     const broker_step = b.step("broker", "Run kuri-connect-broker daemon");
     broker_step.dependOn(&run_broker.step);
+
+    // kuri-gateway: managed-service control plane (Track 1). Spawns/leases one
+    // `kuri` worker (its own Chrome) per session, exposes an async task API, and
+    // reverse-proxies the data plane scoped by session_id. Pulls in build_options
+    // transitively via server/response.zig -> telemetry.zig.
+    const gateway_exe = b.addExecutable(.{
+        .name = "kuri-gateway",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/gateway_main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    gateway_exe.root_module.addOptions("build_options", build_options);
+    b.installArtifact(gateway_exe);
+    const run_gateway = b.addRunArtifact(gateway_exe);
+    run_gateway.step.dependOn(b.getInstallStep());
+    if (b.args) |args| run_gateway.addArgs(args);
+    const gateway_step = b.step("gateway", "Run kuri-gateway control plane");
+    gateway_step.dependOn(&run_gateway.step);
+
+    // kuri-gateway unit tests (session table, auth helpers).
+    const gateway_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/gateway_main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    gateway_tests.root_module.addOptions("build_options", build_options);
+    const run_gateway_tests = b.addRunArtifact(gateway_tests);
+    const gateway_test_step = b.step("test-gateway", "Run kuri-gateway unit tests");
+    gateway_test_step.dependOn(&run_gateway_tests.step);
 }

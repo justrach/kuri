@@ -17,6 +17,8 @@ KURI_AGENT_BIN="${KURI_AGENT_BIN:-$ROOT_DIR/zig-out/bin/kuri-agent}"
 AGENT_BROWSER_BIN="${AGENT_BROWSER_BIN:-$(command -v agent-browser || true)}"
 LIGHTPANDA_BIN="${LIGHTPANDA_BIN:-/tmp/lightpanda}"
 PYTHON_BIN="${PYTHON_BIN:-/usr/bin/python3}"
+WEBWRIGHT_PYTHON_BIN="${WEBWRIGHT_PYTHON_BIN:-$PYTHON_BIN}"
+WEBWRIGHT_CAPTURE_BIN="${WEBWRIGHT_CAPTURE_BIN:-$BENCH_DIR/webwright_aria_snapshot.py}"
 
 require_cmd() {
   command -v "$1" >/dev/null 2>&1 || {
@@ -116,12 +118,42 @@ if [[ -x "$LIGHTPANDA_BIN" ]]; then
   capture "lp_text.txt" "$LIGHTPANDA_BIN" fetch --dump semantic_tree_text --http_timeout 15000 "$URL"
 fi
 
+if [[ -f "$WEBWRIGHT_CAPTURE_BIN" ]] && "$WEBWRIGHT_PYTHON_BIN" - <<'PY' >/dev/null 2>&1
+import playwright  # noqa: F401
+PY
+then
+  capture "webwright_aria_snapshot.txt" "$WEBWRIGHT_PYTHON_BIN" "$WEBWRIGHT_CAPTURE_BIN" "$URL"
+fi
+
 KURI_COMMIT="$(git -C "$ROOT_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)"
 KURI_BRANCH="$(git -C "$ROOT_DIR" branch --show-current 2>/dev/null || echo unknown)"
+if command -v sw_vers >/dev/null 2>&1; then
+  MACHINE_OS="$(printf '%s %s (%s); %s' "$(sw_vers -productName)" "$(sw_vers -productVersion)" "$(sw_vers -buildVersion)" "$(uname -m)")"
+else
+  MACHINE_OS="$(uname -srm 2>/dev/null || echo unknown)"
+fi
+ZIG_VERSION="$(zig version 2>/dev/null || true)"
+CHROME_VERSION_JSON="$(curl -fsS http://127.0.0.1:9222/json/version 2>/dev/null || true)"
 AB_VERSION="$("$AGENT_BROWSER_BIN" --version 2>/dev/null | head -n 1 || true)"
 LP_VERSION="$("$LIGHTPANDA_BIN" version 2>/dev/null | head -n 1 || true)"
+PLAYWRIGHT_VERSION="$("$WEBWRIGHT_PYTHON_BIN" - <<'PY' 2>/dev/null || true
+try:
+    import importlib.metadata
+    print(importlib.metadata.version("playwright"))
+except Exception:
+    pass
+PY
+)"
+WEBWRIGHT_VERSION="$("$WEBWRIGHT_PYTHON_BIN" - <<'PY' 2>/dev/null || true
+try:
+    import importlib.metadata
+    print(importlib.metadata.version("webwright"))
+except Exception:
+    pass
+PY
+)"
 
-export OUT_DIR RAW_DIR URL KURI_COMMIT KURI_BRANCH AB_VERSION LP_VERSION
+export OUT_DIR RAW_DIR URL KURI_COMMIT KURI_BRANCH MACHINE_OS ZIG_VERSION CHROME_VERSION_JSON AB_VERSION LP_VERSION PLAYWRIGHT_VERSION WEBWRIGHT_VERSION WEBWRIGHT_REF
 "$PYTHON_BIN" - <<'PY'
 import datetime
 import json
@@ -134,6 +166,11 @@ out_dir = Path(os.environ["OUT_DIR"])
 raw_dir = Path(os.environ["RAW_DIR"])
 url = os.environ["URL"]
 enc = tiktoken.get_encoding("cl100k_base")
+chrome_version_payload = os.environ.get("CHROME_VERSION_JSON", "")
+try:
+    chrome_version = json.loads(chrome_version_payload).get("Browser", "") if chrome_version_payload else ""
+except Exception:
+    chrome_version = ""
 
 def measure(name):
     p = raw_dir / name
@@ -155,6 +192,7 @@ rows = {
     "agent-browser snapshot -i": measure("ab_snap_i.txt"),
     "lightpanda semantic_tree": measure("lp_tree.txt"),
     "lightpanda semantic_tree_text": measure("lp_text.txt"),
+    "Webwright/Playwright aria_snapshot": measure("webwright_aria_snapshot.txt"),
 }
 
 baseline = rows["kuri snap (compact)"]["tokens"] if rows["kuri snap (compact)"] else None
@@ -197,8 +235,17 @@ summary = {
     "url": url,
     "kuri_branch": os.environ.get("KURI_BRANCH", ""),
     "kuri_commit": os.environ.get("KURI_COMMIT", ""),
+    "machine_os": os.environ.get("MACHINE_OS", ""),
+    "zig_version": os.environ.get("ZIG_VERSION", ""),
+    "chrome_version": chrome_version,
     "agent_browser_version": os.environ.get("AB_VERSION", ""),
     "lightpanda_version": os.environ.get("LP_VERSION", ""),
+    "playwright_version": os.environ.get("PLAYWRIGHT_VERSION", ""),
+    "webwright_version": os.environ.get("WEBWRIGHT_VERSION", ""),
+    "webwright_ref": os.environ.get("WEBWRIGHT_REF", ""),
+    "cache_state": "cache=unknown; shared Chrome/CDP session is reused for kuri-agent and agent-browser; Webwright/Playwright capture uses a fresh browser context but the top-level URL is not cache-busted by this runner.",
+    "run_mode": "live single-run token capture; sample_size=1 URL x 1 capture; warmups=0; iteration_count=1",
+    "skipped_checks": [],
     "baseline_tokens": baseline,
     "snapshots": {},
     "actions": {},
@@ -237,6 +284,13 @@ for label, item in actions.items():
             "tokens": item["tokens"],
         }
 
+if not rows["agent-browser snapshot"] and not rows["agent-browser snapshot -i"]:
+    summary["skipped_checks"].append("agent-browser capture (binary unavailable or capture failed)")
+if not rows["lightpanda semantic_tree"] and not rows["lightpanda semantic_tree_text"]:
+    summary["skipped_checks"].append("lightpanda capture (binary unavailable or capture failed)")
+if not rows["Webwright/Playwright aria_snapshot"]:
+    summary["skipped_checks"].append("Webwright/Playwright aria_snapshot capture (playwright unavailable or capture failed)")
+
 (out_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
 
 def fmt_num(v):
@@ -249,10 +303,29 @@ lines.append(f"- Date: `{summary['date']}`")
 lines.append(f"- URL: `{url}`")
 lines.append(f"- Kuri branch: `{summary['kuri_branch']}`")
 lines.append(f"- Kuri commit: `{summary['kuri_commit']}`")
+if summary["machine_os"]:
+    lines.append(f"- Machine/OS: `{summary['machine_os']}`")
+if summary["zig_version"]:
+    lines.append(f"- Zig: `{summary['zig_version']}`")
+if summary["chrome_version"]:
+    lines.append(f"- Chrome/CDP: `{summary['chrome_version']}`")
+lines.append(f"- Run mode: `{summary['run_mode']}`")
 if summary["agent_browser_version"]:
     lines.append(f"- agent-browser: `{summary['agent_browser_version']}`")
 if summary["lightpanda_version"]:
     lines.append(f"- lightpanda: `{summary['lightpanda_version']}`")
+if summary["webwright_version"] or summary["playwright_version"] or summary["webwright_ref"]:
+    bits = []
+    if summary["webwright_version"]:
+        bits.append(f"webwright {summary['webwright_version']}")
+    if summary["playwright_version"]:
+        bits.append(f"playwright {summary['playwright_version']}")
+    if summary["webwright_ref"]:
+        bits.append(f"ref {summary['webwright_ref']}")
+    lines.append(f"- Webwright observation baseline: `{', '.join(bits)}`")
+lines.append(f"- Cache disclosure: `{summary['cache_state']}`")
+if summary["skipped_checks"]:
+    lines.append(f"- Skipped checks: `{'; '.join(summary['skipped_checks'])}`")
 lines.append("")
 lines.append("## Snapshot Comparison")
 lines.append("")
@@ -263,6 +336,7 @@ notes = {
     "lightpanda semantic_tree": "JS-capable standalone fetch",
     "lightpanda semantic_tree_text": "Text-only semantic dump",
     "kuri snap --json": "Older verbose format",
+    "Webwright/Playwright aria_snapshot": "Observation baseline only; not Webwright agent loop",
 }
 
 for label in [
@@ -273,6 +347,7 @@ for label in [
     "agent-browser snapshot -i",
     "lightpanda semantic_tree",
     "lightpanda semantic_tree_text",
+    "Webwright/Playwright aria_snapshot",
 ]:
     item = rows.get(label)
     if not item:

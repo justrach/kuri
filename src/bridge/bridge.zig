@@ -77,6 +77,12 @@ pub const Bridge = struct {
     }
 
     pub fn deinit(self: *Bridge) void {
+        // Serialize teardown against any still-live handler threads. Callers
+        // should quiesce request threads before deinit, but take the lock so a
+        // late locked accessor can't iterate a half-freed map.
+        self.mu.lock();
+        defer self.mu.unlock();
+
         var current_it = self.current_tabs.iterator();
         while (current_it.next()) |entry| {
             self.allocator.free(entry.key_ptr.*);
@@ -196,8 +202,11 @@ pub const Bridge = struct {
 
         // Grab owned strings before removing from map
         const tab = self.tabs.get(tab_id) orelse {
-            if (self.snapshots.getPtr(tab_id)) |cache| cache.deinit();
-            _ = self.snapshots.remove(tab_id);
+            if (self.snapshots.fetchRemove(tab_id)) |kv| {
+                self.allocator.free(kv.key);
+                var cache = kv.value;
+                cache.deinit();
+            }
             if (self.prev_snapshots.fetchRemove(tab_id)) |kv| {
                 self.allocator.free(kv.key);
                 freeSnapshot(self.allocator, kv.value);
@@ -222,8 +231,11 @@ pub const Bridge = struct {
         self.allocator.free(tab.title);
         self.allocator.free(tab.ws_url);
 
-        if (self.snapshots.getPtr(tab_id)) |cache| cache.deinit();
-        _ = self.snapshots.remove(tab_id);
+        if (self.snapshots.fetchRemove(tab_id)) |kv| {
+            self.allocator.free(kv.key); // fetchRemove (not remove) so the owned key string is freed
+            var cache = kv.value;
+            cache.deinit();
+        }
         if (self.prev_snapshots.fetchRemove(tab_id)) |kv| {
             self.allocator.free(kv.key);
             freeSnapshot(self.allocator, kv.value);
@@ -319,7 +331,11 @@ pub const Bridge = struct {
     }
 
     /// Set the Chrome CDP address so Bridge can refresh dead connections.
+    /// Locked: `refreshTabWsUrl` reads these under `mu`, so the write must take
+    /// the same lock or a concurrent reader can observe a torn host slice / port.
     pub fn setCdpAddress(self: *Bridge, host: []const u8, port: u16) void {
+        self.mu.lock();
+        defer self.mu.unlock();
         self.cdp_host = host;
         self.cdp_port = port;
     }
@@ -328,24 +344,31 @@ pub const Bridge = struct {
     /// If the cached client is dead (target detached by Chrome), refreshes
     /// the tab's webSocketDebuggerUrl from /json/list and recreates it.
     pub fn getCdpClient(self: *Bridge, tab_id: []const u8) ?*CdpClient {
+        // Phase 1: fast path + dead-client eviction under the lock.
+        {
+            self.mu.lock();
+            defer self.mu.unlock();
+            if (self.cdp_clients.get(tab_id)) |client| {
+                if (!client.dead) return client;
+                evictDeadClientLocked(self, tab_id);
+            }
+        }
+
+        // Phase 2: refresh the ws_url from Chrome's /json/list WITHOUT holding mu.
+        // This is blocking network I/O; doing it under the lock serialized every
+        // other tab's getCdpClient behind one slow request (see audit section 1).
+        // refreshTabWsUrl locks internally only for its address read and tab write.
+        self.refreshTabWsUrl(tab_id);
+
+        // Phase 3: create + insert under the lock, re-checking for a client that
+        // another thread may have created while we were unlocked in phase 2.
         self.mu.lock();
         defer self.mu.unlock();
 
         if (self.cdp_clients.get(tab_id)) |client| {
             if (!client.dead) return client;
-
-            // Client is dead — target was likely detached by Chrome (e.g. renderer swap).
-            // Invalidate the stale client and fall through to refresh + recreate.
-            // fetchRemove returns the owned key, so we free it ourselves.
-            if (self.cdp_clients.fetchRemove(tab_id)) |kv| {
-                self.allocator.free(kv.key);
-                kv.value.deinit();
-                self.allocator.destroy(kv.value);
-            }
+            evictDeadClientLocked(self, tab_id);
         }
-
-        // Try to refresh the ws_url from Chrome /json/list before using it
-        self.refreshTabWsUrl(tab_id);
 
         const tab = self.tabs.get(tab_id) orelse return null;
         if (tab.ws_url.len == 0) return null;
@@ -364,14 +387,38 @@ pub const Bridge = struct {
         return client;
     }
 
+    /// Remove + free a dead CDP client. Caller MUST hold `mu`.
+    /// NOTE (audit section 1, residual): destroying here can still race a thread
+    /// that already holds the returned `*CdpClient` from a prior getCdpClient and
+    /// is about to call send() -- a use-after-free. The complete fix is refcounting
+    /// the client (increment under `mu` in getCdpClient, release at the ~125 call
+    /// sites, free only at refcount 0). Tracked in docs/scaling/03-cdp-audit.md.
+    fn evictDeadClientLocked(self: *Bridge, tab_id: []const u8) void {
+        if (self.cdp_clients.fetchRemove(tab_id)) |kv| {
+            self.allocator.free(kv.key);
+            kv.value.deinit();
+            self.allocator.destroy(kv.value);
+        }
+    }
+
     /// Re-fetch Chrome's /json/list to pick up a new webSocketDebuggerUrl for a tab.
     /// This handles the case where Chrome detached the old target (renderer swap)
     /// and assigned a fresh ws_url to the same target id.
+    ///
+    /// Self-locking: snapshots the CDP address under `mu` (phase 1), performs the
+    /// blocking HTTP fetch WITHOUT the lock (phase 2), then applies the fresh
+    /// ws_url under `mu` (phase 3). Callers must NOT hold `mu` (rwlock not recursive).
     fn refreshTabWsUrl(self: *Bridge, tab_id: []const u8) void {
         if (@import("builtin").os.tag == .windows) return;
+
+        // Phase 1: snapshot the CDP address under the lock. Slices point at
+        // process-lifetime storage; we only need the read atomic vs setCdpAddress.
+        self.mu.lock();
         const host = self.cdp_host;
         const port = self.cdp_port;
+        self.mu.unlock();
 
+        // Phase 2: blocking /json/list fetch, no lock held.
         const io = std.Io.Threaded.global_single_threaded.io();
         const address = net.IpAddress.parseIp4(host, port) catch return;
         const stream = net.IpAddress.connect(&address, io, .{ .mode = .stream }) catch return;
@@ -403,7 +450,9 @@ pub const Bridge = struct {
         const body_start = (std.mem.indexOf(u8, raw_response, "\r\n\r\n") orelse return) + 4;
         const body = raw_response[body_start..total];
 
-        // Find our tab in the response and extract its fresh ws_url
+        // Find our tab and extract its fresh ws_url (a slice into the stack
+        // response_buf, valid until this function returns).
+        var fresh_ws_url: ?[]const u8 = null;
         var pos: usize = 0;
         while (pos < body.len) {
             const id_start = std.mem.indexOfPos(u8, body, pos, "\"id\"") orelse break;
@@ -413,21 +462,23 @@ pub const Bridge = struct {
             };
 
             if (std.mem.eql(u8, id_val, tab_id)) {
-                // Found it — extract the fresh webSocketDebuggerUrl
-                if (extractSimpleJsonString(body, id_start, "\"webSocketDebuggerUrl\"")) |fresh_ws_url| {
-                    // Update the tab entry with the new ws_url
-                    if (self.tabs.getPtr(tab_id)) |tab| {
-                        const owned = self.allocator.dupe(u8, fresh_ws_url) catch return;
-                        self.allocator.free(tab.ws_url);
-                        tab.ws_url = owned;
-                        std.log.info("refreshed ws_url for tab {s}: {s}", .{ tab_id, fresh_ws_url });
-                    }
-                }
-                return;
+                fresh_ws_url = extractSimpleJsonString(body, id_start, "\"webSocketDebuggerUrl\"");
+                break;
             }
 
             const next_id = std.mem.indexOfPos(u8, body, id_start + 4, "\"id\"") orelse body.len;
             pos = next_id;
+        }
+
+        // Phase 3: apply the fresh ws_url under the lock (dup into owned memory).
+        const fresh = fresh_ws_url orelse return;
+        self.mu.lock();
+        defer self.mu.unlock();
+        if (self.tabs.getPtr(tab_id)) |tab| {
+            const owned = self.allocator.dupe(u8, fresh) catch return;
+            self.allocator.free(tab.ws_url);
+            tab.ws_url = owned;
+            std.log.info("refreshed ws_url for tab {s}: {s}", .{ tab_id, fresh });
         }
     }
 

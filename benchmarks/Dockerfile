@@ -2,12 +2,14 @@ FROM debian:bookworm-slim
 
 ARG ZIG_VERSION=0.15.2
 ARG BUN_VERSION=1.2.23
+ARG WEBWRIGHT_REF=1236f4d31186610d23badd997917f86712fe8bed
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PATH="/opt/zig:${PATH}"
 ENV LIGHTPANDA_BIN="/usr/local/bin/lightpanda"
 ENV CHROME_BIN="/usr/bin/chromium"
 ENV RESULTS_ROOT="/workspace/.benchmarks/results"
+ENV WEBWRIGHT_REF="${WEBWRIGHT_REF}"
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     bash \
@@ -40,7 +42,9 @@ RUN curl -fsSL "https://bun.sh/install" | bash -s -- "bun-v${BUN_VERSION}" \
   && ln -sf /root/.bun/bin/bunx /usr/local/bin/bunx
 
 RUN bun install -g agent-browser
-RUN python3 -m pip install --no-cache-dir --break-system-packages tiktoken
+RUN python3 -m pip install --no-cache-dir --break-system-packages \
+    tiktoken \
+    "git+https://github.com/microsoft/Webwright.git@${WEBWRIGHT_REF}"
 
 WORKDIR /workspace
 
