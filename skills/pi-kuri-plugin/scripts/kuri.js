@@ -41,7 +41,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const SKILL_ROOT = resolve(__dirname, "..");
 
 function kuriBaseUrl() {
-  return process.env.KURI_BASE_URL || "http://127.0.0.1:8080";
+  return process.env.KURI_BASE_URL || "http://127.0.0.1:9223";
 }
 
 function kuriApiToken() {
@@ -144,7 +144,7 @@ function printKuriNotRunning(originalError) {
 
   hints.suggestions.push({
     action: "check_port_or_url",
-    detail: `Verify the server URL. The default is http://127.0.0.1:8080. ` +
+    detail: `Verify the server URL. The default is http://127.0.0.1:9223. ` +
       `Override with KURI_BASE_URL env var.`
   });
 
@@ -294,22 +294,13 @@ async function resolveTabId(requested) {
 }
 
 async function cmdPageInfo(tabId) {
-  const params = {};
-  if (tabId) params.tab_id = tabId;
-  const data = await kuriFetch("/page/info", params);
-  printJson(data);
+      const params = {};
+      if (tabId) params.tab_id = tabId;
+      const data = await kuriFetch("/page/info", params);
+      printJson(data);
     }
-    // Show current tab info
-    const current = list.find((t) => t.current);
-    if (current) {
-      console.log(JSON.stringify({ url: current.url, title: current.title, tab_id: current.id }, null, 2));
-    } else {
-      printJson(tabs);
-    }
-  }
-}
 
-async function cmdScreenshot(tabId, outputPath) {
+    async function cmdScreenshot(tabId, outputPath) {
   tabId = await resolveTabId(tabId);
   const params = {};
   if (tabId) params.tab_id = tabId;
