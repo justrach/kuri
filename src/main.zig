@@ -94,7 +94,12 @@ pub fn main(init: std.process.Init.Minimal) !void {
         std.log.info("launching managed Chrome instance", .{});
     }
 
-    const start_result = try chrome.start(cfg);
+    const start_result = chrome.start(cfg) catch |err| {
+        std.log.err("could not start managed Chrome or reach its DevTools endpoint: {s}", .{@errorName(err)});
+        std.log.err("another Chrome or kuri may be holding the profile lock or the CDP port.", .{});
+        std.log.err("try: pkill -f -- --remote-debugging-port ; rm -f \"$HOME\"/.kuri/chrome-profile*/Singleton* ; then re-run kuri", .{});
+        return err;
+    };
     runtime_cfg.cdp_url = start_result.cdp_url;
     std.log.info("CDP endpoint: {s}", .{start_result.cdp_url});
     std.log.info("CDP port: {d}", .{start_result.cdp_port});

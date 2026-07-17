@@ -37,6 +37,10 @@ pub fn run(gpa: std.mem.Allocator, args: []const []const u8) !u8 {
         } else if (std.mem.eql(u8, rest[idx], "--device")) {
             simulator = false;
             idx += 1;
+        } else if (std.mem.eql(u8, rest[idx], "--host-input") or std.mem.eql(u8, rest[idx], "--allow-host-input")) {
+            // Explicit consent to let tap/swipe/type drive host cursor/focus (#237).
+            g_host_input_ok = true;
+            idx += 1;
         } else {
             io.writeStderr("unknown flag\n");
             return 2;
@@ -132,6 +136,22 @@ pub fn run(gpa: std.mem.Allocator, args: []const []const u8) !u8 {
 
 /// Returns null if OK, or an exit code if the command should bail without
 /// raising a Zig error (so the user just sees the message + a clean status).
+/// Set by the `--host-input` / `--allow-host-input` flag (see run()).
+var g_host_input_ok: bool = false;
+
+/// Interactive input (tap/swipe/type) drives macOS host-level CGEvent mouse and
+/// keyboard events and brings Simulator.app to the front, so it takes over the
+/// user's real cursor and keyboard focus. Only proceed when the user explicitly
+/// opted in, so background/agent runs can't silently seize the machine (#237).
+fn hostInputAllowed() bool {
+    if (g_host_input_ok) return true;
+    if (std.c.getenv("KURI_ALLOW_HOST_INPUT")) |p| {
+        const v = std.mem.span(p);
+        return !(v.len == 0 or std.mem.eql(u8, v, "0"));
+    }
+    return false;
+}
+
 fn guardSim(simulator: bool) ?u8 {
     if (builtin.os.tag != .macos) {
         io.writeStderr("ios input commands are macOS-only.\n");
@@ -139,6 +159,21 @@ fn guardSim(simulator: bool) ?u8 {
     }
     if (!simulator) {
         io.writeStderr("tap/swipe/type on real iOS devices requires XCUITest; not supported in v1. Use --simulator.\n");
+        return 3;
+    }
+    if (!hostInputAllowed()) {
+        io.writeStderr(
+            \\kuri ios: tap/doubletap/longpress/swipe/type synthesize macOS host input
+            \\(CGEvent mouse/keyboard) and bring Simulator.app to the front, so they take
+            \\over your real mouse cursor and keyboard focus while the gesture runs.
+            \\This is unsafe to run in the background or from an unattended agent.
+            \\
+            \\At the keyboard and want to proceed? Re-run with --host-input
+            \\(or set KURI_ALLOW_HOST_INPUT=1).
+            \\For background automation prefer noninteractive APIs: `xcrun simctl`
+            \\(boot/install/launch) and `kuri ios screenshot`, plus app autotest hooks.
+            \\
+        );
         return 3;
     }
     return null;
@@ -326,12 +361,17 @@ fn printUsage() !void {
         \\  screenshot [--udid U] [path.png]   defaults to the booted sim if --udid omitted
         \\  list-apps  --udid U --simulator
         \\
-        \\Simulator-only input (macOS, device-pixel coords matching screenshot):
-        \\  tap       [--udid U] <x> <y>
-        \\  doubletap [--udid U] <x> <y>                          (alias: dbltap)
-        \\  longpress [--udid U] <x> <y> [hold_ms]                (alias: long-press; default 500ms)
-        \\  swipe     [--udid U] <x1> <y1> <x2> <y2> [duration_ms]   (alias: scroll, pan)
-        \\  type      [--udid U] <text...>
+        \\Simulator-only input (macOS). Coordinates are device PIXELS matching the
+        \\`screenshot` image (same grid as `xcrun simctl io ... screenshot`), NOT
+        \\logical points: a 1206x2622 screenshot uses x in 0..1206, y in 0..2622.
+        \\WARNING: these drive host CGEvent input and focus Simulator.app, seizing
+        \\your real mouse & keyboard. Interactive use only — pass --host-input (or
+        \\KURI_ALLOW_HOST_INPUT=1) to confirm; never run them in background/agent work.
+        \\  tap       [--host-input] [--udid U] <x> <y>
+        \\  doubletap [--host-input] [--udid U] <x> <y>                (alias: dbltap)
+        \\  longpress [--host-input] [--udid U] <x> <y> [hold_ms]      (alias: long-press; default 500ms)
+        \\  swipe     [--host-input] [--udid U] <x1> <y1> <x2> <y2> [duration_ms]  (alias: scroll, pan)
+        \\  type      [--host-input] [--udid U] <text...>
         \\
         \\Not implemented in v1 (driverless mode):
         \\  tap, swipe, type on real iOS devices            -> needs XCUITest

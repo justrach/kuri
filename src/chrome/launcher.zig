@@ -89,14 +89,34 @@ pub const Launcher = struct {
                 };
             },
             .managed => {
-                // Find a free CDP port
-                self.cdp_port = try findFreePort(default_cdp_port);
-                try self.launchChrome();
-                try self.waitForDebuggerUrl();
-                return .{
-                    .cdp_port = self.cdp_port,
-                    .cdp_url = self.cdpUrl() orelse return error.MissingDebuggerUrl,
-                };
+                // Managed Chrome can fail to expose its DevTools endpoint when a
+                // previous kuri was killed before `deinit` ran: an orphaned Chrome
+                // (or a stale SingletonLock / occupied CDP port) leaves the launch
+                // hanging in waitForDebuggerUrl until it errors with
+                // ConnectionRefused. Rather than let that kill the whole server on
+                // the first run, retry a couple of times: each attempt cleans stale
+                // locks (in launchChrome), reaps the child we just spawned, and
+                // picks a fresh port. Only a persistent conflict (a *live* Chrome
+                // holding the profile) reaches the final `return err`.
+                const max_attempts: u8 = 3;
+                var attempt: u8 = 0;
+                while (true) : (attempt += 1) {
+                    self.cdp_port = try findFreePort(default_cdp_port);
+                    try self.launchChrome();
+                    self.waitForDebuggerUrl() catch |err| {
+                        std.log.warn("CDP endpoint unreachable on port {d} ({s})", .{ self.cdp_port, @errorName(err) });
+                        // Reap the child we just spawned so it can't linger as an
+                        // orphan holding the profile lock for the next attempt.
+                        self.deinit();
+                        if (attempt + 1 >= max_attempts) return err;
+                        std.log.warn("retrying managed Chrome launch ({d}/{d}) on a fresh port", .{ attempt + 2, max_attempts });
+                        continue;
+                    };
+                    return .{
+                        .cdp_port = self.cdp_port,
+                        .cdp_url = self.cdpUrl() orelse return error.MissingDebuggerUrl,
+                    };
+                }
             },
         }
     }
