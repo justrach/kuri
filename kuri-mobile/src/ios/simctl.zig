@@ -12,21 +12,26 @@ pub const Sim = struct {
 
     pub fn screenshot(self: Sim, gpa: std.mem.Allocator, path: []const u8) !void {
         const r = try io.runCommand(gpa, &.{ "xcrun", "simctl", "io", self.udid, "screenshot", path }, 64 * 1024 * 1024);
-        gpa.free(r.stdout);
+        defer gpa.free(r.stdout);
+        try ensureSuccess(r.term, r.stdout);
     }
 
     pub fn launch(self: Sim, gpa: std.mem.Allocator, bundle_id: []const u8) !void {
         const r = try io.runCommand(gpa, &.{ "xcrun", "simctl", "launch", self.udid, bundle_id }, 1024 * 1024);
-        gpa.free(r.stdout);
+        defer gpa.free(r.stdout);
+        try ensureSuccess(r.term, r.stdout);
     }
 
     pub fn terminate(self: Sim, gpa: std.mem.Allocator, bundle_id: []const u8) !void {
         const r = try io.runCommand(gpa, &.{ "xcrun", "simctl", "terminate", self.udid, bundle_id }, 1024 * 1024);
-        gpa.free(r.stdout);
+        defer gpa.free(r.stdout);
+        try ensureSuccess(r.term, r.stdout);
     }
 
     pub fn listApps(self: Sim, gpa: std.mem.Allocator) ![]u8 {
         const r = try io.runCommand(gpa, &.{ "xcrun", "simctl", "listapps", self.udid }, 16 * 1024 * 1024);
+        errdefer gpa.free(r.stdout);
+        try ensureSuccess(r.term, r.stdout);
         return r.stdout;
     }
 
@@ -35,19 +40,31 @@ pub const Sim = struct {
     /// you tell Safari to load a page without typing in the address bar.
     pub fn openUrl(self: Sim, gpa: std.mem.Allocator, url: []const u8) !void {
         const r = try io.runCommand(gpa, &.{ "xcrun", "simctl", "openurl", self.udid, url }, 1024 * 1024);
-        gpa.free(r.stdout);
+        defer gpa.free(r.stdout);
+        try ensureSuccess(r.term, r.stdout);
     }
 
     pub fn boot(self: Sim, gpa: std.mem.Allocator) !void {
         const r = try io.runCommand(gpa, &.{ "xcrun", "simctl", "boot", self.udid }, 1024 * 1024);
-        gpa.free(r.stdout);
+        defer gpa.free(r.stdout);
+        try ensureSuccess(r.term, r.stdout);
     }
 
     pub fn shutdown(self: Sim, gpa: std.mem.Allocator) !void {
         const r = try io.runCommand(gpa, &.{ "xcrun", "simctl", "shutdown", self.udid }, 1024 * 1024);
-        gpa.free(r.stdout);
+        defer gpa.free(r.stdout);
+        try ensureSuccess(r.term, r.stdout);
     }
 };
+
+fn ensureSuccess(term: i32, output: []const u8) !void {
+    if (term == 0) return;
+    if (output.len != 0) {
+        io.writeStderr(output);
+        if (output[output.len - 1] != '\n') io.writeStderr("\n");
+    }
+    return error.SimctlCommandFailed;
+}
 
 pub const SimDevice = struct {
     udid: []const u8,
@@ -58,6 +75,7 @@ pub const SimDevice = struct {
 pub fn listDevices(gpa: std.mem.Allocator) ![]SimDevice {
     const r = try io.runCommand(gpa, &.{ "xcrun", "simctl", "list", "devices", "--json" }, 16 * 1024 * 1024);
     defer gpa.free(r.stdout);
+    try ensureSuccess(r.term, r.stdout);
 
     var parsed = try std.json.parseFromSlice(std.json.Value, gpa, r.stdout, .{});
     defer parsed.deinit();
@@ -88,6 +106,12 @@ pub fn listDevices(gpa: std.mem.Allocator) ![]SimDevice {
         }
     }
     return try list.toOwnedSlice(gpa);
+}
+
+test "simctl command status is not silently ignored" {
+    try ensureSuccess(0, "");
+    try std.testing.expectError(error.SimctlCommandFailed, ensureSuccess(256, "simctl failed"));
+    try std.testing.expectError(error.SimctlCommandFailed, ensureSuccess(9, "terminated"));
 }
 
 pub fn freeSimDevices(gpa: std.mem.Allocator, devs: []const SimDevice) void {
