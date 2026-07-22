@@ -95,7 +95,13 @@ pub fn run(gpa: std.mem.Allocator, args: []const []const u8) !u8 {
         }
         const udid = udid_opt orelse try resolveBootedSim(gpa);
         defer if (udid_opt == null) gpa.free(udid);
-        try simctl.Sim.init(udid).screenshot(gpa, path);
+        simctl.Sim.init(udid).screenshot(gpa, path) catch |err| {
+            if (err == error.SimctlCommandFailed) {
+                io.writeStderr("screenshot failed: the target must be a booted iOS Simulator. Physical-device screenshots require XCUITest and are not supported in v1.\n");
+                return 3;
+            }
+            return err;
+        };
         return 0;
     }
     if (std.mem.eql(u8, sub, "list-apps")) {
@@ -323,7 +329,7 @@ fn printUsage() !void {
         \\  navigate  [--udid U] <url>         alias for openurl
         \\  launch    --udid U [--simulator|--device] <bundle-id>
         \\  terminate --udid U [--simulator|--device] <bundle-id>
-        \\  screenshot [--udid U] [path.png]   defaults to the booted sim if --udid omitted
+        \\  screenshot [--simulator] [--udid U] [path.png]   Simulator only; defaults to booted sim
         \\  list-apps  --udid U --simulator
         \\
         \\Simulator-only input (macOS, device-pixel coords matching screenshot):
