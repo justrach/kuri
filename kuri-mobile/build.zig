@@ -49,4 +49,28 @@ pub fn build(b: *std.Build) void {
     const unit_tests = b.addTest(.{ .root_module = test_mod });
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&b.addRunArtifact(unit_tests).step);
+
+    // End-to-end suite. Kept off `test` on purpose: it drives a real booted
+    // simulator, which CI does not have. It receives the built binary's path
+    // as argv[1] so it exercises exactly the artifact that would ship.
+    const e2e_mod = b.createModule(.{
+        .root_source_file = b.path("src/test/e2e_ios.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    // 0.17 restricts imports to a module's own path, so the shared io helpers
+    // come in as a named module rather than a relative path.
+    e2e_mod.addImport("io", b.createModule(.{
+        .root_source_file = b.path("src/common/io.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    }));
+    const e2e = b.addExecutable(.{ .name = "e2e-ios", .root_module = e2e_mod });
+    const run_e2e = b.addRunArtifact(e2e);
+    run_e2e.addArtifactArg(exe);
+    run_e2e.addPassthruArgs();
+    const e2e_step = b.step("e2e-ios", "Run iOS end-to-end tests (needs a booted simulator)");
+    e2e_step.dependOn(&run_e2e.step);
 }

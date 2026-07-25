@@ -2,6 +2,19 @@
 
 All notable changes to kuri are documented here.
 
+## [0.4.9] — 2026-07-25
+
+### Tests
+- **`zig build e2e-ios`** — an end-to-end suite that drives a real booted Simulator through the built binary, so it exercises the artifact that would actually ship rather than a test-only code path. 20 cases covering the registry, `doctor`, `install`, `launch`, `uitree`, `find`, `wait-for-ui` and `screenshot`
+- Deliberately excluded from `zig build test`, which must stay runnable without a device. With no simulator booted the suite prints SKIP and exits 0, so it can sit in a pipeline without becoming a flaky gate
+- Defaults to Settings (`com.apple.Preferences`), present on every simulator, so it is reproducible on any machine. Point it at your own app with `KURI_E2E_BUNDLE_ID`, `KURI_E2E_LABEL` and `KURI_E2E_APP`
+- **Timeout regression guard** — asserts `wait-for-ui` returns within 3x its requested deadline, locking in the 0.4.7 fix where a 3s timeout waited 13.5s
+- Assertions are behavioural, not just exit codes: `find` must emit a `tap=` centroid, `uitree` must contain the expected label and device-pixel bounds, and `screenshot` must produce a file with valid PNG magic rather than an empty one
+- **Shell-escaping tests** — the Android quoting added in 0.4.8 had no coverage. Now tested against command-injection payloads (`x; rm -rf /`, `$(whoami)`, backticks), embedded single quotes, and an exhaustive sweep asserting no byte in 1..126 can leave an unbalanced quote
+
+### Verified
+- `ios install` had never been exercised until now; it installs a real `.app` bundle in ~2.9s and the app launches and reports its accessibility tree correctly
+
 ## [0.4.8] — 2026-07-25
 
 ### Features — kuri-mobile Android reaches parity

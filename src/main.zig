@@ -7,7 +7,7 @@ const launcher = @import("chrome/launcher.zig");
 const api_token = @import("server/api_token.zig");
 const lifecycle = @import("lifecycle.zig");
 
-const version = "0.4.8";
+const version = "0.4.9";
 
 const CliAction = enum {
     run,
