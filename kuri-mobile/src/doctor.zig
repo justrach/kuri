@@ -83,8 +83,18 @@ pub fn run(gpa: std.mem.Allocator) !u8 {
         // --- Simulator.app --------------------------------------------------
         if (sim_ax.simulatorPid(gpa)) |maybe_pid| {
             if (maybe_pid) |pid| {
-                const d = try std.fmt.allocPrint(rep.arena, "running (pid {d})", .{pid});
-                rep.line(.ok, "Simulator.app", d);
+                // Running is not sufficient: the accessibility tree hangs off a
+                // window, and `simctl boot` does not open one. Reporting only
+                // the process made a windowless Simulator look healthy right up
+                // until uitree failed.
+                if (sim_ax.hasOpenWindow(gpa)) {
+                    const d = try std.fmt.allocPrint(rep.arena, "running (pid {d}), window on screen", .{pid});
+                    rep.line(.ok, "Simulator.app", d);
+                } else {
+                    const d = try std.fmt.allocPrint(rep.arena, "running (pid {d}) but no window — uitree/find/wait-for-ui need one", .{pid});
+                    rep.line(.warn, "Simulator.app", d);
+                    rep.hint("kuri-mobile ios open-sim");
+                }
             } else {
                 rep.line(.warn, "Simulator.app", "not running — input and uitree need it open");
                 rep.hint("kuri-mobile ios open-sim");

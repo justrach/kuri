@@ -2,6 +2,44 @@
 
 All notable changes to kuri are documented here.
 
+## [0.4.11] — 2026-07-25
+
+### Fixes — kuri no longer takes over your machine
+
+Driving the Simulator used to seize the user's foreground window and move their cursor. Every input command called `sim_window.activate` before doing anything, because `CGEventPost(kCGHIDEventTap, …)` injects into the *global* event stream — events land wherever focus happens to be, so Simulator.app had to be raised first for a tap to hit the right thing. That made kuri unusable on a machine somebody is actually working on.
+
+- **Input is delivered to Simulator.app by pid** — `CGEventPostToPid` instead of the global HID tap. Events go straight into Simulator's own queue, so no window is raised and the cursor is never warped. Covers `tap`, `doubletap`, `longpress`, `swipe`, `gesture`, `touch`, `key`, `key-sequence`, `batch`
+- **`type` no longer routes through AppleScript.** It shelled out to System Events `keystroke`, which is delivered to whichever app is frontmost — so `ios type` was doubly hostile: it *had* to steal focus to be correct, and if it ever ran without doing so it would type your text into whatever you had open. Now Unicode `CGEvent`s addressed to the pid, which needs no virtual-keycode table either. `osascript` is gone from this path
+- **`uitree`, `find` and `wait-for-ui` no longer activate at all.** They only read the accessibility tree, which works fine on a background app. `wait-for-ui` was the worst offender — it polls every 250ms, so it re-stole the foreground on every poll for the length of the wait
+- **`button` and `background` no longer activate.** They already used `AXPress`, which never needed focus
+- **`open-sim` launches in the background** (`open -g`). Opening a simulator is a setup step, not a request to be interrupted
+- **`--activate` restores the old behaviour** per command, for the case where a gesture genuinely needs Simulator.app to be key. Off by default
+
+### Fixes — real devices
+
+- **`ios terminate --device` could never have succeeded.** It built `devicectl device process terminate --device <udid> <bundle-id>`, but devicectl's terminate takes `--pid` and accepts no bundle id at all — every invocation died on devicectl's own argument parser. `launch --device` now reads the launched pid from `--json-output` and prints `pid=N`; `terminate --device --pid N` does the direct thing; `terminate --device <bundle-id>` resolves the bundle id to a running pid by matching `device info processes` against the app's on-device bundle URL. A launch that reports success without an identifier is now an error rather than a silent zero, which would later terminate an unrelated process
+- **`ios list-apps --device` silently hid every system app.** `devicectl device info apps` defaults to *developer apps only* and says nothing about it, so a command documented as "list installed apps" returned a handful of entries on a phone with hundreds — and exited 0. Now passes `--include-default-apps --include-app-clips`. The same defaulting broke bundle-id lookups, so terminate-by-bundle-id could not resolve a system app either
+- **`ios list-apps` on the simulator no longer demands `--udid`.** It resolves the booted simulator like `launch`, `screenshot` and `uitree` already did; requiring it made `list-apps` the odd command out for no reason a caller could infer
+
+### Fixes — diagnosis
+
+- **"Simulator.app is not running" when Simulator.app was running.** The accessibility tree hangs off a window, and a device booted with `simctl boot` does not open one — so a running-but-windowless Simulator produced an error that sent you to restart an app that was already up. Now a distinct `SimulatorHasNoWindow` error carrying the actual remedy, and `doctor` reports window presence rather than just the process
+
+### Tests
+
+- **`zig build e2e-ios-device`** — a new end-to-end suite against physically attached hardware: inspection, the install → list-apps → launch → terminate → uninstall round trip both by pid and by bundle id, and assertions that the XCUITest-only commands still refuse cleanly *while a real device is attached*. Skips with a reason when nothing is plugged in, when no bundle id is configured, or when the screen is locked — phones re-lock on their own timeout, and SpringBoard refuses every launch while they are, which is the environment rather than a defect. Verified: **24 passed, 0 failed** against an iPhone 16 Pro Max
+- **A real-device command contract group in `e2e-ios`, needing no hardware.** 21 hermetic cases pinning the silent-success class fixed in 0.4.10: every `--device` command must fail loudly against a fake udid, missing arguments must exit 2 rather than 1, and the XCUITest-only commands must exit 3 with an explanation. Two of them assert the *absence* of devicectl's argument-parser complaint, which is what distinguishes "the device is missing" from "we called devicectl wrong" — the exact bug fixed above
+- **`e2e-ios` now degrades instead of failing** on preconditions a machine cannot supply. The Accessibility grant, a Simulator window and the Xcode toolchain are each probed and skipped with a reason, which is what lets the suite be a CI gate rather than a red build on a runner that can never hold a TCC grant
+- **More simulator coverage** — `list-apps`, `status-bar` override/clear, `ui appearance` set-and-read-back, `set-location`/`reset-location`, `log --last`, `terminate`. Verified: **54 passed, 0 failed** against a booted simulator
+- devicectl's JSON shapes are now unit-tested against fixtures — a missing pid must not decode as 0, and a process match must not be made on a coincidental path prefix (`/var/Demo.appendix` is not inside `/var/Demo.app`)
+
+### CI
+
+- **The e2e suite finally runs in CI.** A new `mobile-macos` job builds kuri-mobile, runs its unit tests, boots a simulator and runs both suites. Until now nothing caught a regression on the device path, which is how the silent `--device` no-op survived from 0.4.6 to 0.4.10
+- It picks and boots the simulator *through kuri-mobile itself* rather than `xcrun simctl` — partly to exercise `list-devices` and `boot` for real, and partly because bare `xcrun` resolves through `xcode-select`, which is the exact indirection whose failure mode this project exists to avoid
+- The job never opens Simulator.app, so it runs headless and the accessibility cases skip
+- kuri-mobile's unit tests now also run on the Linux job; they had their own `build.zig` and the root `test` step never reached them
+
 ## [0.4.10] — 2026-07-25
 
 ### Fixes

@@ -54,7 +54,8 @@ pub const all = [_]Tool{
     },
     .{
         .name = "open-sim",
-        .summary = "launch Simulator.app and bring it to the front",
+        .flags = &.{"--activate"},
+        .summary = "launch Simulator.app in the background (--activate to bring it to the front)",
         .category = "lifecycle",
         .scope = .virtual,
     },
@@ -76,15 +77,15 @@ pub const all = [_]Tool{
         .name = "launch",
         .args = "<bundle-id>",
         .flags = &.{ "--udid", "--simulator", "--device" },
-        .summary = "launch an app by bundle id",
+        .summary = "launch an app by bundle id (prints pid= on a real device)",
         .category = "lifecycle",
         .scope = .both,
     },
     .{
         .name = "terminate",
         .args = "<bundle-id>",
-        .flags = &.{ "--udid", "--simulator", "--device" },
-        .summary = "terminate a running app",
+        .flags = &.{ "--udid", "--simulator", "--device", "--pid" },
+        .summary = "terminate a running app; --device resolves the bundle id to a pid, or pass --pid",
         .category = "lifecycle",
         .scope = .both,
     },
@@ -329,7 +330,9 @@ const categories = [_]toolinfo.Category{
     .{ .key = "meta", .title = "Discovery" },
     .{ .key = "lifecycle", .title = "Device & app lifecycle" },
     .{ .key = "observe", .title = "Observation" },
-    .{ .key = "input", .title = "Input (Simulator only, device-pixel coords matching screenshot)" },
+    // The background note is part of the contract, not a footnote: callers
+    // need to know these can run while someone else is using the machine.
+    .{ .key = "input", .title = "Input (Simulator only, device-pixel coords matching screenshot; delivered to Simulator.app in the background — pass --activate to raise it first)" },
     .{ .key = "state", .title = "Device state" },
 };
 

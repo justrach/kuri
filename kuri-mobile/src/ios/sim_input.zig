@@ -1,7 +1,19 @@
-//! Native CGEvent-based mouse/keyboard input targeting the focused window
-//! (Simulator.app, after we activate it). We deliberately avoid `cliclick`
-//! and other external binaries — only ApplicationServices.framework and
-//! `osascript` (already shipped with macOS) are required.
+//! Native CGEvent-based mouse/keyboard input targeting Simulator.app.
+//! We deliberately avoid `cliclick` and other external binaries — only
+//! ApplicationServices.framework is required.
+//!
+//! Events are delivered to Simulator.app *by pid* via `CGEventPostToPid`
+//! rather than injected into the global HID stream with `CGEventPost`.
+//! That distinction is the whole reason this tool is usable on a machine
+//! someone is working on: a HID-tap post goes to whatever window happens to
+//! be frontmost, which forced kuri to raise Simulator.app first — stealing
+//! focus and warping the cursor out from under the user on every tap. A
+//! pid-targeted post lands in Simulator's own event queue, so the simulator
+//! can be driven in the background with the cursor left alone.
+//!
+//! `setTargetPid` must be called before any input; with no target set these
+//! fall back to the old global-tap behaviour, which is correct only when
+//! Simulator.app is already frontmost.
 //!
 //! Coordinates passed in here are *macOS screen points* (the global desktop
 //! coordinate space CGEvent expects). The conversion from "device-pixel"
@@ -35,13 +47,34 @@ extern "c" fn CGEventCreateMouseEvent(
     mouseButton: u32,
 ) CGEventRef;
 extern "c" fn CGEventPost(tap: u32, event: CGEventRef) void;
+extern "c" fn CGEventPostToPid(pid: i32, event: CGEventRef) void;
 extern "c" fn CFRelease(cf: ?*const anyopaque) void;
 
-fn postMouse(t: u32, p: CGPoint) void {
-    const ev = CGEventCreateMouseEvent(null, t, p, kCGMouseButtonLeft);
+/// Simulator.app's pid, when the caller has resolved one. Process-global
+/// because a CLI run drives exactly one simulator and threading it through
+/// every input entry point would add a parameter that is never anything else.
+var target_pid: ?i32 = null;
+
+/// Direct subsequent events at a specific process. Passing null restores the
+/// global-HID-tap behaviour, which requires the target to be frontmost.
+pub fn setTargetPid(pid: ?i32) void {
+    target_pid = pid;
+}
+
+/// Deliver an event to the target process, or to the global tap if none was
+/// set. Releases the event.
+fn post(ev: CGEventRef) void {
     if (ev == null) return;
-    CGEventPost(kCGHIDEventTap, ev);
+    if (target_pid) |pid| {
+        CGEventPostToPid(pid, ev);
+    } else {
+        CGEventPost(kCGHIDEventTap, ev);
+    }
     CFRelease(@ptrCast(ev));
+}
+
+fn postMouse(t: u32, p: CGPoint) void {
+    post(CGEventCreateMouseEvent(null, t, p, kCGMouseButtonLeft));
 }
 
 fn sleepMs(ms: u64) void {
@@ -185,6 +218,43 @@ extern "c" fn CGEventCreateKeyboardEvent(
     keyDown: bool,
 ) CGEventRef;
 extern "c" fn CGEventSetFlags(event: CGEventRef, flags: u64) void;
+extern "c" fn CGEventKeyboardSetUnicodeString(
+    event: CGEventRef,
+    stringLength: c_ulong,
+    unicodeString: [*]const u16,
+) void;
+
+/// Type arbitrary text by attaching a Unicode payload to a keyboard event,
+/// rather than mapping characters onto virtual keycodes.
+///
+/// This replaces an `osascript ... keystroke` call. AppleScript's keystroke
+/// is delivered to whatever application is frontmost, so the old path was
+/// only correct if kuri first raised Simulator.app — meaning `ios type` had
+/// to steal the user's window, and would otherwise type into whatever they
+/// were working in. A Unicode CGEvent posted to Simulator's pid has neither
+/// problem, and drops the osascript dependency for this path entirely.
+///
+/// Events carry a bounded chunk each because CGEvent's Unicode payload is not
+/// meant for unbounded strings; 16 UTF-16 units per event is comfortably
+/// within what the API handles.
+pub fn typeUtf16(units: []const u16) void {
+    if (builtin.os.tag != .macos) return;
+    var i: usize = 0;
+    while (i < units.len) {
+        const end = @min(i + 16, units.len);
+        const chunk = units[i..end];
+        for ([_]bool{ true, false }) |is_down| {
+            const ev = CGEventCreateKeyboardEvent(null, 0, is_down);
+            if (ev == null) continue;
+            CGEventKeyboardSetUnicodeString(ev, @intCast(chunk.len), chunk.ptr);
+            post(ev);
+        }
+        // A short gap keeps fast typing from outrunning the text field's own
+        // input handling, which drops characters when events arrive back to back.
+        sleepMs(8);
+        i = end;
+    }
+}
 
 /// CGEventFlags bits (CGEventTypes.h).
 pub const mod_shift: u64 = 0x00020000;
@@ -234,8 +304,7 @@ fn postKey(code: u16, flags: u64, down: bool) void {
     const ev = CGEventCreateKeyboardEvent(null, code, down);
     if (ev == null) return;
     if (flags != 0) CGEventSetFlags(ev, flags);
-    CGEventPost(kCGHIDEventTap, ev);
-    CFRelease(@ptrCast(ev));
+    post(ev);
 }
 
 /// Press and release `code` with `flags` held. Flags are applied to both the
