@@ -116,7 +116,7 @@ pub fn evalHtmlScriptsWithUrl(html: []const u8, url: ?[]const u8, allocator: std
 
     for (scripts) |script| {
         // QuickJS requires null-terminated input; dupe with sentinel
-        const duped = allocator.dupeZ(u8, script) catch continue;
+        const duped = allocator.dupeSentinel(u8, script, 0) catch continue;
         defer allocator.free(duped);
         _ = engine.exec(duped);
     }
@@ -147,7 +147,7 @@ fn injectDomStubs(engine: *JsEngine, html: []const u8, url: ?[]const u8, allocat
     //    Must null-terminate dynamic strings (QuickJS requires it).
     const escaped_html = escapeForJs(html, allocator) orelse "";
     const html_inject = std.fmt.allocPrint(allocator, "globalThis.__browdie_html = \"{s}\";", .{escaped_html}) catch return;
-    const html_inject_z = allocator.dupeZ(u8, html_inject) catch return;
+    const html_inject_z = allocator.dupeSentinel(u8, html_inject, 0) catch return;
     _ = engine.exec(html_inject_z);
 
     // 3. Build window.location from URL
@@ -156,7 +156,7 @@ fn injectDomStubs(engine: *JsEngine, html: []const u8, url: ?[]const u8, allocat
         const loc_js = std.fmt.allocPrint(allocator, dom_location_template, .{
             escaped_url, escaped_url, escaped_url,
         }) catch return;
-        const loc_js_z = allocator.dupeZ(u8, loc_js) catch return;
+        const loc_js_z = allocator.dupeSentinel(u8, loc_js, 0) catch return;
         _ = engine.exec(loc_js_z);
     } else {
         _ = engine.exec("globalThis.window = { location: { href: '', protocol: '', host: '', pathname: '/', search: '', hash: '', hostname: '', port: '', origin: '', toString: function() { return ''; } } };");

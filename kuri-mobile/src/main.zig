@@ -11,6 +11,7 @@
 const std = @import("std");
 const android_cli = @import("android/cli.zig");
 const ios_cli = @import("ios/cli.zig");
+const doctor = @import("doctor.zig");
 const io = @import("common/io.zig");
 
 pub fn main(init: std.process.Init.Minimal) !void {
@@ -42,12 +43,17 @@ pub fn main(init: std.process.Init.Minimal) !void {
         if (code != 0) std.process.exit(code);
         return;
     }
+    if (std.mem.eql(u8, sub, "doctor")) {
+        const code = doctor.run(gpa) catch |err| return reportError(err);
+        if (code != 0) std.process.exit(code);
+        return;
+    }
     if (std.mem.eql(u8, sub, "--help") or std.mem.eql(u8, sub, "-h") or std.mem.eql(u8, sub, "help")) {
         try printUsage();
         return;
     }
     if (std.mem.eql(u8, sub, "--version")) {
-        try writeStdout("kuri-mobile 0.0.1\n");
+        try writeStdout("kuri-mobile 0.4.7\n");
         return;
     }
 
@@ -62,6 +68,9 @@ fn printUsage() !void {
         \\Platforms:
         \\  android   drive Android devices via adb (Zig-native client)
         \\  ios       drive iOS simulators (simctl) and real devices (devicectl)
+        \\
+        \\Diagnostics:
+        \\  doctor    check toolchain, accessibility grant, simulators and adb
         \\
         \\Run `kuri-mobile <platform>` with no args for per-platform help.
         \\
@@ -121,4 +130,5 @@ test {
     _ = @import("ios/sim_ax.zig");
     _ = @import("ios/sim_input.zig");
     _ = @import("ios/sim_window.zig");
+    _ = @import("ios/tools.zig");
 }

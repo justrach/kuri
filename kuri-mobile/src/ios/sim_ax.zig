@@ -148,6 +148,15 @@ fn findRetained(root: Ref, want: []const u8) Ref {
     return find(root, want, 0);
 }
 
+/// Whether this process holds macOS Accessibility trust, which every
+/// CGEvent-driven input and the whole `uitree` path depend on. Exposed so
+/// `doctor` can report it as a checkable precondition rather than letting it
+/// surface later as a confusing per-command failure.
+pub fn accessibilityTrusted() bool {
+    if (builtin.os.tag != .macos) return false;
+    return AXIsProcessTrusted();
+}
+
 /// PID of the running Simulator.app, or null if it isn't running.
 pub fn simulatorPid(gpa: std.mem.Allocator) !?i32 {
     const r = try io.runCommand(gpa, &.{ "pgrep", "-x", "Simulator" }, 4096);

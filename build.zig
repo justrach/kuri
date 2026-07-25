@@ -20,9 +20,7 @@ pub fn build(b: *std.Build) void {
     // Run step
     const run_exe = b.addRunArtifact(exe);
     run_exe.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_exe.addArgs(args);
-    }
+    run_exe.addPassthruArgs();
     const run_step = b.step("run", "Run the application");
     run_step.dependOn(&run_exe.step);
 
@@ -84,9 +82,7 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(fetch_exe);
     const run_fetch = b.addRunArtifact(fetch_exe);
     run_fetch.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_fetch.addArgs(args);
-    }
+    run_fetch.addPassthruArgs();
     const fetch_step = b.step("fetch", "Run kuri-fetch standalone CLI");
     fetch_step.dependOn(&run_fetch.step);
 
@@ -119,9 +115,7 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(browse_exe);
     const run_browse = b.addRunArtifact(browse_exe);
     run_browse.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_browse.addArgs(args);
-    }
+    run_browse.addPassthruArgs();
     const browse_step = b.step("browse", "Run kuri-browse interactive terminal browser");
     browse_step.dependOn(&run_browse.step);
 
@@ -165,9 +159,7 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(agent_exe);
     const run_agent = b.addRunArtifact(agent_exe);
     run_agent.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_agent.addArgs(args);
-    }
+    run_agent.addPassthruArgs();
     const agent_step = b.step("agent", "Run kuri-agent scriptable CLI");
     agent_step.dependOn(&run_agent.step);
 

@@ -34,7 +34,7 @@ fn getEnv(name: [*:0]const u8) ?[]const u8 {
 
 /// Existence probe via `open`, matching the libc-only idiom the rest of
 /// kuri-mobile uses (Zig 0.16 pared back the std.fs surface we'd want).
-fn fileExists(path: []const u8) bool {
+pub fn fileExists(path: []const u8) bool {
     var buf: [4096]u8 = undefined;
     if (path.len >= buf.len) return false;
     @memcpy(buf[0..path.len], path);

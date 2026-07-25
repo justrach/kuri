@@ -1,6 +1,6 @@
 .{
     .name = .kuri,
-    .version = "0.4.6",
+    .version = "0.4.7",
     .dependencies = .{
         .quickjs = .{
             .url = "https://github.com/mitchellh/zig-quickjs-ng/archive/main.tar.gz",
@@ -9,7 +9,7 @@
         .kuri_mobile = .{ .path = "kuri-mobile" },
     },
     .fingerprint = 0xb63ec72d77641494,
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.17.0-dev.813+2153f8143",
     .paths = .{
         "build.zig",
         "build.zig.zon",
