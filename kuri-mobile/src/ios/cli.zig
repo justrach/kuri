@@ -9,6 +9,7 @@ const sim_input = @import("sim_input.zig");
 const sim_window = @import("sim_window.zig");
 const sim_ax = @import("sim_ax.zig");
 const xcode = @import("xcode.zig");
+const tools = @import("tools.zig");
 const io = @import("../common/io.zig");
 const uitree = @import("../common/uitree.zig");
 
@@ -25,6 +26,12 @@ const Opts = struct {
     predicate: ?[]const u8 = null,
     /// Accessibility label / identifier to target instead of coordinates.
     label: ?[]const u8 = null,
+    /// Upper bound for `wait-for-ui` polling.
+    timeout_ms: ?u64 = null,
+    /// Invert `wait-for-ui`: wait for the element to go away.
+    absent: bool = false,
+    /// Machine-readable output where a command supports it.
+    json: bool = false,
 };
 
 /// Consume a recognized flag at `rest[idx]`, returning how many tokens it
@@ -42,6 +49,14 @@ fn takeFlag(opts: *Opts, rest: []const []const u8, idx: usize) !?usize {
         opts.simulator = false;
         return 1;
     }
+    if (std.mem.eql(u8, name, "absent")) {
+        opts.absent = true;
+        return 1;
+    }
+    if (std.mem.eql(u8, name, "json")) {
+        opts.json = true;
+        return 1;
+    }
     if (sim_input.lookupModifier(name)) |bit| {
         opts.mods |= bit;
         return 1;
@@ -52,6 +67,7 @@ fn takeFlag(opts: *Opts, rest: []const []const u8, idx: usize) !?usize {
         std.mem.eql(u8, name, "for") or
         std.mem.eql(u8, name, "last") or
         std.mem.eql(u8, name, "predicate") or
+        std.mem.eql(u8, name, "timeout") or
         std.mem.eql(u8, name, "label");
     if (!needs_value) return null;
     if (idx + 1 >= rest.len) return error.MissingFlagValue;
@@ -67,6 +83,8 @@ fn takeFlag(opts: *Opts, rest: []const []const u8, idx: usize) !?usize {
         opts.predicate = val;
     } else if (std.mem.eql(u8, name, "label")) {
         opts.label = val;
+    } else if (std.mem.eql(u8, name, "timeout")) {
+        opts.timeout_ms = try std.fmt.parseInt(u64, val, 10);
     }
     return 2;
 }
@@ -115,8 +133,60 @@ pub fn run(gpa: std.mem.Allocator, args: []const []const u8) !u8 {
     }
     const cmd_args = positional.items;
 
+    if (std.mem.eql(u8, sub, "tools")) return cmdTools(gpa, opts);
+
     if (std.mem.eql(u8, sub, "list-devices") or std.mem.eql(u8, sub, "devices")) {
         return cmdListDevices(gpa);
+    }
+    if (std.mem.eql(u8, sub, "erase")) {
+        const udid = opts.udid orelse return errMissing("--udid");
+        try simctl.Sim.init(udid).erase(gpa);
+        return 0;
+    }
+    if (std.mem.eql(u8, sub, "open-sim")) {
+        try simctl.openSimulatorApp(gpa);
+        return 0;
+    }
+    if (std.mem.eql(u8, sub, "install")) {
+        if (cmd_args.len < 1) return errMissing("path.app");
+        const r = try resolveUdid(gpa, opts.udid);
+        defer r.deinit(gpa);
+        try simctl.Sim.init(r.udid).install(gpa, cmd_args[0]);
+        return 0;
+    }
+    if (std.mem.eql(u8, sub, "uninstall")) {
+        if (cmd_args.len < 1) return errMissing("bundle-id");
+        const r = try resolveUdid(gpa, opts.udid);
+        defer r.deinit(gpa);
+        try simctl.Sim.init(r.udid).uninstall(gpa, cmd_args[0]);
+        return 0;
+    }
+    if (std.mem.eql(u8, sub, "set-location")) {
+        if (cmd_args.len < 2) return errMissing("<lat> <lon>");
+        const r = try resolveUdid(gpa, opts.udid);
+        defer r.deinit(gpa);
+        try simctl.Sim.init(r.udid).setLocation(gpa, cmd_args[0], cmd_args[1]);
+        return 0;
+    }
+    if (std.mem.eql(u8, sub, "reset-location")) {
+        const r = try resolveUdid(gpa, opts.udid);
+        defer r.deinit(gpa);
+        try simctl.Sim.init(r.udid).clearLocation(gpa);
+        return 0;
+    }
+    if (std.mem.eql(u8, sub, "keyboard")) {
+        if (cmd_args.len < 1) return errMissing("<on|off>");
+        const on = std.mem.eql(u8, cmd_args[0], "on");
+        if (!on and !std.mem.eql(u8, cmd_args[0], "off")) return errMissing("<on|off>");
+        try simctl.setHardwareKeyboard(gpa, on);
+        return 0;
+    }
+    if (std.mem.eql(u8, sub, "record-video")) {
+        if (cmd_args.len < 1) return errMissing("path.mp4");
+        const r = try resolveUdid(gpa, opts.udid);
+        defer r.deinit(gpa);
+        try simctl.Sim.init(r.udid).recordVideo(gpa, cmd_args[0], opts.dur_ms orelse 5000);
+        return 0;
     }
 
     if (std.mem.eql(u8, sub, "launch")) {
@@ -197,10 +267,26 @@ pub fn run(gpa: std.mem.Allocator, args: []const []const u8) !u8 {
     if (std.mem.eql(u8, sub, "status-bar") or std.mem.eql(u8, sub, "status_bar")) return cmdStatusBar(gpa, opts, cmd_args);
     if (std.mem.eql(u8, sub, "log")) return cmdLog(gpa, opts, cmd_args);
 
+    if (std.mem.eql(u8, sub, "gesture") or std.mem.eql(u8, sub, "drag")) return cmdGesture(gpa, opts, cmd_args);
+    if (std.mem.eql(u8, sub, "touch")) return cmdTouch(gpa, opts, cmd_args);
+    if (std.mem.eql(u8, sub, "key-sequence")) return cmdKeySequence(gpa, opts, cmd_args);
+    if (std.mem.eql(u8, sub, "batch")) return cmdBatch(gpa, opts, cmd_args);
+
     if (std.mem.eql(u8, sub, "uitree")) return cmdUiTree(gpa, opts);
+    if (std.mem.eql(u8, sub, "find")) return cmdFind(gpa, opts);
+    if (std.mem.eql(u8, sub, "wait-for-ui")) return cmdWaitForUi(gpa, opts);
 
     try printUsage();
     return 1;
+}
+
+/// The meta tool: enumerate the command surface. `--json` is the form an
+/// agent consumes to discover what it can call without parsing help text.
+fn cmdTools(gpa: std.mem.Allocator, opts: Opts) !u8 {
+    const text = if (opts.json) try tools.renderJson(gpa) else try tools.renderText(gpa);
+    defer gpa.free(text);
+    io.writeStdout(text);
+    return 0;
 }
 
 // --- tap / swipe / type implementations (Simulator only) -------------------
@@ -380,12 +466,36 @@ fn cmdSwipe(gpa: std.mem.Allocator, opts: Opts, args: []const []const u8) !u8 {
     return 0;
 }
 
+/// Send literal text to the Simulator's focused field.
+///
+/// Routed through System Events `keystroke` rather than CGEvent because it is
+/// Unicode-safe and needs no virtual-keycode table. Assumes the caller has
+/// already brought the Simulator forward.
+fn typeText(gpa: std.mem.Allocator, text: []const u8) !void {
+    var arena_impl = std.heap.ArenaAllocator.init(gpa);
+    defer arena_impl.deinit();
+    const arena = arena_impl.allocator();
+
+    // Escape backslashes and double-quotes for the AppleScript string literal.
+    var escaped: std.ArrayList(u8) = .empty;
+    defer escaped.deinit(arena);
+    for (text) |c| {
+        if (c == '\\' or c == '"') try escaped.append(arena, '\\');
+        try escaped.append(arena, c);
+    }
+
+    const script = try std.fmt.allocPrint(
+        arena,
+        "tell application \"System Events\" to tell process \"Simulator\" to keystroke \"{s}\"",
+        .{escaped.items},
+    );
+    const r = try io.runCommand(gpa, &.{ "osascript", "-e", script }, 64 * 1024);
+    gpa.free(r.stdout);
+}
+
 fn cmdType(gpa: std.mem.Allocator, opts: Opts, args: []const []const u8) !u8 {
     if (guardSim(opts.simulator)) |code| return code;
     if (args.len < 1) return errMissing("text");
-    // Bring sim to front so keystrokes go to its focused field, then use
-    // System Events `keystroke` for Unicode-safe input. This avoids having
-    // to maintain a CGEvent keycode table.
     try sim_window.activate(gpa);
 
     var arena_impl = std.heap.ArenaAllocator.init(gpa);
@@ -399,21 +509,7 @@ fn cmdType(gpa: std.mem.Allocator, opts: Opts, args: []const []const u8) !u8 {
         try joined.appendSlice(arena, a);
     }
 
-    // Escape backslashes and double-quotes for AppleScript string literal.
-    var escaped: std.ArrayList(u8) = .empty;
-    defer escaped.deinit(arena);
-    for (joined.items) |c| {
-        if (c == '\\' or c == '"') try escaped.append(arena, '\\');
-        try escaped.append(arena, c);
-    }
-
-    const script = try std.fmt.allocPrint(
-        arena,
-        "tell application \"System Events\" to tell process \"Simulator\" to keystroke \"{s}\"",
-        .{escaped.items},
-    );
-    const r = try io.runCommand(gpa, &.{ "osascript", "-e", script }, 64 * 1024);
-    gpa.free(r.stdout);
+    try typeText(gpa, joined.items);
     return 0;
 }
 
@@ -623,49 +719,294 @@ fn reportToolchainError(arena: std.mem.Allocator, err: anyerror) void {
     }
 }
 
+/// Parse an "x,y" pair. Used by `gesture`, where packing each point into one
+/// token keeps a long path readable on the command line.
+fn parsePoint(tok: []const u8) !struct { x: f64, y: f64 } {
+    const comma = std.mem.indexOfScalar(u8, tok, ',') orelse return error.BadPoint;
+    return .{
+        .x = try parseF64(tok[0..comma]),
+        .y = try parseF64(tok[comma + 1 ..]),
+    };
+}
+
+/// Drag along a multi-point path.
+fn cmdGesture(gpa: std.mem.Allocator, opts: Opts, args: []const []const u8) !u8 {
+    if (guardSim(opts.simulator)) |code| return code;
+    if (args.len < 2) return errMissing("<x1,y1> <x2,y2> [x3,y3 ...]");
+
+    const r = try resolveUdid(gpa, opts.udid);
+    defer r.deinit(gpa);
+    try sim_window.activate(gpa);
+    const win = try sim_window.frontWindowRect(gpa);
+    const px = try sim_window.devicePixelSize(gpa, r.udid);
+
+    var pts: std.ArrayList(sim_input.CGPoint) = .empty;
+    defer pts.deinit(gpa);
+    for (args) |tok| {
+        const p = parsePoint(tok) catch {
+            var arena_impl = std.heap.ArenaAllocator.init(gpa);
+            defer arena_impl.deinit();
+            io.printStderr(arena_impl.allocator(), "expected x,y — got: {s}\n", .{tok});
+            return 2;
+        };
+        try pts.append(gpa, sim_window.deviceToScreen(win, px, p.x, p.y));
+    }
+
+    sim_input.gesture(pts.items, opts.dur_ms orelse 400);
+    return 0;
+}
+
+/// Raw touch down/move/up, for gestures the named commands don't cover.
+fn cmdTouch(gpa: std.mem.Allocator, opts: Opts, args: []const []const u8) !u8 {
+    if (guardSim(opts.simulator)) |code| return code;
+    if (args.len < 3) return errMissing("<down|up|move> <x> <y>");
+    const phase = args[0];
+    const x = try parseF64(args[1]);
+    const y = try parseF64(args[2]);
+
+    const r = try resolveUdid(gpa, opts.udid);
+    defer r.deinit(gpa);
+    const p = try prepSimAndPoint(gpa, r.udid, x, y);
+
+    if (std.mem.eql(u8, phase, "down")) {
+        sim_input.touchDown(p);
+    } else if (std.mem.eql(u8, phase, "move")) {
+        sim_input.touchMove(p);
+    } else if (std.mem.eql(u8, phase, "up")) {
+        sim_input.touchUp(p);
+    } else {
+        var arena_impl = std.heap.ArenaAllocator.init(gpa);
+        defer arena_impl.deinit();
+        io.printStderr(arena_impl.allocator(), "unknown touch phase: {s} (want down|move|up)\n", .{phase});
+        return 2;
+    }
+    return 0;
+}
+
+/// Press several named keys in order — `key-sequence tab tab return`.
+fn cmdKeySequence(gpa: std.mem.Allocator, opts: Opts, args: []const []const u8) !u8 {
+    if (guardSim(opts.simulator)) |code| return code;
+    if (args.len < 1) return errMissing("key-name [key-name ...]");
+
+    // Validate the whole sequence before pressing anything: a typo halfway
+    // through would otherwise leave the UI in a half-driven state.
+    for (args) |name| {
+        if (sim_input.lookupKey(name) == null) {
+            var arena_impl = std.heap.ArenaAllocator.init(gpa);
+            defer arena_impl.deinit();
+            io.printStderr(arena_impl.allocator(), "unknown key: {s}\n", .{name});
+            return 2;
+        }
+    }
+
+    try sim_window.activate(gpa);
+    for (args) |name| {
+        sim_input.keyPress(sim_input.lookupKey(name).?, opts.mods);
+        io.sleepMs(60);
+    }
+    return 0;
+}
+
+/// Run several actions in one process.
+///
+/// The win is not syntax but setup cost: resolving the UDID and activating
+/// the Simulator window happen once for the whole sequence instead of once
+/// per command, which is most of the wall-clock in a per-action shell loop.
+fn cmdBatch(gpa: std.mem.Allocator, opts: Opts, args: []const []const u8) !u8 {
+    if (guardSim(opts.simulator)) |code| return code;
+    if (args.len < 1) return errMissing("<action> [action ...]  e.g. tap:120,400 type:hi key:return");
+
+    const r = try resolveUdid(gpa, opts.udid);
+    defer r.deinit(gpa);
+    try sim_window.activate(gpa);
+    const win = try sim_window.frontWindowRect(gpa);
+    const px = try sim_window.devicePixelSize(gpa, r.udid);
+
+    var arena_impl = std.heap.ArenaAllocator.init(gpa);
+    defer arena_impl.deinit();
+    const arena = arena_impl.allocator();
+
+    for (args, 0..) |spec, step| {
+        const colon = std.mem.indexOfScalar(u8, spec, ':') orelse {
+            io.printStderr(arena, "step {d}: expected verb:args — got '{s}'\n", .{ step + 1, spec });
+            return 2;
+        };
+        const verb = spec[0..colon];
+        const rest = spec[colon + 1 ..];
+
+        if (std.mem.eql(u8, verb, "wait")) {
+            io.sleepMs(try std.fmt.parseInt(u64, rest, 10));
+            continue;
+        }
+        if (std.mem.eql(u8, verb, "type")) {
+            // Everything after the colon is literal text, commas included.
+            try typeText(gpa, rest);
+            continue;
+        }
+        if (std.mem.eql(u8, verb, "key")) {
+            const code = sim_input.lookupKey(rest) orelse {
+                io.printStderr(arena, "step {d}: unknown key '{s}'\n", .{ step + 1, rest });
+                return 2;
+            };
+            sim_input.keyPress(code, 0);
+            continue;
+        }
+        if (std.mem.eql(u8, verb, "button")) {
+            try sim_ax.press(gpa, rest);
+            continue;
+        }
+        if (std.mem.eql(u8, verb, "label")) {
+            const els = try sim_ax.dumpElements(gpa, r.udid);
+            defer uitree.freeElements(gpa, els);
+            const hit = findByLabel(els, rest) orelse {
+                io.printStderr(arena, "step {d}: no element matching label '{s}'\n", .{ step + 1, rest });
+                return 4;
+            };
+            const c = uitree.centroid(hit) orelse return error.ElementHasNoBounds;
+            sim_input.tap(sim_window.deviceToScreen(win, px, @floatFromInt(c[0]), @floatFromInt(c[1])));
+            continue;
+        }
+
+        // Remaining verbs are all comma-separated numbers.
+        var nums: std.ArrayList(f64) = .empty;
+        defer nums.deinit(gpa);
+        var it = std.mem.splitScalar(u8, rest, ',');
+        while (it.next()) |n| {
+            if (n.len == 0) continue;
+            try nums.append(gpa, parseF64(n) catch {
+                io.printStderr(arena, "step {d}: '{s}' is not a number\n", .{ step + 1, n });
+                return 2;
+            });
+        }
+        const v = nums.items;
+
+        if (std.mem.eql(u8, verb, "tap") and v.len >= 2) {
+            sim_input.tap(sim_window.deviceToScreen(win, px, v[0], v[1]));
+        } else if (std.mem.eql(u8, verb, "doubletap") and v.len >= 2) {
+            sim_input.doubleTap(sim_window.deviceToScreen(win, px, v[0], v[1]));
+        } else if (std.mem.eql(u8, verb, "longpress") and v.len >= 2) {
+            const hold: u64 = if (v.len >= 3) @intFromFloat(v[2]) else 500;
+            sim_input.longPress(sim_window.deviceToScreen(win, px, v[0], v[1]), hold);
+        } else if (std.mem.eql(u8, verb, "swipe") and v.len >= 4) {
+            const dur: u64 = if (v.len >= 5) @intFromFloat(v[4]) else 300;
+            sim_input.swipe(
+                sim_window.deviceToScreen(win, px, v[0], v[1]),
+                sim_window.deviceToScreen(win, px, v[2], v[3]),
+                dur,
+            );
+        } else {
+            io.printStderr(arena, "step {d}: unknown or malformed action '{s}'\n", .{ step + 1, spec });
+            return 2;
+        }
+    }
+    return 0;
+}
+
+/// Print every element matching `--label`, with a tap-ready centroid.
+/// Unlike `tap --label` this reports *all* candidates, which is what you
+/// want when a tap targeted the wrong one of several similar labels.
+fn cmdFind(gpa: std.mem.Allocator, opts: Opts) !u8 {
+    if (guardSim(opts.simulator)) |code| return code;
+    const label = opts.label orelse return errMissing("--label <text>");
+
+    const r = try resolveUdid(gpa, opts.udid);
+    defer r.deinit(gpa);
+    try sim_window.activate(gpa);
+    const els = try sim_ax.dumpElements(gpa, r.udid);
+    defer uitree.freeElements(gpa, els);
+
+    var arena_impl = std.heap.ArenaAllocator.init(gpa);
+    defer arena_impl.deinit();
+    const arena = arena_impl.allocator();
+
+    var hits: usize = 0;
+    for (els) |e| {
+        const matches = std.mem.indexOf(u8, e.desc, label) != null or
+            std.mem.indexOf(u8, e.text, label) != null or
+            std.mem.eql(u8, e.id, label);
+        if (!matches) continue;
+        hits += 1;
+        if (uitree.centroid(e)) |c| {
+            io.printStdout(arena, "{s}\tid={s}\tlabel={s}\ttap={d},{d}\n", .{ e.class, e.id, e.desc, c[0], c[1] });
+        } else {
+            io.printStdout(arena, "{s}\tid={s}\tlabel={s}\ttap=-\n", .{ e.class, e.id, e.desc });
+        }
+    }
+    // Exit non-zero on no match so `find` is usable directly as a test assertion.
+    if (hits == 0) {
+        io.printStderr(arena, "no element matching label: {s}\n", .{label});
+        return 4;
+    }
+    return 0;
+}
+
+/// Block until an element appears (or, with --absent, goes away).
+///
+/// This is the piece that lets an agent stop guessing at sleeps: it polls the
+/// accessibility tree rather than the clock, so it returns as soon as the UI
+/// is actually ready and fails loudly when it never becomes ready.
+fn cmdWaitForUi(gpa: std.mem.Allocator, opts: Opts) !u8 {
+    if (guardSim(opts.simulator)) |code| return code;
+    const label = opts.label orelse return errMissing("--label <text>");
+    const timeout = opts.timeout_ms orelse 10_000;
+    const poll_ms: u64 = 250;
+
+    const r = try resolveUdid(gpa, opts.udid);
+    defer r.deinit(gpa);
+    try sim_window.activate(gpa);
+
+    // Deadline is wall-clock, not a count of sleeps. Each poll costs a simctl
+    // spawn plus an accessibility walk (~0.5s), so summing only the sleep
+    // intervals would overshoot a requested timeout by several times over.
+    const deadline = io.monotonicMs() + @as(i64, @intCast(timeout));
+    while (true) {
+        // A tree that isn't readable yet is a "not yet", not a hard failure:
+        // on a freshly booted simulator the accessibility bridge takes a few
+        // seconds to populate, which is precisely what callers wait through.
+        const present = blk: {
+            const els = sim_ax.dumpElements(gpa, r.udid) catch break :blk false;
+            defer uitree.freeElements(gpa, els);
+            break :blk findByLabel(els, label) != null;
+        };
+        if (present != opts.absent) return 0;
+
+        if (io.monotonicMs() >= deadline) break;
+        io.sleepMs(poll_ms);
+    }
+
+    var arena_impl = std.heap.ArenaAllocator.init(gpa);
+    defer arena_impl.deinit();
+    io.printStderr(arena_impl.allocator(), "timed out after {d}ms waiting for '{s}' to {s}\n", .{
+        timeout,
+        label,
+        if (opts.absent) "disappear" else "appear",
+    });
+    return 4;
+}
+
+/// Rendered from the same table `ios tools` serves, so a command can never
+/// exist in the dispatcher but go missing from the help.
 fn printUsage() !void {
     io.writeStderr(
         \\kuri-mobile ios <cmd> [args]
         \\
-        \\Commands:
-        \\  list-devices                       list both simulators and real devices
-        \\  boot       --udid U                boot a simulator
-        \\  shutdown   --udid U                shut down a simulator
-        \\  openurl   [--udid U] <url>         navigate (opens https/http in Safari on the booted sim)
-        \\  navigate  [--udid U] <url>         alias for openurl
-        \\  launch    --udid U [--simulator|--device] <bundle-id>
-        \\  terminate --udid U [--simulator|--device] <bundle-id>
-        \\  screenshot [--udid U] [path.png]   defaults to the booted sim if --udid omitted
-        \\  list-apps  --udid U --simulator
+        \\Global flags: --udid U  --simulator|--device  --json
+        \\Run `kuri-mobile ios tools --json` for the machine-readable surface.
         \\
-        \\Simulator-only input (macOS, device-pixel coords matching screenshot):
-        \\  tap       [--udid U] <x> <y> | --label <text>
-        \\  doubletap [--udid U] <x> <y>                          (alias: dbltap)
-        \\  longpress [--udid U] <x> <y> [hold_ms]                (alias: long-press; default 500ms)
-        \\  swipe     [--udid U] <x1> <y1> <x2> <y2> [duration_ms]   (alias: scroll, pan)
-        \\  type      [--udid U] <text...>
-        \\  key       <name> [--cmd|--shift|--ctrl|--opt]         e.g. `key return --cmd`
-        \\                                                        names: return enter tab space
-        \\                                                               delete escape left right up down
         \\
-        \\Accessibility tree (Simulator, no XCUITest needed):
-        \\  uitree                             flat element list: role, a11y id, label, bounds
-        \\                                     bounds are device pixels, matching tap/screenshot
-        \\
-        \\Hardware buttons (via Simulator's own accessibility tree):
-        \\  button    <home|lock|volup|voldown|action|rotate>
-        \\  background [--for MS] [bundle-id]  press Home, wait, then re-foreground
-        \\
-        \\Device state:
-        \\  privacy   <grant|revoke|reset> <service> [bundle-id]
-        \\  ui        <appearance|content-size|increase-contrast> [value]
-        \\  status-bar override --time 9:41 ... | status-bar clear
-        \\  log       [--last 30s] [--predicate 'subsystem == "com.example.app"']
-        \\
-        \\Not implemented in v1 (driverless mode):
-        \\  tap, swipe, type, uitree on real iOS devices    -> need XCUITest (no host process to inspect)
-        \\  pinch / rotate / two-finger gestures            -> need multi-touch wiring
-        \\  camera & speech-recognition permissions         -> not exposed by simctl privacy
+    );
+
+    var gpa_impl: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa_impl.deinit();
+    const text = tools.renderText(gpa_impl.allocator()) catch return;
+    defer gpa_impl.allocator().free(text);
+    io.writeStderr(text);
+
+    io.writeStderr(
+        \\Not supported in v1 (driverless mode):
+        \\  tap, swipe, type, uitree on real iOS devices  -> need XCUITest (no host process to inspect)
+        \\  pinch / two-finger gestures                   -> need multi-touch wiring
+        \\  camera & speech-recognition permissions       -> not exposed by simctl privacy
         \\
     );
 }

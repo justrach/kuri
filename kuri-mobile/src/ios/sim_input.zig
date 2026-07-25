@@ -108,6 +108,70 @@ pub fn swipe(a: CGPoint, b: CGPoint, duration_ms: u64) void {
     postMouse(kCGEventLeftMouseUp, b);
 }
 
+/// Drag along an arbitrary path. `swipe` is the two-point case; this exists
+/// for motions whose shape matters — an arc that dismisses a sheet, an
+/// L-shaped drag, a signature — where interpolating straight from first to
+/// last point would produce a different gesture entirely.
+///
+/// `duration_ms` is spread across the whole path, so each leg gets a share
+/// proportional to the number of legs rather than a fixed per-leg cost.
+pub fn gesture(points: []const CGPoint, duration_ms: u64) void {
+    if (builtin.os.tag != .macos) return;
+    if (points.len < 2) return;
+
+    const legs: u64 = @intCast(points.len - 1);
+    const min_dur: u64 = 80;
+    const total = if (duration_ms < min_dur) min_dur else duration_ms;
+    const step_ms: u64 = 16;
+
+    // Total interpolation steps, split evenly between legs. At least 3 per leg
+    // so even a long path still reads as a drag and not a teleport.
+    var per_leg: u64 = (total / step_ms) / legs;
+    if (per_leg < 3) per_leg = 3;
+    if (per_leg > 120) per_leg = 120;
+
+    postMouse(kCGEventMouseMoved, points[0]);
+    postMouse(kCGEventLeftMouseDown, points[0]);
+    sleepMs(20);
+
+    var leg: usize = 0;
+    while (leg < points.len - 1) : (leg += 1) {
+        const a = points[leg];
+        const b = points[leg + 1];
+        var i: u64 = 1;
+        while (i <= per_leg) : (i += 1) {
+            const t = @as(f64, @floatFromInt(i)) / @as(f64, @floatFromInt(per_leg));
+            postMouse(kCGEventLeftMouseDragged, .{
+                .x = a.x + (b.x - a.x) * t,
+                .y = a.y + (b.y - a.y) * t,
+            });
+            sleepMs(step_ms);
+        }
+    }
+    postMouse(kCGEventLeftMouseUp, points[points.len - 1]);
+}
+
+/// Raw touch primitives, for gestures the named commands don't cover.
+///
+/// These deliberately leave the button held across process exits: `touch down`
+/// followed later by `touch up` is the whole point. That also means a stray
+/// `down` with no matching `up` leaves the Simulator with a stuck press.
+pub fn touchDown(p: CGPoint) void {
+    if (builtin.os.tag != .macos) return;
+    postMouse(kCGEventMouseMoved, p);
+    postMouse(kCGEventLeftMouseDown, p);
+}
+
+pub fn touchMove(p: CGPoint) void {
+    if (builtin.os.tag != .macos) return;
+    postMouse(kCGEventLeftMouseDragged, p);
+}
+
+pub fn touchUp(p: CGPoint) void {
+    if (builtin.os.tag != .macos) return;
+    postMouse(kCGEventLeftMouseUp, p);
+}
+
 // --- Keyboard ---------------------------------------------------------------
 // `type` (in cli.zig) routes plain text through System Events `keystroke`,
 // which is Unicode-safe and needs no keycode table. That path cannot express

@@ -2,6 +2,26 @@
 
 All notable changes to kuri are documented here.
 
+## [0.4.7] — 2026-07-25
+
+### Toolchain
+- **Zig 0.17.0-dev** — the project, both build files and CI now target `0.17.0-dev.813+2153f8143`. `b.args` became `Run.addPassthruArgs()` and `Allocator.dupeZ` became `dupeSentinel`. The nightly is pinned exactly, since dev tarballs are not permanent. Measured against 0.16.0 on this codebase: cold builds are ~36% slower (40.3s vs 29.6s), warm rebuilds and binary size are unchanged
+
+### Features — kuri-mobile
+- **`ios tools`** — the command surface as data. Both the help text and `--json` render from one comptime table, so the dispatcher, the docs and the machine-readable listing cannot drift apart. Each entry carries name, aliases, positional shape, flags and a `scope` of `simulator`/`device`/`simulator+device`, so an agent can distinguish "not supported here" from "not configured yet" without probing
+- **`doctor`** — checks the preconditions that otherwise get misdiagnosed at the point of use: developer-dir resolution, `simctl` presence, the macOS Accessibility grant, whether Simulator.app is running, booted device count, and adb reachability. Each failure prints its own remedy. Exits non-zero only on blocking problems
+- **`wait-for-ui`** — block until an element appears, or disappears with `--absent`. Polls the accessibility tree rather than the clock, so it returns as soon as the UI is ready and fails loudly when it never is. Replaces sleep-and-hope, which is the main source of flakiness when driving a simulator
+- **`find`** — print every element matching a label, with tap-ready centroids. Exits non-zero on no match, so it works directly as a test assertion
+- **`batch`** — several actions in one process (`tap:120,400 type:hi key:return wait:500 label:Done`). The win is setup cost: device resolution and window focus happen once for the whole sequence rather than once per command
+- **`gesture`/`drag`** — drag along a multi-point path, for motions whose shape matters and that a two-point swipe would flatten
+- **`touch down|move|up`** — raw touch primitives for gestures the named commands don't cover
+- **`key-sequence`** — press several named keys in order; the whole sequence is validated before anything is pressed, so a typo can't leave the UI half-driven
+- **App & device state** — `install`, `uninstall`, `erase`, `open-sim`, `set-location`, `reset-location`, `record-video` (bounded, SIGINT-finalised so the file stays playable), and `keyboard on|off` to control whether the software keyboard appears
+
+### Fixes
+- **`wait-for-ui` overshot its timeout by ~4x** — the deadline summed sleep intervals while ignoring the ~0.5s cost of each accessibility poll, so `--timeout 3000` actually waited 13.5s. Now measured against a monotonic clock: 3s requested, 4.2s observed (one final poll)
+- **`kuri-mobile --version` reported 0.0.1** — it now tracks the release it ships in
+
 ## [0.4.6] — 2026-07-25
 
 ### Features — kuri-mobile iOS, driverless

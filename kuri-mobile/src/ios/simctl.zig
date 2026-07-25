@@ -51,6 +51,64 @@ pub const Sim = struct {
         gpa.free(out);
     }
 
+    /// Erase back to factory state. simctl refuses to erase a booted device,
+    /// so shut down first — and tolerate that shutdown failing, because
+    /// "already shut down" is the common and entirely fine case.
+    pub fn erase(self: Sim, gpa: std.mem.Allocator) !void {
+        const r = try xcode.tryRun(gpa, "simctl", &.{ "shutdown", self.udid }, 1024 * 1024);
+        gpa.free(r.stdout);
+        const out = try xcode.run(gpa, "simctl", &.{ "erase", self.udid }, 1024 * 1024);
+        gpa.free(out);
+    }
+
+    pub fn install(self: Sim, gpa: std.mem.Allocator, app_path: []const u8) !void {
+        const out = try xcode.run(gpa, "simctl", &.{ "install", self.udid, app_path }, 4 * 1024 * 1024);
+        gpa.free(out);
+    }
+
+    pub fn uninstall(self: Sim, gpa: std.mem.Allocator, bundle_id: []const u8) !void {
+        const out = try xcode.run(gpa, "simctl", &.{ "uninstall", self.udid, bundle_id }, 1024 * 1024);
+        gpa.free(out);
+    }
+
+    // --- Location -----------------------------------------------------------
+
+    /// `simctl location <udid> set <lat>,<lon>`. Coordinates are passed as one
+    /// comma-joined argument, which is the shape simctl expects.
+    pub fn setLocation(self: Sim, gpa: std.mem.Allocator, lat: []const u8, lon: []const u8) !void {
+        const pair = try std.fmt.allocPrint(gpa, "{s},{s}", .{ lat, lon });
+        defer gpa.free(pair);
+        const out = try xcode.run(gpa, "simctl", &.{ "location", self.udid, "set", pair }, 1024 * 1024);
+        gpa.free(out);
+    }
+
+    pub fn clearLocation(self: Sim, gpa: std.mem.Allocator) !void {
+        const out = try xcode.run(gpa, "simctl", &.{ "location", self.udid, "clear" }, 1024 * 1024);
+        gpa.free(out);
+    }
+
+    /// Record the screen for `duration_ms`, then SIGINT so the container is
+    /// finalised. simctl overwrites only with --force; without it a second
+    /// recording to the same path fails instead of silently clobbering.
+    pub fn recordVideo(
+        self: Sim,
+        gpa: std.mem.Allocator,
+        path: []const u8,
+        duration_ms: u64,
+    ) !void {
+        const tool = try xcode.toolPath(gpa, "simctl");
+        defer gpa.free(tool);
+        const argv = [_][]const u8{
+            tool, "io", self.udid, "recordVideo", "--force", path,
+        };
+        const r = try io.runCommandFor(gpa, &argv, duration_ms, 1024 * 1024);
+        defer gpa.free(r.stdout);
+        if (!xcode.fileExists(path)) {
+            io.writeStderr("recording produced no file — is the simulator booted?\n");
+            return error.CommandFailed;
+        }
+    }
+
     // --- Permissions --------------------------------------------------------
 
     /// Grant / revoke / reset a TCC permission for a bundle id.
@@ -133,6 +191,35 @@ pub const Sim = struct {
         return xcode.run(gpa, "simctl", argv.items, 64 * 1024 * 1024);
     }
 };
+
+// --- Host-side helpers ------------------------------------------------------
+// These drive Simulator.app itself rather than a simulated device, so they run
+// host binaries by absolute path instead of going through the Xcode toolchain.
+
+/// Launch Simulator.app and bring it forward. Idempotent — `open -a` on an
+/// already-running app just activates it.
+pub fn openSimulatorApp(gpa: std.mem.Allocator) !void {
+    const r = try io.runCommand(gpa, &.{ "/usr/bin/open", "-a", "Simulator" }, 1024 * 1024);
+    defer gpa.free(r.stdout);
+    if (((r.term >> 8) & 0xFF) != 0) return error.CommandFailed;
+}
+
+/// Connect or disconnect the host hardware keyboard.
+///
+/// This is what governs whether the *software* keyboard appears: with the
+/// hardware keyboard connected iOS suppresses the on-screen one, so a test
+/// that wants to tap keys must disconnect it first. The setting belongs to
+/// Simulator.app (a host preference), not to any individual device, and is
+/// read at window focus — so an already-open window may need a re-focus.
+pub fn setHardwareKeyboard(gpa: std.mem.Allocator, connected: bool) !void {
+    const r = try io.runCommand(gpa, &.{
+        "/usr/bin/defaults",              "write",
+        "com.apple.iphonesimulator",      "ConnectHardwareKeyboard",
+        "-bool",                          if (connected) "YES" else "NO",
+    }, 1024 * 1024);
+    defer gpa.free(r.stdout);
+    if (((r.term >> 8) & 0xFF) != 0) return error.CommandFailed;
+}
 
 /// TCC services `simctl privacy` accepts, as of Xcode 26.6.
 pub const privacy_services = [_][]const u8{

@@ -69,7 +69,42 @@ zig build
 # Deterministic screenshots + bounded log assertions
 ./zig-out/bin/kuri-mobile ios status-bar override --time 9:41
 ./zig-out/bin/kuri-mobile ios log --last 30s --predicate 'subsystem == "com.example.app"'
+
+# Wait on the UI instead of sleeping and hoping
+./zig-out/bin/kuri-mobile ios wait-for-ui --label "Sign In" --timeout 10000
+./zig-out/bin/kuri-mobile ios wait-for-ui --label "Spinner" --absent
+./zig-out/bin/kuri-mobile ios find --label "General"   # all candidates + tap-ready centroids
+
+# Several actions in one process — resolves the device and focuses the window once
+./zig-out/bin/kuri-mobile ios batch tap:120,400 type:hello key:return wait:500 label:Done
+
+# Paths whose shape matters, and raw touch for anything not covered
+./zig-out/bin/kuri-mobile ios gesture 100,900 300,600 500,900 --for 600
+./zig-out/bin/kuri-mobile ios touch down 200 600
+
+# App and device state
+./zig-out/bin/kuri-mobile ios install ./build/MyApp.app
+./zig-out/bin/kuri-mobile ios set-location 37.3349 -122.0090
+./zig-out/bin/kuri-mobile ios record-video demo.mp4 --for 5000
+./zig-out/bin/kuri-mobile ios erase --udid <UDID>
+
+# Check the preconditions before they bite
+./zig-out/bin/kuri-mobile doctor
 ```
+
+### Discovering the command surface
+
+`ios tools` renders the whole surface from the same table the dispatcher and
+the help text use, so it cannot drift out of date:
+
+```sh
+./zig-out/bin/kuri-mobile ios tools           # grouped, human-readable
+./zig-out/bin/kuri-mobile ios tools --json    # name/aliases/args/flags/scope, for agents
+```
+
+Each entry carries a `scope` of `simulator`, `device` or `simulator+device`, so
+a caller can tell "not supported here" apart from "not configured yet" without
+trying it first.
 
 ### iOS Simulator accessibility tree
 
