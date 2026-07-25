@@ -53,7 +53,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
         return;
     }
     if (std.mem.eql(u8, sub, "--version")) {
-        try writeStdout("kuri-mobile 0.4.7\n");
+        try writeStdout("kuri-mobile 0.4.8\n");
         return;
     }
 
@@ -131,4 +131,6 @@ test {
     _ = @import("ios/sim_input.zig");
     _ = @import("ios/sim_window.zig");
     _ = @import("ios/tools.zig");
+    _ = @import("android/tools.zig");
+    _ = @import("common/toolinfo.zig");
 }
