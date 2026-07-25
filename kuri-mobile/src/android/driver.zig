@@ -295,6 +295,47 @@ fn escapeForInputText(gpa: std.mem.Allocator, src: []const u8) ![]u8 {
     return try out.toOwnedSlice(gpa);
 }
 
+test "quote wraps values so shell metacharacters cannot escape" {
+    const gpa = std.testing.allocator;
+
+    const plain = try Driver.quote(gpa, "com.example.app");
+    defer gpa.free(plain);
+    try std.testing.expectEqualStrings("'com.example.app'", plain);
+
+    // The injection this exists to stop: a package name that closes the quote
+    // and appends its own command must stay inert inside one quoted word.
+    const evil = try Driver.quote(gpa, "x; rm -rf /");
+    defer gpa.free(evil);
+    try std.testing.expectEqualStrings("'x; rm -rf /'", evil);
+
+    // A literal single quote is the only character that can terminate the
+    // word, so it must be closed, escaped and reopened.
+    const quoted = try Driver.quote(gpa, "it's");
+    defer gpa.free(quoted);
+    try std.testing.expectEqualStrings("'it'\\''s'", quoted);
+
+    // Backticks and $() are harmless once single-quoted — no expansion occurs.
+    const subst = try Driver.quote(gpa, "$(whoami)`id`");
+    defer gpa.free(subst);
+    try std.testing.expectEqualStrings("'$(whoami)`id`'", subst);
+}
+
+test "quote leaves no unbalanced quote for any byte" {
+    const gpa = std.testing.allocator;
+    var b: u8 = 1;
+    while (b < 127) : (b += 1) {
+        const s = [_]u8{b};
+        const q = try Driver.quote(gpa, &s);
+        defer gpa.free(q);
+        // Must open and close, and every interior ' must be part of the
+        // '\'' escape sequence rather than terminating the word early.
+        try std.testing.expect(q.len >= 2);
+        try std.testing.expectEqual(@as(u8, '\''), q[0]);
+        try std.testing.expectEqual(@as(u8, '\''), q[q.len - 1]);
+        if (b == '\'') try std.testing.expectEqualStrings("''\\'''", q);
+    }
+}
+
 test "mapButton known and unknown" {
     try std.testing.expectEqualStrings("KEYCODE_HOME", mapButton("home").?);
     try std.testing.expect(mapButton("nope") == null);

@@ -1,6 +1,6 @@
 .{
     .name = .kuri_mobile,
-    .version = "0.4.8",
+    .version = "0.4.9",
     .dependencies = .{},
     .fingerprint = 0x41cfa5929f72d020,
     .minimum_zig_version = "0.17.0-dev.813+2153f8143",

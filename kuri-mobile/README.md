@@ -193,6 +193,26 @@ trees on real devices, you have to either:
 | iOS real device launch     | shell out to `xcrun devicectl`                |
 | Android `screencap`/`uiautomator dump` etc | server-side commands the device's own shell runs; we just frame them over adb in Zig |
 
+## End-to-end tests
+
+```sh
+zig build e2e-ios            # drives a real booted Simulator
+```
+
+Runs against Settings by default, so it works on any machine. With no
+simulator booted it prints SKIP and exits 0 rather than failing, which is why
+it is kept out of `zig build test`. Point it at your own app with:
+
+```sh
+KURI_E2E_BUNDLE_ID=com.example.app \
+KURI_E2E_LABEL="Hello, world!" \
+KURI_E2E_APP=~/Library/Developer/Xcode/DerivedData/…/Debug-iphonesimulator/App.app \
+  zig build e2e-ios
+```
+
+Only non-input commands are exercised — `tap`/`swipe`/`gesture` post real
+CGEvents and would seize the cursor of whoever is running the suite.
+
 ## Tests
 
 ```sh
