@@ -2,6 +2,24 @@
 
 All notable changes to kuri are documented here.
 
+## [0.4.8] — 2026-07-25
+
+### Features — kuri-mobile Android reaches parity
+- **`android tools`** — Android now has the same meta tool iOS gained in 0.4.7. Both render from one shared module (`common/toolinfo.zig`), so the two platforms describe themselves identically and an agent can consume `ios tools --json` and `android tools --json` with a single parser. Combined surface is 63 commands (36 iOS, 27 Android)
+- **`wait-for-ui` / `find`** — the same polling and query primitives as iOS, backed by the uiautomator hierarchy. `find` exits non-zero on no match so it works directly as an assertion; `wait-for-ui` uses a wall-clock deadline rather than counting sleeps
+- **`batch`** — several actions over one adb session (`tap:120,400 type:hi press:enter wait:500 label:Done`), so serial resolution happens once instead of per command
+- **`gesture`/`drag` and `touch`** — multi-point paths via `input motionevent` (Android 11+). `input swipe` only ever interpolates between two points, so shaped drags were previously impossible
+- **Lifecycle & state** — `uninstall`, `clear` (wipe app data), `openurl`/`navigate`, `keyevent` (raw keycodes), `current-activity`, `logcat` (bounded `-d` read), `screen-info`, `getprop`, `dumpsys`
+- **More key names** — `recents`, `wakeup`, `sleep`, `search`, `camera`, `escape`, `backspace`, `notification`
+
+### Internal
+- Tool-registry rendering moved to `common/toolinfo.zig`. Shared invariant tests (`verifyTable`, `verifyJson`) run against both platform tables, so a new entry is checked for a summary, a known category, globally unique name/aliases, and JSON round-trip wherever it is added
+- Android shell commands that carry user text (package names, URLs, log filters, dumpsys sections) are now single-quote escaped, so a value containing shell metacharacters cannot break out of the constructed command
+- iOS tool entries carry an explicit `scope` rather than relying on a per-platform default
+
+### Not implemented
+- `android install` and `android record-video` need the adb SYNC protocol (file push/pull), which this client does not implement. Both are called out in the help text rather than left to fail confusingly
+
 ## [0.4.7] — 2026-07-25
 
 ### Toolchain

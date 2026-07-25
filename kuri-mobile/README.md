@@ -37,6 +37,12 @@ zig build
 ./zig-out/bin/kuri-mobile android tap 540 1200
 ./zig-out/bin/kuri-mobile android screenshot screen.png
 ./zig-out/bin/kuri-mobile android uitree
+./zig-out/bin/kuri-mobile android wait-for-ui --label "Sign in" --timeout 10000
+./zig-out/bin/kuri-mobile android find --label "Settings"
+./zig-out/bin/kuri-mobile android batch tap:120,400 type:hi press:enter wait:500
+./zig-out/bin/kuri-mobile android gesture 100,900 300,600 500,900 --for 600
+./zig-out/bin/kuri-mobile android current-activity
+./zig-out/bin/kuri-mobile android logcat --last 200 --predicate MyTag
 
 ./zig-out/bin/kuri-mobile ios list-devices
 ./zig-out/bin/kuri-mobile ios screenshot --udid <UDID> --simulator out.png
@@ -100,7 +106,12 @@ the help text use, so it cannot drift out of date:
 ```sh
 ./zig-out/bin/kuri-mobile ios tools           # grouped, human-readable
 ./zig-out/bin/kuri-mobile ios tools --json    # name/aliases/args/flags/scope, for agents
+./zig-out/bin/kuri-mobile android tools --json
 ```
+
+Both platforms render from `common/toolinfo.zig`, so they describe themselves
+identically and one parser handles either. 63 commands total — 36 iOS, 27
+Android.
 
 Each entry carries a `scope` of `simulator`, `device` or `simulator+device`, so
 a caller can tell "not supported here" apart from "not configured yet" without

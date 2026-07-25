@@ -124,6 +124,123 @@ pub const Driver = struct {
     pub fn listApps(self: *Driver, gpa: std.mem.Allocator) ![]u8 {
         return try self.shell(gpa, "pm list packages");
     }
+
+    /// `shell` formats into a fixed 1 KiB buffer, which is fine for commands we
+    /// build ourselves but not for ones carrying user text (log filters,
+    /// dumpsys sections). This variant sizes the request to the command.
+    fn shellAlloc(self: *Driver, gpa: std.mem.Allocator, cmd: []const u8) ![]u8 {
+        const svc = try std.fmt.allocPrint(gpa, "shell:{s}", .{cmd});
+        defer gpa.free(svc);
+        return try self.client.deviceExec(self.serial, svc);
+    }
+
+    /// Escape a value destined for a single-quoted `sh` word on the device, so
+    /// a package name or URL containing shell metacharacters cannot break out
+    /// of the command we are constructing.
+    fn quote(gpa: std.mem.Allocator, s: []const u8) ![]u8 {
+        var out: std.ArrayList(u8) = .empty;
+        errdefer out.deinit(gpa);
+        try out.append(gpa, '\'');
+        for (s) |c| {
+            if (c == '\'') try out.appendSlice(gpa, "'\\''") else try out.append(gpa, c);
+        }
+        try out.append(gpa, '\'');
+        return out.toOwnedSlice(gpa);
+    }
+
+    fn runQuoted(
+        self: *Driver,
+        gpa: std.mem.Allocator,
+        comptime fmt: []const u8,
+        arg: []const u8,
+    ) ![]u8 {
+        const q = try quote(gpa, arg);
+        defer gpa.free(q);
+        const cmd = try std.fmt.allocPrint(gpa, fmt, .{q});
+        defer gpa.free(cmd);
+        return try self.shellAlloc(gpa, cmd);
+    }
+
+    // --- app lifecycle ------------------------------------------------------
+
+    pub fn uninstallApp(self: *Driver, gpa: std.mem.Allocator, pkg: []const u8) !void {
+        gpa.free(try self.runQuoted(gpa, "pm uninstall {s}", pkg));
+    }
+
+    /// Wipe an app's data without reinstalling — the cheap way back to a
+    /// first-launch state.
+    pub fn clearApp(self: *Driver, gpa: std.mem.Allocator, pkg: []const u8) !void {
+        gpa.free(try self.runQuoted(gpa, "pm clear {s}", pkg));
+    }
+
+    /// Open a URL through the standard VIEW intent — the Android counterpart
+    /// of `ios openurl`.
+    pub fn openUrl(self: *Driver, gpa: std.mem.Allocator, url: []const u8) !void {
+        gpa.free(try self.runQuoted(gpa, "am start -a android.intent.action.VIEW -d {s}", url));
+    }
+
+    // --- observation --------------------------------------------------------
+
+    /// Package/activity currently holding focus. Useful as a navigation
+    /// assertion that needs no accessibility tree.
+    pub fn currentActivity(self: *Driver, gpa: std.mem.Allocator) ![]u8 {
+        return try self.shell(gpa, "dumpsys window displays | grep -E 'mCurrentFocus|mFocusedApp'");
+    }
+
+    /// Bounded logcat read. `-d` dumps and exits rather than streaming, so
+    /// this terminates and can back an assertion.
+    pub fn logcat(self: *Driver, gpa: std.mem.Allocator, lines: []const u8, filter: ?[]const u8) ![]u8 {
+        const ql = try quote(gpa, lines);
+        defer gpa.free(ql);
+        const cmd = if (filter) |f| blk: {
+            const qf = try quote(gpa, f);
+            defer gpa.free(qf);
+            break :blk try std.fmt.allocPrint(gpa, "logcat -d -t {s} | grep -F -- {s}", .{ ql, qf });
+        } else try std.fmt.allocPrint(gpa, "logcat -d -t {s}", .{ql});
+        defer gpa.free(cmd);
+        return try self.shellAlloc(gpa, cmd);
+    }
+
+    pub fn getProp(self: *Driver, gpa: std.mem.Allocator, name: []const u8) ![]u8 {
+        return try self.runQuoted(gpa, "getprop {s}", name);
+    }
+
+    pub fn dumpsys(self: *Driver, gpa: std.mem.Allocator, section: []const u8) ![]u8 {
+        return try self.runQuoted(gpa, "dumpsys {s}", section);
+    }
+
+    /// Physical screen size and density — the numbers that turn a uitree
+    /// bound into a tap coordinate.
+    pub fn screenInfo(self: *Driver, gpa: std.mem.Allocator) ![]u8 {
+        return try self.shell(gpa, "wm size; wm density");
+    }
+
+    // --- raw input ----------------------------------------------------------
+
+    /// Raw keycode, for keys outside the friendly `press` table.
+    pub fn keyevent(self: *Driver, gpa: std.mem.Allocator, code: []const u8) !void {
+        gpa.free(try self.runQuoted(gpa, "input keyevent {s}", code));
+    }
+
+    /// A single touch phase via `input motionevent` (Android 11+). This is
+    /// what makes multi-point paths possible: `input swipe` only ever
+    /// interpolates between two points.
+    pub fn motionEvent(self: *Driver, gpa: std.mem.Allocator, phase: []const u8, x: i32, y: i32) !void {
+        var buf: [128]u8 = undefined;
+        const cmd = try std.fmt.bufPrint(&buf, "input motionevent {s} {d} {d}", .{ phase, x, y });
+        gpa.free(try self.shell(gpa, cmd));
+    }
+
+    /// Drag along an arbitrary path by emitting DOWN / MOVE… / UP.
+    pub fn gesture(self: *Driver, gpa: std.mem.Allocator, pts: []const [2]i32, step_ms: u32) !void {
+        if (pts.len < 2) return error.BadPoint;
+        try self.motionEvent(gpa, "DOWN", pts[0][0], pts[0][1]);
+        for (pts[1..]) |p| {
+            _ = usleep(step_ms * 1000);
+            try self.motionEvent(gpa, "MOVE", p[0], p[1]);
+        }
+        try self.motionEvent(gpa, "UP", pts[pts.len - 1][0], pts[pts.len - 1][1]);
+    }
 };
 
 fn mapButton(name: []const u8) ?[]const u8 {
@@ -144,6 +261,15 @@ fn mapButton(name: []const u8) ?[]const u8 {
         .{ "dpadLeft", "KEYCODE_DPAD_LEFT" },
         .{ "dpadRight", "KEYCODE_DPAD_RIGHT" },
         .{ "dpadCenter", "KEYCODE_DPAD_CENTER" },
+        .{ "recents", "KEYCODE_APP_SWITCH" },
+        .{ "appSwitch", "KEYCODE_APP_SWITCH" },
+        .{ "wakeup", "KEYCODE_WAKEUP" },
+        .{ "sleep", "KEYCODE_SLEEP" },
+        .{ "search", "KEYCODE_SEARCH" },
+        .{ "camera", "KEYCODE_CAMERA" },
+        .{ "escape", "KEYCODE_ESCAPE" },
+        .{ "backspace", "KEYCODE_DEL" },
+        .{ "notification", "KEYCODE_NOTIFICATION" },
     };
     for (table) |p| if (std.mem.eql(u8, p[0], name)) return p[1];
     return null;
