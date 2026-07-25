@@ -2,6 +2,20 @@
 
 All notable changes to kuri are documented here.
 
+## [0.4.10] — 2026-07-25
+
+### Fixes
+- **Every `--device` command silently did nothing and reported success.** `devicectl.zig` shelled out to bare `xcrun devicectl`, which resolves through `xcode-select` — and when that points at CommandLineTools, devicectl does not exist there. Combined with an unchecked exit status, `ios launch --device` exited 0 having done nothing at all. This is the same bug class fixed for `simctl` in 0.4.6; devicectl was missed. It is now invoked by absolute path through the Xcode resolver with a checked exit status, so a failure surfaces devicectl's own diagnostic
+- **`listDevicesJson` passed `--json-output -`**, but devicectl only writes JSON to a file on disk — never stdout — so this would have created a file literally named `-`. Replaced with the human-readable listing
+
+### Features — physical iOS devices
+- **`install` / `uninstall` / `list-apps` now work on real devices** via devicectl instead of erroring or being simulator-only
+- **New device-scoped commands** — `device-info`, `device-processes`, `lock-state`, `displays`, `reboot`. `lock-state` in particular addresses a common silent failure: automation that appears to do nothing because the screen is locked
+- iOS surface is 41 commands, 12 of which work against physical hardware
+
+### Scope, stated honestly
+- devicectl exposes **no screenshot and no UI hierarchy**, so `tap`/`swipe`/`type`/`uitree`/`screenshot` remain simulator-only no matter what is plugged in — those need XCUITest. The registry's `scope` field now reflects this exactly: 29 simulator-only, 7 simulator+device, 5 device-only
+
 ## [0.4.9] — 2026-07-25
 
 ### Tests

@@ -96,6 +96,16 @@ zig build
 
 # Check the preconditions before they bite
 ./zig-out/bin/kuri-mobile doctor
+
+# Physical iPhone/iPad (--device routes through Apple's devicectl).
+# Lifecycle and inspection work; tap/swipe/uitree/screenshot do not — devicectl
+# exposes no UI surface at all, so those still need XCUITest.
+./zig-out/bin/kuri-mobile ios list-devices                      # simulators + paired devices
+./zig-out/bin/kuri-mobile ios device-info  --udid <UDID>
+./zig-out/bin/kuri-mobile ios lock-state   --udid <UDID>        # is the screen locked?
+./zig-out/bin/kuri-mobile ios list-apps    --device --udid <UDID>
+./zig-out/bin/kuri-mobile ios install      --device --udid <UDID> ./MyApp.app
+./zig-out/bin/kuri-mobile ios launch       --device --udid <UDID> com.example.app
 ```
 
 ### Discovering the command surface
@@ -168,7 +178,10 @@ Compared to `mobile-device-mcp`:
 | iOS Simulator UI tree            | ✅ via host AX + `ApplicationAccessibilityEnabled` (no XCUITest) | ✅ via XCUITest |
 | iOS Simulator tap-by-a11y-label  | ✅ `ios tap --label` (resolves through the a11y tree) | ✅ via XCUITest |
 | iOS Simulator hardware buttons   | ✅ Home/Lock/Volume/Action/Rotate via host AX | ✅ |
-| iOS real-device tap/swipe/uitree | ❌ requires XCUITest    | ✅ via XCUITest bundle |
+| iOS real-device install/uninstall/list-apps | ✅ via `devicectl` | ✅ |
+| iOS real-device launch / terminate | ✅ via `devicectl` | ✅ |
+| iOS real-device info/processes/lock-state/displays/reboot | ✅ via `devicectl` | partial |
+| iOS real-device tap/swipe/uitree/screenshot | ❌ devicectl exposes none; needs XCUITest | ✅ via XCUITest bundle |
 | `run_code` JS sandbox (Rhino/JSC)| ❌ requires on-device driver | ✅ |
 | MCP server (JSON-RPC stdio)      | ❌ not yet (CLI only)   | ✅ |
 | Multi-device port allocation/auth| ❌ not needed (no on-device server) | ✅ |

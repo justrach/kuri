@@ -149,6 +149,11 @@ pub fn run(gpa: std.mem.Allocator, args: []const []const u8) !u8 {
     }
     if (std.mem.eql(u8, sub, "install")) {
         if (cmd_args.len < 1) return errMissing("path.app");
+        if (!opts.simulator) {
+            const udid = opts.udid orelse return errMissing("--udid");
+            try devicectl.install(gpa, udid, cmd_args[0]);
+            return 0;
+        }
         const r = try resolveUdid(gpa, opts.udid);
         defer r.deinit(gpa);
         try simctl.Sim.init(r.udid).install(gpa, cmd_args[0]);
@@ -156,9 +161,37 @@ pub fn run(gpa: std.mem.Allocator, args: []const []const u8) !u8 {
     }
     if (std.mem.eql(u8, sub, "uninstall")) {
         if (cmd_args.len < 1) return errMissing("bundle-id");
+        if (!opts.simulator) {
+            const udid = opts.udid orelse return errMissing("--udid");
+            try devicectl.uninstall(gpa, udid, cmd_args[0]);
+            return 0;
+        }
         const r = try resolveUdid(gpa, opts.udid);
         defer r.deinit(gpa);
         try simctl.Sim.init(r.udid).uninstall(gpa, cmd_args[0]);
+        return 0;
+    }
+    // Real-device inspection. devicectl exposes no screenshot or UI tree, so
+    // these are the commands a physical device genuinely supports.
+    if (std.mem.eql(u8, sub, "device-info") or std.mem.eql(u8, sub, "device-processes") or
+        std.mem.eql(u8, sub, "lock-state") or std.mem.eql(u8, sub, "displays") or
+        std.mem.eql(u8, sub, "reboot"))
+    {
+        const udid = opts.udid orelse return errMissing("--udid");
+        if (std.mem.eql(u8, sub, "reboot")) {
+            try devicectl.reboot(gpa, udid);
+            return 0;
+        }
+        const out = if (std.mem.eql(u8, sub, "device-info"))
+            try devicectl.details(gpa, udid)
+        else if (std.mem.eql(u8, sub, "device-processes"))
+            try devicectl.processes(gpa, udid)
+        else if (std.mem.eql(u8, sub, "lock-state"))
+            try devicectl.lockState(gpa, udid)
+        else
+            try devicectl.displays(gpa, udid);
+        defer gpa.free(out);
+        io.writeStdout(out);
         return 0;
     }
     if (std.mem.eql(u8, sub, "set-location")) {
@@ -244,11 +277,10 @@ pub fn run(gpa: std.mem.Allocator, args: []const []const u8) !u8 {
     }
     if (std.mem.eql(u8, sub, "list-apps")) {
         const udid = opts.udid orelse return errMissing("--udid");
-        if (!opts.simulator) {
-            io.writeStderr("list-apps on real device not supported in v1. Use --simulator.\n");
-            return 3;
-        }
-        const out = try simctl.Sim.init(udid).listApps(gpa);
+        const out = if (opts.simulator)
+            try simctl.Sim.init(udid).listApps(gpa)
+        else
+            try devicectl.listApps(gpa, udid);
         defer gpa.free(out);
         io.writeStdout(out);
         return 0;
