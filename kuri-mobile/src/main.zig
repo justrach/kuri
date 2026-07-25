@@ -53,7 +53,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
         return;
     }
     if (std.mem.eql(u8, sub, "--version")) {
-        try writeStdout("kuri-mobile 0.4.10\n");
+        try writeStdout("kuri-mobile 0.4.11\n");
         return;
     }
 
@@ -102,8 +102,10 @@ fn reportError(err: anyerror) noreturn {
         ,
         // xcode.run already printed the failing tool's own diagnostic above.
         error.CommandFailed => "the Xcode tool reported a failure (see the message above).",
+        error.NoProcessIdentifier => "devicectl launched the app but reported no process identifier, so there is no pid to terminate later. Check that the device is unlocked and trusted.",
         error.AccessibilityNotTrusted => "macOS Accessibility permission is required to drive the Simulator. Grant it to your terminal in System Settings -> Privacy & Security -> Accessibility.",
         error.SimulatorNotRunning => "Simulator.app is not running. Boot a simulator first (`kuri-mobile ios boot --udid <UDID>`).",
+        error.SimulatorHasNoWindow => "Simulator.app is running but has no window on screen, so there is no accessibility tree to read. A device booted with `simctl boot` does not open one automatically — run `kuri-mobile ios open-sim`, or pick the device from Simulator's Window > Devices menu.",
         error.ButtonNotFound => "that button is not present in the current Simulator window (some buttons only appear for certain device types).",
         error.ButtonPressFailed => "the Simulator rejected the button press.",
         error.MacOsOnly => "iOS commands are macOS-only.",
@@ -127,6 +129,7 @@ test {
     _ = @import("ios/usbmux.zig");
     _ = @import("ios/xcode.zig");
     _ = @import("ios/simctl.zig");
+    _ = @import("ios/devicectl.zig");
     _ = @import("ios/sim_ax.zig");
     _ = @import("ios/sim_input.zig");
     _ = @import("ios/sim_window.zig");

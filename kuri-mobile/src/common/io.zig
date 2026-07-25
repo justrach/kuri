@@ -176,6 +176,43 @@ pub fn sleepMs(ms: u64) void {
     _ = std.c.nanosleep(&ts, null);
 }
 
+/// Read a whole file into an allocated slice. Caller frees.
+///
+/// Needed because `devicectl` never writes JSON to stdout — its only
+/// machine-readable channel is `--json-output <path>`, so reading it back off
+/// disk is the entire structured-output path for real devices.
+pub fn readFile(allocator: std.mem.Allocator, path: []const u8, max_bytes: usize) ![]u8 {
+    var pbuf: [4096]u8 = undefined;
+    if (path.len >= pbuf.len) return error.NameTooLong;
+    @memcpy(pbuf[0..path.len], path);
+    pbuf[path.len] = 0;
+    const fd = std.c.open(pbuf[0..path.len :0], .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
+    if (fd < 0) return error.OpenFailed;
+    defer _ = std.c.close(fd);
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    var buf: [4096]u8 = undefined;
+    while (true) {
+        const n = std.c.read(fd, &buf, buf.len);
+        if (n < 0) return error.ReadFailed;
+        if (n == 0) break;
+        const bytes: usize = @intCast(n);
+        if (out.items.len + bytes > max_bytes) return error.FileTooLarge;
+        try out.appendSlice(allocator, buf[0..bytes]);
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+/// Best-effort unlink, for scratch files whose removal is not worth an error.
+pub fn removeFile(path: []const u8) void {
+    var pbuf: [4096]u8 = undefined;
+    if (path.len >= pbuf.len) return;
+    @memcpy(pbuf[0..path.len], path);
+    pbuf[path.len] = 0;
+    _ = std.c.unlink(pbuf[0..path.len :0]);
+}
+
 /// Write bytes to a file path (overwriting). Uses libc to avoid std.fs.File.
 pub fn writeFile(path: []const u8, data: []const u8) !void {
     var pbuf: [4096]u8 = undefined;

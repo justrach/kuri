@@ -35,6 +35,15 @@ jobs:
       - name: Run tests
         run: zig build test -Doptimize=ReleaseSafe
 
+      - name: Run kuri-mobile tests
+        # kuri-mobile ships in the same tarball but has its own build.zig, so
+        # the root `test` step never reached it. Its platform-independent
+        # half — the adb wire protocol, the devicectl JSON decoding, the tool
+        # registry — is worth checking on Linux too; the macOS-only half is
+        # covered by the mobile-macos job.
+        working-directory: kuri-mobile
+        run: zig build test --summary all -Doptimize=ReleaseSafe
+
       - name: Regression — --help / --version do NOT spawn Chrome (issue #156)
         # Old kuri binaries (≤ v0.1.0) silently fell through to the daemon
         # path on `--help`, launching headless Chrome and binding :8080.
@@ -68,6 +77,93 @@ jobs:
             fi
             echo "::endgroup::"
           done
+
+  mobile-macos:
+    # kuri-mobile is the one part of the tree that can be exercised against
+    # real Apple tooling, and GitHub's macOS runners ship Xcode plus iOS
+    # simulator runtimes. Before this job the e2e suite only ever ran by hand,
+    # so nothing caught a regression on the device path — which is exactly how
+    # the silent `--device` no-op survived from 0.4.6 to 0.4.10.
+    #
+    # The suite reports SKIP rather than failing for anything the runner
+    # cannot provide (notably the Accessibility grant that uitree/find/
+    # wait-for-ui need, which no CI runner can give), so it is a stable gate
+    # rather than a flaky one.
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: kuri-mobile
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0-dev.813+2153f8143
+
+      - name: Cache Zig build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            kuri-mobile/.zig-cache
+            ~/.cache/zig
+          key: zig-mobile-${{ runner.os }}-${{ hashFiles('kuri-mobile/build.zig') }}
+          restore-keys: |
+            zig-mobile-${{ runner.os }}-
+
+      - name: Show toolchain
+        run: |
+          xcode-select -p
+          xcodebuild -version
+          ls "$(xcode-select -p)/usr/bin/devicectl" || echo "no devicectl in the selected toolchain"
+
+      - name: Build
+        run: zig build -Doptimize=ReleaseSafe
+
+      - name: Unit tests
+        run: zig build test --summary all
+
+      - name: Doctor
+        # Exits 3 when it finds blocking problems, which on a runner it will
+        # (no Accessibility grant). Informational only — the assertions live
+        # in the e2e suite.
+        continue-on-error: true
+        run: ./zig-out/bin/kuri-mobile doctor
+
+      - name: Boot a simulator
+        # Deliberately picks and boots through kuri-mobile rather than `xcrun
+        # simctl`. Two reasons: it exercises `ios list-devices` and `ios boot`
+        # for real, and bare `xcrun` resolves through xcode-select — the very
+        # indirection whose failure mode this project exists to avoid. simctl
+        # is then called by absolute path for `bootstatus`, which kuri has no
+        # equivalent for.
+        run: |
+          set -euo pipefail
+          udid=$(./zig-out/bin/kuri-mobile ios list-devices \
+            | awk -F'\t' '$1 == "simulator" && $4 ~ /iPhone/ { print $2; exit }')
+          if [ -z "${udid}" ]; then
+            echo "::error::no iPhone simulator available on this runner"
+            ./zig-out/bin/kuri-mobile ios list-devices
+            exit 1
+          fi
+          echo "booting ${udid}"
+          ./zig-out/bin/kuri-mobile ios boot --udid "${udid}"
+          # simctl reports Booted well before the runtime has finished coming
+          # up, so wait on bootstatus — otherwise the first e2e command races
+          # the boot and fails for a reason unrelated to the change under test.
+          "$(xcode-select -p)/usr/bin/simctl" bootstatus "${udid}" -b
+
+      - name: End-to-end (simulator)
+        run: zig build e2e-ios
+
+      - name: End-to-end (physical device)
+        # No phone is attached to a runner, so this must report SKIP and exit
+        # 0. Running it anyway keeps the device suite compiling and proves its
+        # no-hardware path stays clean — the suite is useless as a local gate
+        # if it has quietly stopped building.
+        run: zig build e2e-ios-device
 
   startup-smoke:
     runs-on: ubuntu-latest

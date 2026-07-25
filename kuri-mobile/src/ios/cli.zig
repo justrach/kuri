@@ -32,6 +32,13 @@ const Opts = struct {
     absent: bool = false,
     /// Machine-readable output where a command supports it.
     json: bool = false,
+    /// Target process for real-device `terminate`. devicectl's terminate takes
+    /// a pid and nothing else, so this is the only exact way to name a victim.
+    pid: ?i64 = null,
+    /// Raise Simulator.app before driving it. Off by default: input is
+    /// delivered to the process by pid, so stealing the user's foreground
+    /// window is neither necessary nor acceptable.
+    activate: bool = false,
 };
 
 /// Consume a recognized flag at `rest[idx]`, returning how many tokens it
@@ -53,6 +60,10 @@ fn takeFlag(opts: *Opts, rest: []const []const u8, idx: usize) !?usize {
         opts.absent = true;
         return 1;
     }
+    if (std.mem.eql(u8, name, "activate")) {
+        opts.activate = true;
+        return 1;
+    }
     if (std.mem.eql(u8, name, "json")) {
         opts.json = true;
         return 1;
@@ -68,6 +79,7 @@ fn takeFlag(opts: *Opts, rest: []const []const u8, idx: usize) !?usize {
         std.mem.eql(u8, name, "last") or
         std.mem.eql(u8, name, "predicate") or
         std.mem.eql(u8, name, "timeout") or
+        std.mem.eql(u8, name, "pid") or
         std.mem.eql(u8, name, "label");
     if (!needs_value) return null;
     if (idx + 1 >= rest.len) return error.MissingFlagValue;
@@ -85,6 +97,8 @@ fn takeFlag(opts: *Opts, rest: []const []const u8, idx: usize) !?usize {
         opts.label = val;
     } else if (std.mem.eql(u8, name, "timeout")) {
         opts.timeout_ms = try std.fmt.parseInt(u64, val, 10);
+    } else if (std.mem.eql(u8, name, "pid")) {
+        opts.pid = try std.fmt.parseInt(i64, val, 10);
     }
     return 2;
 }
@@ -144,7 +158,7 @@ pub fn run(gpa: std.mem.Allocator, args: []const []const u8) !u8 {
         return 0;
     }
     if (std.mem.eql(u8, sub, "open-sim")) {
-        try simctl.openSimulatorApp(gpa);
+        try simctl.openSimulatorApp(gpa, opts.activate);
         return 0;
     }
     if (std.mem.eql(u8, sub, "install")) {
@@ -227,8 +241,7 @@ pub fn run(gpa: std.mem.Allocator, args: []const []const u8) !u8 {
         // Real-device launch always needs --udid (devicectl can't guess).
         if (!opts.simulator) {
             const udid = opts.udid orelse return errMissing("--udid");
-            try devicectl.launch(gpa, udid, cmd_args[0]);
-            return 0;
+            return cmdLaunchDevice(gpa, udid, cmd_args[0]);
         }
         const r = try resolveUdid(gpa, opts.udid);
         defer r.deinit(gpa);
@@ -236,12 +249,11 @@ pub fn run(gpa: std.mem.Allocator, args: []const []const u8) !u8 {
         return 0;
     }
     if (std.mem.eql(u8, sub, "terminate")) {
-        if (cmd_args.len < 1) return errMissing("bundle-id");
         if (!opts.simulator) {
             const udid = opts.udid orelse return errMissing("--udid");
-            try devicectl.terminate(gpa, udid, cmd_args[0]);
-            return 0;
+            return cmdTerminateDevice(gpa, udid, opts.pid, cmd_args);
         }
+        if (cmd_args.len < 1) return errMissing("bundle-id");
         const r = try resolveUdid(gpa, opts.udid);
         defer r.deinit(gpa);
         try simctl.Sim.init(r.udid).terminate(gpa, cmd_args[0]);
@@ -276,11 +288,20 @@ pub fn run(gpa: std.mem.Allocator, args: []const []const u8) !u8 {
         return 0;
     }
     if (std.mem.eql(u8, sub, "list-apps")) {
-        const udid = opts.udid orelse return errMissing("--udid");
-        const out = if (opts.simulator)
-            try simctl.Sim.init(udid).listApps(gpa)
-        else
-            try devicectl.listApps(gpa, udid);
+        // On a real device --udid is mandatory: devicectl cannot guess which
+        // phone is meant. On the simulator it resolves the booted one, like
+        // launch/screenshot/uitree already do — requiring it here made
+        // list-apps the odd command out for no reason a caller could infer.
+        if (!opts.simulator) {
+            const udid = opts.udid orelse return errMissing("--udid");
+            const out = try devicectl.listApps(gpa, udid);
+            defer gpa.free(out);
+            io.writeStdout(out);
+            return 0;
+        }
+        const r = try resolveUdid(gpa, opts.udid);
+        defer r.deinit(gpa);
+        const out = try simctl.Sim.init(r.udid).listApps(gpa);
         defer gpa.free(out);
         io.writeStdout(out);
         return 0;
@@ -360,13 +381,30 @@ fn resolveUdid(gpa: std.mem.Allocator, udid_opt: ?[]const u8) !Resolved {
     return .{ .udid = u, .owned = true };
 }
 
+/// Point subsequent CGEvents at Simulator.app without raising it.
+///
+/// This replaces the old `sim_window.activate` call that every input command
+/// used to make. Activating stole the user's foreground window and moved
+/// their cursor on every single tap, which makes the tool unusable on a
+/// machine somebody is working on. Targeting the process by pid delivers the
+/// same events without touching focus — see sim_input's header.
+///
+/// Pass --activate to get the old behaviour back, for the case where a
+/// gesture genuinely needs Simulator.app to be key.
+fn attachSim(gpa: std.mem.Allocator, opts: Opts) !void {
+    if (opts.activate) try sim_window.activate(gpa);
+    const pid = (try sim_ax.simulatorPid(gpa)) orelse return error.SimulatorNotRunning;
+    sim_input.setTargetPid(pid);
+}
+
 fn prepSimAndPoint(
     gpa: std.mem.Allocator,
+    opts: Opts,
     udid: []const u8,
     dev_x: f64,
     dev_y: f64,
 ) !sim_input.CGPoint {
-    try sim_window.activate(gpa);
+    try attachSim(gpa, opts);
     const win = try sim_window.frontWindowRect(gpa);
     const px = try sim_window.devicePixelSize(gpa, udid);
     return sim_window.deviceToScreen(win, px, dev_x, dev_y);
@@ -378,7 +416,8 @@ fn cmdUiTree(gpa: std.mem.Allocator, opts: Opts) !u8 {
     const r = try resolveUdid(gpa, opts.udid);
     defer r.deinit(gpa);
 
-    try sim_window.activate(gpa);
+    // No activation: reading the accessibility tree works on a background
+    // app, so an observation command has no business taking the foreground.
     const els = sim_ax.dumpElements(gpa, r.udid) catch |err| switch (err) {
         error.AccessibilityTreeEmpty => {
             io.writeStderr(
@@ -424,7 +463,6 @@ fn tapByLabel(gpa: std.mem.Allocator, opts: Opts, label: []const u8) !u8 {
     const r = try resolveUdid(gpa, opts.udid);
     defer r.deinit(gpa);
 
-    try sim_window.activate(gpa);
     const els = try sim_ax.dumpElements(gpa, r.udid);
     defer uitree.freeElements(gpa, els);
 
@@ -435,7 +473,7 @@ fn tapByLabel(gpa: std.mem.Allocator, opts: Opts, label: []const u8) !u8 {
         return 4;
     };
     const c = uitree.centroid(hit) orelse return error.ElementHasNoBounds;
-    const p = try prepSimAndPoint(gpa, r.udid, @floatFromInt(c[0]), @floatFromInt(c[1]));
+    const p = try prepSimAndPoint(gpa, opts, r.udid, @floatFromInt(c[0]), @floatFromInt(c[1]));
     sim_input.tap(p);
     return 0;
 }
@@ -448,7 +486,7 @@ fn cmdTap(gpa: std.mem.Allocator, opts: Opts, args: []const []const u8) !u8 {
     const y = try parseF64(args[1]);
     const r = try resolveUdid(gpa, opts.udid);
     defer r.deinit(gpa);
-    const p = try prepSimAndPoint(gpa, r.udid, x, y);
+    const p = try prepSimAndPoint(gpa, opts, r.udid, x, y);
     sim_input.tap(p);
     return 0;
 }
@@ -460,7 +498,7 @@ fn cmdDoubleTap(gpa: std.mem.Allocator, opts: Opts, args: []const []const u8) !u
     const y = try parseF64(args[1]);
     const r = try resolveUdid(gpa, opts.udid);
     defer r.deinit(gpa);
-    const p = try prepSimAndPoint(gpa, r.udid, x, y);
+    const p = try prepSimAndPoint(gpa, opts, r.udid, x, y);
     sim_input.doubleTap(p);
     return 0;
 }
@@ -474,7 +512,7 @@ fn cmdLongPress(gpa: std.mem.Allocator, opts: Opts, args: []const []const u8) !u
     const hold: u64 = if (args.len >= 3) try std.fmt.parseInt(u64, args[2], 10) else 500;
     const r = try resolveUdid(gpa, opts.udid);
     defer r.deinit(gpa);
-    const p = try prepSimAndPoint(gpa, r.udid, x, y);
+    const p = try prepSimAndPoint(gpa, opts, r.udid, x, y);
     sim_input.longPress(p, hold);
     return 0;
 }
@@ -489,7 +527,7 @@ fn cmdSwipe(gpa: std.mem.Allocator, opts: Opts, args: []const []const u8) !u8 {
     const dur: u64 = if (args.len >= 5) try std.fmt.parseInt(u64, args[4], 10) else 300;
     const r = try resolveUdid(gpa, opts.udid);
     defer r.deinit(gpa);
-    try sim_window.activate(gpa);
+    try attachSim(gpa, opts);
     const win = try sim_window.frontWindowRect(gpa);
     const px = try sim_window.devicePixelSize(gpa, r.udid);
     const a = sim_window.deviceToScreen(win, px, x1, y1);
@@ -500,35 +538,28 @@ fn cmdSwipe(gpa: std.mem.Allocator, opts: Opts, args: []const []const u8) !u8 {
 
 /// Send literal text to the Simulator's focused field.
 ///
-/// Routed through System Events `keystroke` rather than CGEvent because it is
-/// Unicode-safe and needs no virtual-keycode table. Assumes the caller has
-/// already brought the Simulator forward.
+/// Delivered as Unicode CGEvents addressed to Simulator.app's pid.
+///
+/// This used to shell out to System Events `keystroke`, which is delivered to
+/// whichever application is frontmost. That made `ios type` doubly hostile:
+/// it had to raise Simulator.app to be correct, and if it ever ran without
+/// doing so it would type the text into whatever the user had open. Unicode
+/// CGEvents are just as free of a virtual-keycode table and go only to the
+/// process we name.
 fn typeText(gpa: std.mem.Allocator, text: []const u8) !void {
     var arena_impl = std.heap.ArenaAllocator.init(gpa);
     defer arena_impl.deinit();
     const arena = arena_impl.allocator();
 
-    // Escape backslashes and double-quotes for the AppleScript string literal.
-    var escaped: std.ArrayList(u8) = .empty;
-    defer escaped.deinit(arena);
-    for (text) |c| {
-        if (c == '\\' or c == '"') try escaped.append(arena, '\\');
-        try escaped.append(arena, c);
-    }
-
-    const script = try std.fmt.allocPrint(
-        arena,
-        "tell application \"System Events\" to tell process \"Simulator\" to keystroke \"{s}\"",
-        .{escaped.items},
-    );
-    const r = try io.runCommand(gpa, &.{ "osascript", "-e", script }, 64 * 1024);
-    gpa.free(r.stdout);
+    // CGEvent's Unicode payload is UTF-16.
+    const units = try std.unicode.utf8ToUtf16LeAlloc(arena, text);
+    sim_input.typeUtf16(units);
 }
 
 fn cmdType(gpa: std.mem.Allocator, opts: Opts, args: []const []const u8) !u8 {
     if (guardSim(opts.simulator)) |code| return code;
     if (args.len < 1) return errMissing("text");
-    try sim_window.activate(gpa);
+    try attachSim(gpa, opts);
 
     var arena_impl = std.heap.ArenaAllocator.init(gpa);
     defer arena_impl.deinit();
@@ -565,7 +596,7 @@ fn cmdKey(gpa: std.mem.Allocator, opts: Opts, args: []const []const u8) !u8 {
         return 2;
     };
 
-    try sim_window.activate(gpa);
+    try attachSim(gpa, opts);
     sim_input.keyPress(code, mods);
     return 0;
 }
@@ -574,7 +605,8 @@ fn cmdKey(gpa: std.mem.Allocator, opts: Opts, args: []const []const u8) !u8 {
 fn cmdButton(gpa: std.mem.Allocator, opts: Opts, args: []const []const u8) !u8 {
     if (guardSim(opts.simulator)) |code| return code;
     if (args.len < 1) return errMissing("button-name");
-    try sim_window.activate(gpa);
+    // No activation: this presses the button through the accessibility API
+    // (AXPress), which does not care whether Simulator.app is frontmost.
     try sim_ax.press(gpa, args[0]);
     return 0;
 }
@@ -585,7 +617,7 @@ fn cmdButton(gpa: std.mem.Allocator, opts: Opts, args: []const []const u8) !u8 {
 fn cmdBackground(gpa: std.mem.Allocator, opts: Opts, args: []const []const u8) !u8 {
     if (guardSim(opts.simulator)) |code| return code;
 
-    try sim_window.activate(gpa);
+    // AXPress again — no foreground needed.
     try sim_ax.press(gpa, "home");
 
     const hold = opts.dur_ms orelse 3000;
@@ -685,6 +717,56 @@ fn cmdLog(gpa: std.mem.Allocator, opts: Opts, args: []const []const u8) !u8 {
     return 0;
 }
 
+// --- real-device lifecycle --------------------------------------------------
+
+/// Launch on a physical device and print the pid devicectl assigned.
+///
+/// The pid is not decoration. `devicectl device process terminate` accepts
+/// `--pid` and nothing else, so a launch that doesn't hand back an identifier
+/// leaves the caller with no way to stop the app it just started.
+fn cmdLaunchDevice(gpa: std.mem.Allocator, udid: []const u8, bundle_id: []const u8) !u8 {
+    const pid = try devicectl.launch(gpa, udid, bundle_id);
+    var arena_impl = std.heap.ArenaAllocator.init(gpa);
+    defer arena_impl.deinit();
+    io.printStdout(arena_impl.allocator(), "pid={d}\n", .{pid});
+    return 0;
+}
+
+/// Terminate on a physical device, by `--pid` or by bundle id.
+///
+/// devicectl only speaks pids here — unlike simctl, which takes a bundle id —
+/// so a bundle id has to be resolved to a running process first. When it
+/// isn't running there is nothing to terminate and no error to report; when
+/// resolution fails for any other reason, say so with the pid escape hatch
+/// rather than exiting 0 on a no-op.
+fn cmdTerminateDevice(
+    gpa: std.mem.Allocator,
+    udid: []const u8,
+    pid_opt: ?i64,
+    cmd_args: []const []const u8,
+) !u8 {
+    var arena_impl = std.heap.ArenaAllocator.init(gpa);
+    defer arena_impl.deinit();
+    const arena = arena_impl.allocator();
+
+    if (pid_opt) |pid| {
+        try devicectl.terminate(gpa, udid, pid);
+        return 0;
+    }
+    if (cmd_args.len < 1) return errMissing("bundle-id or --pid");
+
+    const bundle_id = cmd_args[0];
+    const found = try devicectl.findProcess(gpa, udid, bundle_id);
+    const pid = found orelse {
+        io.printStderr(arena, "no running process for {s} on {s}\n", .{ bundle_id, udid });
+        io.writeStderr("(if it is running, pass the pid directly: ios terminate --device --udid <UDID> --pid <PID>)\n");
+        return 4;
+    };
+    try devicectl.terminate(gpa, udid, pid);
+    io.printStdout(arena, "terminated pid={d}\n", .{pid});
+    return 0;
+}
+
 /// Find the single booted iOS Simulator. Returns owned UDID slice; caller frees.
 fn resolveBootedSim(gpa: std.mem.Allocator) ![]const u8 {
     const sims = try simctl.listDevices(gpa);
@@ -768,7 +850,7 @@ fn cmdGesture(gpa: std.mem.Allocator, opts: Opts, args: []const []const u8) !u8 
 
     const r = try resolveUdid(gpa, opts.udid);
     defer r.deinit(gpa);
-    try sim_window.activate(gpa);
+    try attachSim(gpa, opts);
     const win = try sim_window.frontWindowRect(gpa);
     const px = try sim_window.devicePixelSize(gpa, r.udid);
 
@@ -798,7 +880,7 @@ fn cmdTouch(gpa: std.mem.Allocator, opts: Opts, args: []const []const u8) !u8 {
 
     const r = try resolveUdid(gpa, opts.udid);
     defer r.deinit(gpa);
-    const p = try prepSimAndPoint(gpa, r.udid, x, y);
+    const p = try prepSimAndPoint(gpa, opts, r.udid, x, y);
 
     if (std.mem.eql(u8, phase, "down")) {
         sim_input.touchDown(p);
@@ -831,7 +913,7 @@ fn cmdKeySequence(gpa: std.mem.Allocator, opts: Opts, args: []const []const u8) 
         }
     }
 
-    try sim_window.activate(gpa);
+    try attachSim(gpa, opts);
     for (args) |name| {
         sim_input.keyPress(sim_input.lookupKey(name).?, opts.mods);
         io.sleepMs(60);
@@ -850,7 +932,7 @@ fn cmdBatch(gpa: std.mem.Allocator, opts: Opts, args: []const []const u8) !u8 {
 
     const r = try resolveUdid(gpa, opts.udid);
     defer r.deinit(gpa);
-    try sim_window.activate(gpa);
+    try attachSim(gpa, opts);
     const win = try sim_window.frontWindowRect(gpa);
     const px = try sim_window.devicePixelSize(gpa, r.udid);
 
@@ -943,7 +1025,7 @@ fn cmdFind(gpa: std.mem.Allocator, opts: Opts) !u8 {
 
     const r = try resolveUdid(gpa, opts.udid);
     defer r.deinit(gpa);
-    try sim_window.activate(gpa);
+    // No activation: `find` only reads the accessibility tree.
     const els = try sim_ax.dumpElements(gpa, r.udid);
     defer uitree.freeElements(gpa, els);
 
@@ -985,7 +1067,8 @@ fn cmdWaitForUi(gpa: std.mem.Allocator, opts: Opts) !u8 {
 
     const r = try resolveUdid(gpa, opts.udid);
     defer r.deinit(gpa);
-    try sim_window.activate(gpa);
+    // No activation. This polls in a loop, so the old behaviour re-stole the
+    // user's foreground window every 250ms for the length of the wait.
 
     // Deadline is wall-clock, not a count of sleeps. Each poll costs a simctl
     // spawn plus an accessibility walk (~0.5s), so summing only the sleep

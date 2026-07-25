@@ -157,6 +157,22 @@ pub fn accessibilityTrusted() bool {
     return AXIsProcessTrusted();
 }
 
+/// Whether Simulator.app has a window on screen. The accessibility tree hangs
+/// off a window, so a running-but-windowless Simulator supports no `uitree`,
+/// `find` or `wait-for-ui` — which callers need to distinguish from a missing
+/// Accessibility grant, since the remedy is completely different.
+pub fn hasOpenWindow(gpa: std.mem.Allocator) bool {
+    if (builtin.os.tag != .macos) return false;
+    if (!AXIsProcessTrusted()) return false;
+    const pid = (simulatorPid(gpa) catch return false) orelse return false;
+    const app = AXUIElementCreateApplication(pid);
+    if (app == null) return false;
+    defer CFRelease(app);
+    const w = firstWindow(app) orelse return false;
+    CFRelease(w);
+    return true;
+}
+
 /// PID of the running Simulator.app, or null if it isn't running.
 pub fn simulatorPid(gpa: std.mem.Allocator) !?i32 {
     const r = try io.runCommand(gpa, &.{ "pgrep", "-x", "Simulator" }, 4096);
@@ -427,6 +443,7 @@ pub const DumpError = std.mem.Allocator.Error || error{
     AccessibilityNotTrusted,
     AccessibilityTreeEmpty,
     SimulatorNotRunning,
+    SimulatorHasNoWindow,
     PipeCreateFailed,
     ForkFailed,
     XcodeNotFound,
@@ -457,7 +474,11 @@ pub fn dumpElements(
     if (app == null) return error.AccessibilityNotTrusted;
     defer CFRelease(app);
 
-    const window = firstWindow(app) orelse return error.SimulatorNotRunning;
+    // Distinct from "not running": booting a device with `simctl boot` does
+    // not make Simulator.app open a window for it, so the app can be alive
+    // with nothing on screen. Reporting that as "Simulator.app is not
+    // running" sends the user to restart an app that is already up.
+    const window = firstWindow(app) orelse return error.SimulatorHasNoWindow;
     defer CFRelease(window);
     const group = deviceScreenGroup(window) orelse return error.AccessibilityTreeEmpty;
     defer CFRelease(group);

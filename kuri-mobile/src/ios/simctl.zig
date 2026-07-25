@@ -196,10 +196,19 @@ pub const Sim = struct {
 // These drive Simulator.app itself rather than a simulated device, so they run
 // host binaries by absolute path instead of going through the Xcode toolchain.
 
-/// Launch Simulator.app and bring it forward. Idempotent — `open -a` on an
-/// already-running app just activates it.
-pub fn openSimulatorApp(gpa: std.mem.Allocator) !void {
-    const r = try io.runCommand(gpa, &.{ "/usr/bin/open", "-a", "Simulator" }, 1024 * 1024);
+/// Launch Simulator.app. Idempotent — `open -a` on an already-running app is
+/// a no-op beyond focus.
+///
+/// `front` is false by default, which passes `open -g` so the app launches
+/// *behind* whatever the user is doing. Opening a simulator is a setup step,
+/// not a request to be interrupted, and a tool that yanks the foreground
+/// every time it starts one cannot be run on a machine someone is using.
+pub fn openSimulatorApp(gpa: std.mem.Allocator, front: bool) !void {
+    const argv: []const []const u8 = if (front)
+        &.{ "/usr/bin/open", "-a", "Simulator" }
+    else
+        &.{ "/usr/bin/open", "-g", "-a", "Simulator" };
+    const r = try io.runCommand(gpa, argv, 1024 * 1024);
     defer gpa.free(r.stdout);
     if (((r.term >> 8) & 0xFF) != 0) return error.CommandFailed;
 }

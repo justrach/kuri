@@ -1,9 +1,20 @@
-//! End-to-end tests that drive a real iOS Simulator through the built binary.
+//! End-to-end tests that drive the built binary against the local machine.
 //!
 //! Run with `zig build e2e-ios`. These are deliberately *not* part of
-//! `zig build test`: they need a booted simulator, which CI does not have.
-//! When no simulator is booted the suite reports SKIP and exits 0, so it can
-//! sit in a pipeline without becoming a flaky gate.
+//! `zig build test`: they shell out to the real Xcode toolchain and, for most
+//! cases, a booted simulator.
+//!
+//! The suite is built to be a CI gate, which means every case either runs or
+//! reports SKIP with a reason — it never fails for a missing precondition.
+//! Three capabilities are probed up front and gate their own groups:
+//!
+//!   * Xcode toolchain    — without it, the device-path group cannot run.
+//!   * booted simulator   — without one, the simulator groups cannot run.
+//!   * Accessibility grant — without it, uitree/find/wait-for-ui cannot run.
+//!
+//! The Accessibility gate is the one that matters for CI: those commands read
+//! the Simulator's AX tree, and a GitHub runner has no TCC grant to give. That
+//! is a missing permission, not a defect, so it skips rather than fails.
 //!
 //! By default it drives Settings (`com.apple.Preferences`), which ships on
 //! every simulator, so the suite is reproducible on any machine. Point it at
@@ -20,63 +31,20 @@
 
 const std = @import("std");
 const io = @import("io");
+const h = @import("harness");
 
-var passed: usize = 0;
-var failed: usize = 0;
+const run = h.run;
+const report = h.report;
+const skip = h.skip;
+const expectCode = h.expectCode;
+const expectNonZero = h.expectNonZero;
+const expectContains = h.expectContains;
+const expectExcludes = h.expectExcludes;
+const getEnv = h.getEnv;
+const finish = h.finish;
 
-const Result = struct {
-    stdout: []u8,
-    code: i32,
-    elapsed_ms: i64,
-
-    fn deinit(self: Result, gpa: std.mem.Allocator) void {
-        gpa.free(self.stdout);
-    }
-};
-
-/// Invoke the built kuri-mobile with `args`, capturing output and timing.
-fn run(gpa: std.mem.Allocator, bin: []const u8, args: []const []const u8) !Result {
-    var argv: std.ArrayList([]const u8) = .empty;
-    defer argv.deinit(gpa);
-    try argv.append(gpa, bin);
-    try argv.appendSlice(gpa, args);
-
-    const start = io.monotonicMs();
-    const r = try io.runCommand(gpa, argv.items, 32 * 1024 * 1024);
-    return .{
-        .stdout = r.stdout,
-        .code = (r.term >> 8) & 0xFF,
-        .elapsed_ms = io.monotonicMs() - start,
-    };
-}
-
-fn report(arena: std.mem.Allocator, ok: bool, name: []const u8, detail: []const u8) void {
-    if (ok) {
-        passed += 1;
-        io.printStdout(arena, "  ok   {s}\n", .{name});
-    } else {
-        failed += 1;
-        io.printStdout(arena, "  FAIL {s}: {s}\n", .{ name, detail });
-    }
-}
-
-fn expectCode(arena: std.mem.Allocator, name: []const u8, r: Result, want: i32) void {
-    if (r.code == want) return report(arena, true, name, "");
-    const d = std.fmt.allocPrint(arena, "exit {d}, wanted {d}", .{ r.code, want }) catch "exit mismatch";
-    report(arena, false, name, d);
-}
-
-fn expectContains(arena: std.mem.Allocator, name: []const u8, haystack: []const u8, needle: []const u8) void {
-    if (std.mem.indexOf(u8, haystack, needle) != null) return report(arena, true, name, "");
-    const d = std.fmt.allocPrint(arena, "output did not contain '{s}'", .{needle}) catch "missing substring";
-    report(arena, false, name, d);
-}
-
-fn getEnv(name: [*:0]const u8) ?[]const u8 {
-    const v = std.c.getenv(name) orelse return null;
-    const s = std.mem.span(v);
-    return if (s.len == 0) null else s;
-}
+/// A udid that cannot exist, for asserting how the device path fails.
+const fake_udid = "00000000-DEADBEEFDEADBEEF";
 
 pub fn main(init: std.process.Init.Minimal) !void {
     var gpa_impl: std.heap.DebugAllocator(.{}) = .init;
@@ -124,6 +92,10 @@ pub fn main(init: std.process.Init.Minimal) !void {
         }
     }
 
+    // The registry is what an agent reads to decide what it may call, so a
+    // command silently losing its device scope is a correctness bug in the
+    // contract even when every command still works.
+    var xcode_ok = false;
     {
         const r = try run(gpa, bin, &.{"doctor"});
         defer r.deinit(gpa);
@@ -131,6 +103,90 @@ pub fn main(init: std.process.Init.Minimal) !void {
         const ok = r.code == 0 or r.code == 3;
         report(arena, ok, "doctor runs and reports", "unexpected exit");
         expectContains(arena, "doctor covers iOS and Android", r.stdout, "adb server");
+
+        xcode_ok = std.mem.indexOf(u8, r.stdout, "developer dir: /") != null;
+    }
+
+    // --- Group 2: real-device command contract (no device needed) ----------
+    //
+    // Every case here is a regression guard for the class of bug shipped
+    // before 0.4.10: `--device` commands that resolved `devicectl` through
+    // xcode-select, never checked the exit status, and so reported success
+    // while doing nothing. A fake udid is enough to pin the whole class —
+    // what matters is that failure is *loud*, and that the invocation
+    // devicectl receives is well-formed.
+    io.writeStdout("\nreal-device command contract (no device needed)\n");
+    if (!xcode_ok) {
+        skip(arena, "device-path cases", "no Xcode toolchain resolved");
+    } else {
+        // Anything routed at a device that does not exist must fail.
+        const device_cases = [_]struct { name: []const u8, argv: []const []const u8 }{
+            .{ .name = "launch", .argv = &.{ "ios", "launch", "--device", "--udid", fake_udid, "com.foo" } },
+            .{ .name = "install", .argv = &.{ "ios", "install", "--device", "--udid", fake_udid, "/tmp/kuri-e2e-absent.app" } },
+            .{ .name = "uninstall", .argv = &.{ "ios", "uninstall", "--device", "--udid", fake_udid, "com.foo" } },
+            .{ .name = "list-apps", .argv = &.{ "ios", "list-apps", "--device", "--udid", fake_udid } },
+            .{ .name = "device-info", .argv = &.{ "ios", "device-info", "--udid", fake_udid } },
+            .{ .name = "device-processes", .argv = &.{ "ios", "device-processes", "--udid", fake_udid } },
+            .{ .name = "lock-state", .argv = &.{ "ios", "lock-state", "--udid", fake_udid } },
+            .{ .name = "displays", .argv = &.{ "ios", "displays", "--udid", fake_udid } },
+        };
+        for (device_cases) |c| {
+            const r = try run(gpa, bin, c.argv);
+            defer r.deinit(gpa);
+            const name = std.fmt.allocPrint(arena, "{s} --device fails loudly on an absent device", .{c.name}) catch c.name;
+            expectNonZero(arena, name, r);
+        }
+
+        // The invocation itself has to be well-formed. Before 0.4.11 this
+        // built `devicectl device process terminate --device <udid> <bundle>`,
+        // but devicectl's terminate takes `--pid` and no bundle id at all, so
+        // it could only ever fail with a usage error. Asserting the *absence*
+        // of devicectl's argument-parser complaint is what distinguishes
+        // "the device is missing" from "we called devicectl wrong".
+        {
+            const r = try run(gpa, bin, &.{ "ios", "terminate", "--device", "--udid", fake_udid, "--pid", "1234" });
+            defer r.deinit(gpa);
+            expectNonZero(arena, "terminate --pid fails loudly on an absent device", r);
+            expectExcludes(arena, "terminate --pid is a well-formed devicectl call", r.stdout, "Missing expected argument");
+            expectExcludes(arena, "terminate --pid is not a devicectl usage error", r.stdout, "Usage: devicectl");
+        }
+        {
+            const r = try run(gpa, bin, &.{ "ios", "terminate", "--device", "--udid", fake_udid, "com.foo" });
+            defer r.deinit(gpa);
+            expectNonZero(arena, "terminate by bundle id fails loudly on an absent device", r);
+            expectExcludes(arena, "terminate by bundle id is a well-formed devicectl call", r.stdout, "Missing expected argument");
+        }
+
+        // Missing arguments are user error (exit 2), distinct from a tool
+        // failure (exit 1) — a script needs to tell those apart.
+        {
+            const r = try run(gpa, bin, &.{ "ios", "launch", "--device", "com.foo" });
+            defer r.deinit(gpa);
+            expectCode(arena, "launch --device without --udid exits 2", r, 2);
+            expectContains(arena, "launch --device names the missing flag", r.stdout, "--udid");
+        }
+        {
+            const r = try run(gpa, bin, &.{ "ios", "terminate", "--device", "--udid", fake_udid });
+            defer r.deinit(gpa);
+            expectCode(arena, "terminate --device without a target exits 2", r, 2);
+            expectContains(arena, "terminate --device names the missing target", r.stdout, "--pid");
+        }
+
+        // Commands devicectl genuinely cannot do must refuse up front (exit 3)
+        // rather than fail obscurely somewhere inside the toolchain.
+        const unsupported = [_]struct { name: []const u8, argv: []const []const u8 }{
+            .{ .name = "screenshot", .argv = &.{ "ios", "screenshot", "--device", "--udid", fake_udid, "/tmp/kuri-e2e-nope.png" } },
+            .{ .name = "tap", .argv = &.{ "ios", "tap", "--device", "--udid", fake_udid, "10", "10" } },
+            .{ .name = "uitree", .argv = &.{ "ios", "uitree", "--device", "--udid", fake_udid } },
+        };
+        for (unsupported) |c| {
+            const r = try run(gpa, bin, c.argv);
+            defer r.deinit(gpa);
+            const name = std.fmt.allocPrint(arena, "{s} --device refuses with exit 3", .{c.name}) catch c.name;
+            expectCode(arena, name, r, 3);
+            const why = std.fmt.allocPrint(arena, "{s} --device explains why", .{c.name}) catch c.name;
+            expectContains(arena, why, r.stdout, "XCUITest");
+        }
     }
 
     // --- Is a simulator available? -----------------------------------------
@@ -138,13 +194,12 @@ pub fn main(init: std.process.Init.Minimal) !void {
     defer devices.deinit(gpa);
     if (std.mem.indexOf(u8, devices.stdout, "Booted") == null) {
         io.writeStdout("\nSKIP: no booted simulator; device-backed cases not run.\n");
-        io.printStdout(arena, "\n{d} passed, {d} failed\n", .{ passed, failed });
-        std.process.exit(if (failed == 0) 0 else 1);
+        return finish(arena);
     }
 
     io.writeStdout("\ndevice-backed\n");
 
-    // --- Group 2: install + launch ------------------------------------------
+    // --- Group 3: install + launch ------------------------------------------
     if (app_path) |p| {
         const r = try run(gpa, bin, &.{ "ios", "install", p });
         defer r.deinit(gpa);
@@ -156,56 +211,86 @@ pub fn main(init: std.process.Init.Minimal) !void {
         expectCode(arena, "launch by bundle id", r, 0);
     }
 
-    // --- Group 3: observation -----------------------------------------------
+    // --- Group 4: observation via the accessibility tree ---------------------
+    //
+    // Everything below reads the Simulator's AX hierarchy, which needs two
+    // things this process may not have: a macOS Accessibility grant, and
+    // Simulator.app actually running (a `simctl boot` alone leaves the runtime
+    // up but the window absent). Neither is a regression when missing, and a
+    // CI runner can supply neither, so both are probed and skipped rather than
+    // failed.
+    //
+    // Probed here rather than reused from the earlier doctor run because
+    // Simulator.app's state can change between the two points — booting an app
+    // is exactly the sort of thing that starts it.
+    var ax_ok = false;
+    var sim_app_ok = false;
     {
-        // The app needs a moment to render before its tree is populated; this
-        // is exactly what wait-for-ui exists for, so use it as the barrier.
-        const r = try run(gpa, bin, &.{ "ios", "wait-for-ui", "--label", label, "--timeout", "20000" });
+        const r = try run(gpa, bin, &.{"doctor"});
         defer r.deinit(gpa);
-        expectCode(arena, "wait-for-ui finds a present element", r, 0);
+        ax_ok = std.mem.indexOf(u8, r.stdout, "accessibility: this process is trusted") != null;
+        // Specifically the window, not just the process: `simctl boot` leaves
+        // Simulator.app running with nothing on screen, and the tree hangs
+        // off a window.
+        sim_app_ok = std.mem.indexOf(u8, r.stdout, "window on screen") != null;
     }
-    {
-        const r = try run(gpa, bin, &.{ "ios", "uitree" });
-        defer r.deinit(gpa);
-        expectCode(arena, "uitree exits 0", r, 0);
-        expectContains(arena, "uitree contains the expected label", r.stdout, label);
-        expectContains(arena, "uitree reports device-pixel bounds", r.stdout, "@");
-    }
-    {
-        const r = try run(gpa, bin, &.{ "ios", "find", "--label", label });
-        defer r.deinit(gpa);
-        expectCode(arena, "find locates a present element", r, 0);
-        expectContains(arena, "find emits a tap-ready centroid", r.stdout, "tap=");
-    }
-    {
-        const r = try run(gpa, bin, &.{ "ios", "find", "--label", "kuriE2ENoSuchElement" });
-        defer r.deinit(gpa);
-        // Non-zero on no match is what lets `find` be used as an assertion.
-        expectCode(arena, "find exits 4 when nothing matches", r, 4);
+    if (!ax_ok) {
+        skip(arena, "wait-for-ui / uitree / find", "no Accessibility grant for this process");
+    } else if (!sim_app_ok) {
+        skip(arena, "wait-for-ui / uitree / find", "Simulator.app has no window on screen; try `ios open-sim`");
+    } else {
+        {
+            // The app needs a moment to render before its tree is populated; this
+            // is exactly what wait-for-ui exists for, so use it as the barrier.
+            const r = try run(gpa, bin, &.{ "ios", "wait-for-ui", "--label", label, "--timeout", "20000" });
+            defer r.deinit(gpa);
+            expectCode(arena, "wait-for-ui finds a present element", r, 0);
+        }
+        {
+            const r = try run(gpa, bin, &.{ "ios", "uitree" });
+            defer r.deinit(gpa);
+            expectCode(arena, "uitree exits 0", r, 0);
+            expectContains(arena, "uitree contains the expected label", r.stdout, label);
+            expectContains(arena, "uitree reports device-pixel bounds", r.stdout, "@");
+        }
+        {
+            const r = try run(gpa, bin, &.{ "ios", "find", "--label", label });
+            defer r.deinit(gpa);
+            expectCode(arena, "find locates a present element", r, 0);
+            expectContains(arena, "find emits a tap-ready centroid", r.stdout, "tap=");
+        }
+        {
+            const r = try run(gpa, bin, &.{ "ios", "find", "--label", "kuriE2ENoSuchElement" });
+            defer r.deinit(gpa);
+            // Non-zero on no match is what lets `find` be used as an assertion.
+            expectCode(arena, "find exits 4 when nothing matches", r, 4);
+        }
+
+        // --- Group 5: wait-for-ui semantics + timeout regression ------------
+        {
+            const r = try run(gpa, bin, &.{ "ios", "wait-for-ui", "--label", "kuriE2ENoSuchElement", "--absent", "--timeout", "5000" });
+            defer r.deinit(gpa);
+            expectCode(arena, "wait-for-ui --absent passes for a missing element", r, 0);
+        }
+        {
+            // Regression guard for the 0.4.7 bug: the deadline used to sum sleep
+            // intervals while ignoring each poll's cost, so a 3s timeout waited
+            // ~13.5s. Allow headroom for one final in-flight poll, but fail if we
+            // drift back toward a multiple of the request.
+            const want_ms: i64 = 3000;
+            const r = try run(gpa, bin, &.{ "ios", "wait-for-ui", "--label", "kuriE2ENoSuchElement", "--timeout", "3000" });
+            defer r.deinit(gpa);
+            expectCode(arena, "wait-for-ui times out with exit 4", r, 4);
+
+            const ok = r.elapsed_ms >= want_ms and r.elapsed_ms < want_ms * 3;
+            const d = std.fmt.allocPrint(arena, "took {d}ms for a {d}ms timeout", .{ r.elapsed_ms, want_ms }) catch "bad timing";
+            report(arena, ok, "wait-for-ui honours its wall-clock deadline", d);
+        }
     }
 
-    // --- Group 4: wait-for-ui semantics + timeout regression ----------------
-    {
-        const r = try run(gpa, bin, &.{ "ios", "wait-for-ui", "--label", "kuriE2ENoSuchElement", "--absent", "--timeout", "5000" });
-        defer r.deinit(gpa);
-        expectCode(arena, "wait-for-ui --absent passes for a missing element", r, 0);
-    }
-    {
-        // Regression guard for the 0.4.7 bug: the deadline used to sum sleep
-        // intervals while ignoring each poll's cost, so a 3s timeout waited
-        // ~13.5s. Allow headroom for one final in-flight poll, but fail if we
-        // drift back toward a multiple of the request.
-        const want_ms: i64 = 3000;
-        const r = try run(gpa, bin, &.{ "ios", "wait-for-ui", "--label", "kuriE2ENoSuchElement", "--timeout", "3000" });
-        defer r.deinit(gpa);
-        expectCode(arena, "wait-for-ui times out with exit 4", r, 4);
-
-        const ok = r.elapsed_ms >= want_ms and r.elapsed_ms < want_ms * 3;
-        const d = std.fmt.allocPrint(arena, "took {d}ms for a {d}ms timeout", .{ r.elapsed_ms, want_ms }) catch "bad timing";
-        report(arena, ok, "wait-for-ui honours its wall-clock deadline", d);
-    }
-
-    // --- Group 5: screenshot -------------------------------------------------
+    // --- Group 6: screenshot -------------------------------------------------
+    // simctl renders this itself, so unlike the AX group it runs without any
+    // Accessibility grant — which makes it the main visual check CI can do.
     {
         const path = "/tmp/kuri-e2e-shot.png";
         const r = try run(gpa, bin, &.{ "ios", "screenshot", path });
@@ -224,6 +309,65 @@ pub fn main(init: std.process.Init.Minimal) !void {
         }
     }
 
-    io.printStdout(arena, "\n{d} passed, {d} failed\n", .{ passed, failed });
-    std.process.exit(if (failed == 0) 0 else 1);
+    // --- Group 7: simulator state, no Accessibility needed -------------------
+    // These all route through simctl, so they are exactly the coverage a CI
+    // runner *can* provide beyond install/launch/screenshot.
+    {
+        const r = try run(gpa, bin, &.{ "ios", "list-apps" });
+        defer r.deinit(gpa);
+        expectCode(arena, "list-apps exits 0", r, 0);
+        expectContains(arena, "list-apps includes the target bundle id", r.stdout, bundle_id);
+    }
+    {
+        // Pinning the status bar is what makes screenshots comparable between
+        // runs, so it needs to survive both directions.
+        const r = try run(gpa, bin, &.{ "ios", "status-bar", "override", "--time", "9:41" });
+        defer r.deinit(gpa);
+        expectCode(arena, "status-bar override exits 0", r, 0);
+    }
+    {
+        const r = try run(gpa, bin, &.{ "ios", "status-bar", "clear" });
+        defer r.deinit(gpa);
+        expectCode(arena, "status-bar clear exits 0", r, 0);
+    }
+    {
+        const r = try run(gpa, bin, &.{ "ios", "ui", "appearance", "dark" });
+        defer r.deinit(gpa);
+        expectCode(arena, "ui appearance dark exits 0", r, 0);
+    }
+    {
+        const r = try run(gpa, bin, &.{ "ios", "ui", "appearance" });
+        defer r.deinit(gpa);
+        expectCode(arena, "ui appearance reads back", r, 0);
+        expectContains(arena, "ui appearance reports the value just set", r.stdout, "dark");
+    }
+    {
+        const r = try run(gpa, bin, &.{ "ios", "ui", "appearance", "light" });
+        defer r.deinit(gpa);
+        expectCode(arena, "ui appearance light exits 0", r, 0);
+    }
+    {
+        const r = try run(gpa, bin, &.{ "ios", "set-location", "37.7749", "-122.4194" });
+        defer r.deinit(gpa);
+        expectCode(arena, "set-location exits 0", r, 0);
+    }
+    {
+        const r = try run(gpa, bin, &.{ "ios", "reset-location" });
+        defer r.deinit(gpa);
+        expectCode(arena, "reset-location exits 0", r, 0);
+    }
+    {
+        // `log` exists to back assertions, which means it must terminate on
+        // its own rather than stream forever.
+        const r = try run(gpa, bin, &.{ "ios", "log", "--last", "10s" });
+        defer r.deinit(gpa);
+        expectCode(arena, "log --last returns bounded output", r, 0);
+    }
+    {
+        const r = try run(gpa, bin, &.{ "ios", "terminate", bundle_id });
+        defer r.deinit(gpa);
+        expectCode(arena, "terminate by bundle id", r, 0);
+    }
+
+    return finish(arena);
 }

@@ -50,27 +50,67 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&b.addRunArtifact(unit_tests).step);
 
-    // End-to-end suite. Kept off `test` on purpose: it drives a real booted
-    // simulator, which CI does not have. It receives the built binary's path
-    // as argv[1] so it exercises exactly the artifact that would ship.
-    const e2e_mod = b.createModule(.{
-        .root_source_file = b.path("src/test/e2e_ios.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    });
-    // 0.17 restricts imports to a module's own path, so the shared io helpers
-    // come in as a named module rather than a relative path.
-    e2e_mod.addImport("io", b.createModule(.{
+    // End-to-end suites. Kept off `test` on purpose: they shell out to the
+    // real Xcode toolchain, and most cases need a booted simulator or an
+    // attached phone. Each receives the built binary's path as argv[1] so it
+    // exercises exactly the artifact that would ship.
+    //
+    // 0.17 restricts imports to a module's own path, so the shared helpers
+    // come in as named modules rather than relative paths.
+    const io_mod = b.createModule(.{
         .root_source_file = b.path("src/common/io.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
-    }));
-    const e2e = b.addExecutable(.{ .name = "e2e-ios", .root_module = e2e_mod });
-    const run_e2e = b.addRunArtifact(e2e);
-    run_e2e.addArtifactArg(exe);
-    run_e2e.addPassthruArgs();
-    const e2e_step = b.step("e2e-ios", "Run iOS end-to-end tests (needs a booted simulator)");
-    e2e_step.dependOn(&run_e2e.step);
+    });
+    const harness_mod = b.createModule(.{
+        .root_source_file = b.path("src/test/harness.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    harness_mod.addImport("io", io_mod);
+
+    const Suite = struct { step: []const u8, src: []const u8, desc: []const u8 };
+    const suites = [_]Suite{
+        .{
+            .step = "e2e-ios",
+            .src = "src/test/e2e_ios.zig",
+            .desc = "Run iOS end-to-end tests (simulator; skips what the host cannot provide)",
+        },
+        .{
+            .step = "e2e-ios-device",
+            .src = "src/test/e2e_ios_device.zig",
+            .desc = "Run iOS end-to-end tests against an attached physical device",
+        },
+    };
+    for (suites) |s| {
+        const mod = b.createModule(.{
+            .root_source_file = b.path(s.src),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        mod.addImport("io", io_mod);
+        mod.addImport("harness", harness_mod);
+        const exe_suite = b.addExecutable(.{ .name = s.step, .root_module = mod });
+        const run_suite = b.addRunArtifact(exe_suite);
+        run_suite.addArtifactArg(exe);
+        run_suite.addPassthruArgs();
+        b.step(s.step, s.desc).dependOn(&run_suite.step);
+
+        // The suites' own parsing helpers — which udid a listing names, which
+        // pid a launch printed — decide what the hardware cases assert on, so
+        // they belong in `zig build test` where they run everywhere. Needs a
+        // second module: a test root cannot be shared with an executable root.
+        const test_suite_mod = b.createModule(.{
+            .root_source_file = b.path(s.src),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        test_suite_mod.addImport("io", io_mod);
+        test_suite_mod.addImport("harness", harness_mod);
+        test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = test_suite_mod })).step);
+    }
 }
