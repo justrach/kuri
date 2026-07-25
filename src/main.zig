@@ -6,8 +6,9 @@ const Bridge = @import("bridge/bridge.zig").Bridge;
 const launcher = @import("chrome/launcher.zig");
 const api_token = @import("server/api_token.zig");
 const lifecycle = @import("lifecycle.zig");
+const updater = @import("update.zig");
 
-const version = "0.4.11";
+const version = "0.4.12";
 
 const CliAction = enum {
     run,
@@ -15,6 +16,7 @@ const CliAction = enum {
     version,
     mobile,
     token,
+    update,
 };
 
 pub fn main(init: std.process.Init.Minimal) !void {
@@ -55,6 +57,22 @@ pub fn main(init: std.process.Init.Minimal) !void {
             defer resolved.deinit(gpa);
             compat.writeToStdout(resolved.token);
             compat.writeToStdout("\n");
+            return;
+        },
+        .update => {
+            var opts: updater.Options = .{};
+            for (args[2..]) |a| {
+                if (std.mem.eql(u8, a, "--check")) {
+                    opts.check_only = true;
+                } else if (std.mem.startsWith(u8, a, "--dir=")) {
+                    opts.dir = a["--dir=".len..];
+                } else {
+                    printUnknownArgument(a);
+                    std.process.exit(1);
+                }
+            }
+            const code = try updater.run(gpa, version, opts);
+            if (code != 0) std.process.exit(code);
             return;
         },
         .run => {},
@@ -135,6 +153,13 @@ fn parseCliAction(args: []const []const u8) !CliAction {
         return .token;
     }
 
+    // `upgrade` is accepted too: it is what half of people type, and failing
+    // an upgrade command over vocabulary is a poor way to meet a user who is
+    // trying to get onto a newer version.
+    if (std.mem.eql(u8, args[1], "update") or std.mem.eql(u8, args[1], "upgrade")) {
+        return .update;
+    }
+
     return error.UnknownArgument;
 }
 
@@ -189,6 +214,7 @@ fn printUsage() void {
         \\    kuri android <cmd>       Drive Android devices (delegates to kuri-mobile)
         \\    kuri ios <cmd>           Drive iOS sims/devices (delegates to kuri-mobile)
         \\    kuri token               Print the API token (creates one if missing)
+        \\    kuri update              Update to the current release (--check to only report)
         \\    kuri -h, --help          Show this help
         \\    kuri -V, --version       Print version and exit
         \\
@@ -229,6 +255,11 @@ test "parseCliAction recognises token subcommand" {
     try std.testing.expectEqual(CliAction.token, try parseCliAction(&.{ "kuri", "token" }));
 }
 
+test "parseCliAction recognises update and its upgrade alias" {
+    try std.testing.expectEqual(CliAction.update, try parseCliAction(&.{ "kuri", "update" }));
+    try std.testing.expectEqual(CliAction.update, try parseCliAction(&.{ "kuri", "upgrade" }));
+}
+
 test "parseCliAction rejects unknown argument" {
     try std.testing.expectError(error.UnknownArgument, parseCliAction(&.{ "kuri", "--wat" }));
 }
@@ -262,4 +293,5 @@ test {
     _ = @import("storage/local.zig");
     _ = @import("storage/auth_profiles.zig");
     _ = @import("util/tls.zig");
+    _ = @import("update.zig");
 }
