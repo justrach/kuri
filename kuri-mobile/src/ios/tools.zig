@@ -63,14 +63,14 @@ pub const all = [_]Tool{
         .args = "<path.app>",
         .summary = "install a built .app bundle onto the simulator",
         .category = "lifecycle",
-        .scope = .virtual,
+        .scope = .both,
     },
     .{
         .name = "uninstall",
         .args = "<bundle-id>",
         .summary = "remove an installed app",
         .category = "lifecycle",
-        .scope = .virtual,
+        .scope = .both,
     },
     .{
         .name = "launch",
@@ -93,7 +93,7 @@ pub const all = [_]Tool{
         .flags = &.{"--udid"},
         .summary = "list installed apps and their bundle ids",
         .category = "lifecycle",
-        .scope = .virtual,
+        .scope = .both,
     },
     .{
         .name = "openurl",
@@ -287,6 +287,41 @@ pub const all = [_]Tool{
         .summary = "connect/disconnect the hardware keyboard (affects whether the software keyboard shows)",
         .category = "state",
         .scope = .virtual,
+    },
+    .{
+        .name = "device-info",
+        .flags = &.{"--udid"},
+        .summary = "hardware/OS details for a paired physical device",
+        .category = "observe",
+        .scope = .device,
+    },
+    .{
+        .name = "device-processes",
+        .flags = &.{"--udid"},
+        .summary = "processes running on a physical device",
+        .category = "observe",
+        .scope = .device,
+    },
+    .{
+        .name = "lock-state",
+        .flags = &.{"--udid"},
+        .summary = "whether the device screen is locked (a common silent-failure cause)",
+        .category = "observe",
+        .scope = .device,
+    },
+    .{
+        .name = "displays",
+        .flags = &.{"--udid"},
+        .summary = "display configuration of a physical device",
+        .category = "observe",
+        .scope = .device,
+    },
+    .{
+        .name = "reboot",
+        .flags = &.{"--udid"},
+        .summary = "reboot a physical device",
+        .category = "lifecycle",
+        .scope = .device,
     },
 };
 

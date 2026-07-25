@@ -53,7 +53,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
         return;
     }
     if (std.mem.eql(u8, sub, "--version")) {
-        try writeStdout("kuri-mobile 0.4.9\n");
+        try writeStdout("kuri-mobile 0.4.10\n");
         return;
     }
 
