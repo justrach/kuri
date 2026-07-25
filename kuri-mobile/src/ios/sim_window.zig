@@ -19,6 +19,7 @@
 const std = @import("std");
 const io = @import("../common/io.zig");
 const sim_input = @import("sim_input.zig");
+const xcode = @import("xcode.zig");
 
 pub const WindowRect = struct { x: f64, y: f64, w: f64, h: f64 };
 
@@ -80,10 +81,8 @@ pub fn devicePixelSize(gpa: std.mem.Allocator, udid: []const u8) !PixelSize {
     const stamp: i64 = @intCast(std.c.getpid());
     const path = try std.fmt.bufPrint(&path_buf, "/tmp/kuri-mobile-sim-{d}.png", .{stamp});
 
-    const r = try io.runCommand(gpa, &.{
-        "xcrun", "simctl", "io", udid, "screenshot", path,
-    }, 1024);
-    gpa.free(r.stdout);
+    const shot = try xcode.run(gpa, "simctl", &.{ "io", udid, "screenshot", path }, 1024);
+    gpa.free(shot);
 
     // Read first 24 bytes: 8-byte PNG signature + 4 chunk len + 4 "IHDR"
     // + 4 width + 4 height (big-endian).
@@ -124,6 +123,35 @@ pub fn deviceToScreen(
         .x = win.x + dev_x * scale_x,
         .y = win.y + TITLE_BAR_PTS + dev_y * scale_y,
     };
+}
+
+/// Inverse of `deviceToScreen`: convert a macOS screen point (what the
+/// Accessibility API reports for an element's frame) back into the device
+/// pixel grid, so uitree bounds line up with `ios tap` coordinates and with
+/// the screenshot.
+pub fn screenToDevice(
+    win: WindowRect,
+    px: PixelSize,
+    screen_x: f64,
+    screen_y: f64,
+) [2]f64 {
+    const content_h = win.h - TITLE_BAR_PTS;
+    const scale_x = win.w / @as(f64, @floatFromInt(px.w));
+    const scale_y = content_h / @as(f64, @floatFromInt(px.h));
+    if (scale_x == 0 or scale_y == 0) return .{ 0, 0 };
+    return .{
+        (screen_x - win.x) / scale_x,
+        (screen_y - win.y - TITLE_BAR_PTS) / scale_y,
+    };
+}
+
+test "screenToDevice round-trips deviceToScreen" {
+    const win = WindowRect{ .x = 100, .y = 50, .w = 400, .h = 828 };
+    const px = PixelSize{ .w = 1200, .h = 2400 };
+    const s = deviceToScreen(win, px, 640, 1500);
+    const d = screenToDevice(win, px, s.x, s.y);
+    try std.testing.expectApproxEqAbs(@as(f64, 640), d[0], 0.001);
+    try std.testing.expectApproxEqAbs(@as(f64, 1500), d[1], 0.001);
 }
 
 test "parseRect basic" {

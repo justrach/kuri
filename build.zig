@@ -170,4 +170,14 @@ pub fn build(b: *std.Build) void {
     }
     const agent_step = b.step("agent", "Run kuri-agent scriptable CLI");
     agent_step.dependOn(&run_agent.step);
+
+    // kuri-mobile: Android (adb wire protocol) + iOS (simctl / Simulator AX).
+    // `kuri` execs this as a sibling binary, so it has to land in the same
+    // install prefix — and therefore the same release tarball. Consumed as a
+    // path dependency so the Apple framework/SDK wiring stays in one place.
+    const mobile_dep = b.dependency("kuri_mobile", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    b.installArtifact(mobile_dep.artifact("kuri-mobile"));
 }

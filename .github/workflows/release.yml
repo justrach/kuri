@@ -12,6 +12,7 @@ jobs:
   # ── Linux: cross-compile both arches on one runner ─────────────────────────
   build-linux:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -22,20 +23,34 @@ jobs:
         with:
           version: 0.16.0
       - name: Build
-        run: zig build -Dtarget=${{ matrix.target }} -Doptimize=ReleaseFast
+        run: zig build -Dtarget=${{ matrix.target }} -Doptimize=ReleaseFast -p out
       - name: Package
         run: |
           VERSION="${GITHUB_REF_NAME}"
           mkdir -p dist
-          tar -czf "dist/kuri-${VERSION}-${{ matrix.target }}.tar.gz" -C zig-out/bin .
+          tar -czf "dist/kuri-${VERSION}-${{ matrix.target }}.tar.gz" -C out/bin .
       - uses: actions/upload-artifact@v4
         with:
           name: kuri-${{ matrix.target }}
           path: dist/*.tar.gz
 
-  # ── macOS arm64: build + sign + notarize on real macOS runner ───────────────
-  build-macos-arm:
+  # ── macOS: both arches on one Apple Silicon runner ─────────────────────────
+  # Both arches build here on purpose. The previous x86 job pinned `macos-13`,
+  # a label GitHub has retired: it never got a runner, sat queued until the 24h
+  # job limit killed it, and took every release down with it (the publish jobs
+  # `needs:` it, so they were skipped). Zig cross-compiles x86_64-macos from
+  # arm64 fine, and codesign is architecture-agnostic, so one live runner does
+  # both. Each matrix leg installs to its own prefix so the tarballs can't pick
+  # up the other arch's binaries.
+  build-macos:
     runs-on: macos-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [aarch64-macos, x86_64-macos]
+    outputs:
+      signed: ${{ steps.sign.outputs.signed }}
     env:
       APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
       APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -48,11 +63,20 @@ jobs:
         with:
           version: 0.16.0
       - name: Build
-        run: zig build -Dtarget=aarch64-macos -Doptimize=ReleaseFast
+        run: zig build -Dtarget=${{ matrix.target }} -Doptimize=ReleaseFast -p out
 
+      # Records whether signing actually happened, so the release notes and the
+      # channel manifest can state the truth instead of asserting it.
       - name: Sign & notarize
-        if: ${{ env.APPLE_CERTIFICATE != '' }}
+        id: sign
         run: |
+          set -euo pipefail
+          if [ -z "${APPLE_CERTIFICATE}" ]; then
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::No APPLE_CERTIFICATE secret — shipping UNSIGNED, un-notarized macOS binaries."
+            exit 0
+          fi
+
           KEYCHAIN="build-$(uuidgen).keychain"
           KEYCHAIN_PASS="$(uuidgen)"
           security create-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN"
@@ -63,86 +87,42 @@ jobs:
             -T /usr/bin/codesign -T /usr/bin/productsign
           security list-keychain -d user -s "$KEYCHAIN"
           security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASS" "$KEYCHAIN"
-          for BIN in zig-out/bin/*; do
+
+          for BIN in out/bin/*; do
             codesign --sign "Developer ID Application: $APPLE_TEAM_ID" \
               --options runtime --timestamp --force "$BIN"
           done
-          zip -j /tmp/kuri-macos-arm.zip zig-out/bin/*
-          xcrun notarytool submit /tmp/kuri-macos-arm.zip \
+
+          zip -j "/tmp/kuri-${{ matrix.target }}.zip" out/bin/*
+          # --timeout so a stalled submission fails in minutes, not at the job cap.
+          xcrun notarytool submit "/tmp/kuri-${{ matrix.target }}.zip" \
             --apple-id "$APPLE_ID" \
             --password "$APPLE_APP_PASSWORD" \
             --team-id "$APPLE_TEAM_ID" \
-            --wait
-          for BIN in zig-out/bin/*; do xcrun stapler staple "$BIN" || true; done
+            --wait --timeout 30m
+
+          # Bare Mach-O executables cannot be stapled (only bundles/pkgs/dmgs);
+          # Gatekeeper verifies these online. Best-effort, never fatal.
+          for BIN in out/bin/*; do xcrun stapler staple "$BIN" || true; done
+
           security delete-keychain "$KEYCHAIN"
+          echo "signed=true" >> "$GITHUB_OUTPUT"
 
       - name: Package
         run: |
           VERSION="${GITHUB_REF_NAME}"
           mkdir -p dist
-          tar -czf "dist/kuri-${VERSION}-aarch64-macos.tar.gz" -C zig-out/bin .
+          tar -czf "dist/kuri-${VERSION}-${{ matrix.target }}.tar.gz" -C out/bin .
       - uses: actions/upload-artifact@v4
         with:
-          name: kuri-aarch64-macos
-          path: dist/*.tar.gz
-
-  # ── macOS x86_64: build + sign + notarize ───────────────────────────────────
-  build-macos-x86:
-    runs-on: macos-13
-    env:
-      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-      APPLE_ID: ${{ secrets.APPLE_ID }}
-      APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: mlugg/setup-zig@v2
-        with:
-          version: 0.16.0
-      - name: Build
-        run: zig build -Dtarget=x86_64-macos -Doptimize=ReleaseFast
-
-      - name: Sign & notarize
-        if: ${{ env.APPLE_CERTIFICATE != '' }}
-        run: |
-          KEYCHAIN="build-$(uuidgen).keychain"
-          KEYCHAIN_PASS="$(uuidgen)"
-          security create-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN"
-          security set-keychain-settings -lut 21600 "$KEYCHAIN"
-          security unlock-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN"
-          echo "$APPLE_CERTIFICATE" | base64 --decode > /tmp/cert.p12
-          security import /tmp/cert.p12 -k "$KEYCHAIN" -P "$APPLE_CERTIFICATE_PASSWORD" \
-            -T /usr/bin/codesign -T /usr/bin/productsign
-          security list-keychain -d user -s "$KEYCHAIN"
-          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASS" "$KEYCHAIN"
-          for BIN in zig-out/bin/*; do
-            codesign --sign "Developer ID Application: $APPLE_TEAM_ID" \
-              --options runtime --timestamp --force "$BIN"
-          done
-          zip -j /tmp/kuri-macos-x86.zip zig-out/bin/*
-          xcrun notarytool submit /tmp/kuri-macos-x86.zip \
-            --apple-id "$APPLE_ID" \
-            --password "$APPLE_APP_PASSWORD" \
-            --team-id "$APPLE_TEAM_ID" \
-            --wait
-          for BIN in zig-out/bin/*; do xcrun stapler staple "$BIN" || true; done
-          security delete-keychain "$KEYCHAIN"
-
-      - name: Package
-        run: |
-          VERSION="${GITHUB_REF_NAME}"
-          mkdir -p dist
-          tar -czf "dist/kuri-${VERSION}-x86_64-macos.tar.gz" -C zig-out/bin .
-      - uses: actions/upload-artifact@v4
-        with:
-          name: kuri-x86_64-macos
+          name: kuri-${{ matrix.target }}
           path: dist/*.tar.gz
 
   # ── Publish self-managed release channel ────────────────────────────────────
   publish-channel:
-    needs: [build-linux, build-macos-arm, build-macos-x86]
+    needs: [build-linux, build-macos]
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
@@ -153,6 +133,8 @@ jobs:
           merge-multiple: true
           path: dist
       - name: Publish stable channel
+        env:
+          MACOS_SIGNED: ${{ needs.build-macos.outputs.signed }}
         run: |
           set -euo pipefail
           VERSION="${GITHUB_REF_NAME}"
@@ -169,6 +151,7 @@ jobs:
 
           version = os.environ["GITHUB_REF_NAME"]
           commit = os.environ["GITHUB_SHA"]
+          notarized = os.environ.get("MACOS_SIGNED") == "true"
           root = Path("channel")
           version_dir = root / "stable" / version
           base = "https://raw.githubusercontent.com/justrach/kuri/release-channel/stable"
@@ -180,7 +163,7 @@ jobs:
                   "url": f"{base}/{version}/{path.name}",
                   "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
                   "size": path.stat().st_size,
-                  "notarized": target.endswith("macos"),
+                  "notarized": target.endswith("macos") and notarized,
               }
 
           manifest = {
@@ -223,8 +206,9 @@ jobs:
           git push origin HEAD:release-channel
 
   publish-github-release:
-    needs: [build-linux, build-macos-arm, build-macos-x86]
+    needs: [build-linux, build-macos]
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: write
     steps:
@@ -237,7 +221,6 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="${GITHUB_REF_NAME}"
-          SHA_FILE="dist/kuri-${VERSION}-sha256sums.txt"
 
           python3 - <<'PY'
           from pathlib import Path
@@ -255,15 +238,27 @@ jobs:
           next_match = re.search(r"^## \[", changelog[match.end():], re.MULTILINE)
           end = len(changelog) if not next_match else match.end() + next_match.start()
           section = changelog[start:end].strip()
-          notes = "## " + os.environ["GITHUB_REF_NAME"] + "\\n\\n" + section.split("\\n", 1)[1].strip() + "\\n\\nmacOS assets in this release are signed and notarized.\\n"
+          body = section.split("\n", 1)[1].strip()
+
+          if os.environ.get("MACOS_SIGNED") == "true":
+              footer = "macOS assets in this release are signed and notarized."
+          else:
+              footer = (
+                  "> **Note** — macOS assets in this release are **not** signed or notarized. "
+                  "Gatekeeper will quarantine them; clear it with "
+                  "`xattr -d com.apple.quarantine <binary>`."
+              )
+
+          notes = "## " + os.environ["GITHUB_REF_NAME"] + "\n\n" + body + "\n\n" + footer + "\n"
           Path("dist/release-notes.md").write_text(notes)
 
           with Path(os.environ["SHA_FILE"]).open("w") as out:
               for path in sorted(Path("dist").glob("kuri-*.tar.gz")):
-                  out.write(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}\\n")
+                  out.write(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}\n")
           PY
         env:
           SHA_FILE: dist/kuri-${{ github.ref_name }}-sha256sums.txt
+          MACOS_SIGNED: ${{ needs.build-macos.outputs.signed }}
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}

@@ -2,6 +2,29 @@
 
 All notable changes to kuri are documented here.
 
+## [0.4.6] — 2026-07-25
+
+### Features — kuri-mobile iOS, driverless
+- **`ios uitree`** — dumps the running app's real accessibility tree (labels, identifiers, values, device-pixel bounds) with no XCUITest bundle and no on-device agent. Works by enabling `ApplicationAccessibilityEnabled` inside the simulated runtime, which populates Simulator.app's host-side AX hierarchy
+- **Tap by label** — `--label` targets an element by accessibility label, identifier or value (exact match, then substring) instead of raw coordinates
+- **Input** — `doubletap`, `longpress`, `swipe`/`scroll`/`pan`, `type`, and `key` with modifier support (`key return --cmd`)
+- **Hardware buttons** — `ios button home|lock|volup|voldown|action` driven through the host accessibility bridge
+- **Lifecycle & environment** — `ios background`, `ios privacy`, `ios ui`, `ios status-bar`, `ios log`, `ios list-devices`
+
+### Fixes
+- **Release pipeline never published** — `build-macos-x86` pinned `macos-13`, a runner label GitHub has retired. The job never got a runner, sat queued until the 24-hour job limit cancelled it, and skipped both publish jobs. Every tag from v0.3.3 to v0.4.5 died this way. macOS now cross-compiles both arches on one `macos-latest` runner, and every job has an explicit `timeout-minutes`
+- **Release notes generation crashed** — the notes/checksum script split on a literal `\n` (backslash-n) rather than a newline, raising `IndexError` on the first successful run. Never observed because the job had always been skipped
+- **kuri-mobile was never shipped** — the root build had no reference to it, so releases omitted the binary that `kuri` execs as a sibling. It is now a path dependency of the root build and lands in every tarball
+- **kuri-mobile did not build off native macOS** — an inferred error set collapsed to `MacOsOnly` on non-macOS targets, and cross-compiling to `x86_64-macos` could not find `ApplicationServices`. Both arches and both Linux arches now build
+- **Use-after-free in the accessibility walker** — `CFArrayGetValueAtIndex` follows CoreFoundation's Get Rule, so releasing the parent array freed elements still in use. This crashed `uitree` and made `ios button` intermittently fail. Elements are now retained at the match point
+- **Silent tool-resolution failures** — `ios list-devices` exited 0 printing nothing when `xcode-select` pointed at CommandLineTools. Developer tools are now resolved to absolute paths with checked exit status
+- **Version strings** — `kuri`, `kuri-browse` and `kuri-fetch` reported 0.4.1/0.4.0 regardless of the release they shipped in
+
+### Known limitations
+- macOS assets are unsigned and un-notarized until Apple credentials are configured as repository secrets
+- `tap`/`swipe`/`type`/`uitree` remain Simulator-only; real devices need XCUITest
+- `ios privacy` cannot reset camera authorization — `simctl privacy` has no camera service
+
 ## [0.4.5] — 2026-05-27
 
 ### Fixes

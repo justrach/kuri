@@ -83,8 +83,21 @@ fn reportError(err: anyerror) noreturn {
         error.AdbCommandFailed => "adb returned FAIL — see the warning log above for details.",
         error.AdbProtocolError => "unexpected response from adb server (protocol error).",
         error.UnexpectedEof => "adb connection closed mid-message.",
-        error.UnknownButton => "unknown button name; see `kuri-mobile android` for the supported list.",
-        error.NoBootedSimulator => "no booted iOS Simulator found. Run `xcrun simctl boot <UDID>` first or pass --udid.",
+        error.UnknownButton => "unknown button name; run the platform subcommand with no args for the supported list.",
+        error.NoBootedSimulator => "no booted iOS Simulator found. Run `kuri-mobile ios boot --udid <UDID>` first or pass --udid.",
+        error.XcodeNotFound =>
+            \\no Xcode toolchain with `simctl` found. `xcode-select -p` may point at
+            \\CommandLineTools, which does not ship simctl. Fix with either:
+            \\  sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+            \\  DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer kuri-mobile ios ...
+        ,
+        // xcode.run already printed the failing tool's own diagnostic above.
+        error.CommandFailed => "the Xcode tool reported a failure (see the message above).",
+        error.AccessibilityNotTrusted => "macOS Accessibility permission is required to drive the Simulator. Grant it to your terminal in System Settings -> Privacy & Security -> Accessibility.",
+        error.SimulatorNotRunning => "Simulator.app is not running. Boot a simulator first (`kuri-mobile ios boot --udid <UDID>`).",
+        error.ButtonNotFound => "that button is not present in the current Simulator window (some buttons only appear for certain device types).",
+        error.ButtonPressFailed => "the Simulator rejected the button press.",
+        error.MacOsOnly => "iOS commands are macOS-only.",
         else => "",
     };
     var arena_impl = std.heap.ArenaAllocator.init(std.heap.page_allocator);
@@ -103,4 +116,9 @@ test {
     _ = @import("android/driver.zig");
     _ = @import("common/uitree.zig");
     _ = @import("ios/usbmux.zig");
+    _ = @import("ios/xcode.zig");
+    _ = @import("ios/simctl.zig");
+    _ = @import("ios/sim_ax.zig");
+    _ = @import("ios/sim_input.zig");
+    _ = @import("ios/sim_window.zig");
 }
