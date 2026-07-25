@@ -46,7 +46,41 @@ zig build
 ./zig-out/bin/kuri-mobile ios tap   200 600
 ./zig-out/bin/kuri-mobile ios swipe 200 1500 200 500 400   # pan up; alias: pan/scroll
 ./zig-out/bin/kuri-mobile ios type  "hello world"
+
+# Accessibility tree — role, a11y identifier, label, device-pixel bounds
+./zig-out/bin/kuri-mobile ios uitree
+#   @e3 AXButton #com.apple.settings.general [General] @113,1200-1092,1345 *clickable
+
+# Act on labels instead of coordinates, so taps survive layout changes
+./zig-out/bin/kuri-mobile ios tap --label "General"
+
+# Hardware buttons and lifecycle transitions
+./zig-out/bin/kuri-mobile ios button home          # also: lock volup voldown action rotate
+./zig-out/bin/kuri-mobile ios background --for 3000 com.example.app
+
+# Hardware-keyboard shortcuts (Command-Return and friends)
+./zig-out/bin/kuri-mobile ios key return --cmd
+
+# Accessibility / appearance sweep axes
+./zig-out/bin/kuri-mobile ios ui appearance dark
+./zig-out/bin/kuri-mobile ios ui content-size increment    # Dynamic Type
+./zig-out/bin/kuri-mobile ios ui increase-contrast enabled
+
+# Deterministic screenshots + bounded log assertions
+./zig-out/bin/kuri-mobile ios status-bar override --time 9:41
+./zig-out/bin/kuri-mobile ios log --last 30s --predicate 'subsystem == "com.example.app"'
 ```
+
+### iOS Simulator accessibility tree
+
+Simulator.app bridges the running iOS app's a11y tree into the host macOS
+Accessibility hierarchy, but only once app accessibility is enabled inside
+the runtime. `uitree` turns it on (idempotently) before each dump, so this
+is transparent. Without it the device-screen `AXGroup` is present but
+childless — which looks exactly like "no bridge exists", and is why this
+was previously documented as XCUITest-only.
+
+Real devices remain XCUITest-only: there is no host process to inspect.
 
 The main `kuri` binary also forwards `kuri android …` and `kuri ios …`
 to this binary (it execvp's `kuri-mobile` from the same directory or
@@ -85,7 +119,9 @@ Compared to `mobile-device-mcp`:
 | Android launch / terminate / list-apps | ✅ via `monkey`/`am`/`pm` | ✅ |
 | iOS Simulator screenshot/launch  | ✅ via `simctl`        | ✅ |
 | iOS Simulator tap/swipe/pan/type | ✅ via CGEvent + AppleScript window targeting | ✅ via XCUITest |
-| iOS Simulator UI tree            | ❌ requires XCUITest (macOS AX of Simulator.app does not expose the iOS app's controls) | ✅ via XCUITest |
+| iOS Simulator UI tree            | ✅ via host AX + `ApplicationAccessibilityEnabled` (no XCUITest) | ✅ via XCUITest |
+| iOS Simulator tap-by-a11y-label  | ✅ `ios tap --label` (resolves through the a11y tree) | ✅ via XCUITest |
+| iOS Simulator hardware buttons   | ✅ Home/Lock/Volume/Action/Rotate via host AX | ✅ |
 | iOS real-device tap/swipe/uitree | ❌ requires XCUITest    | ✅ via XCUITest bundle |
 | `run_code` JS sandbox (Rhino/JSC)| ❌ requires on-device driver | ✅ |
 | MCP server (JSON-RPC stdio)      | ❌ not yet (CLI only)   | ✅ |

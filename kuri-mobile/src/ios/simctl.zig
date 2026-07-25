@@ -1,7 +1,11 @@
-//! iOS Simulator driver via `xcrun simctl`.
+//! iOS Simulator driver via `simctl`.
+//!
+//! Invoked through xcode.zig by absolute path rather than `xcrun`, and every
+//! call checks its exit status — see xcode.zig for why that matters.
 
 const std = @import("std");
 const io = @import("../common/io.zig");
+const xcode = @import("xcode.zig");
 
 pub const Sim = struct {
     udid: []const u8,
@@ -11,43 +15,152 @@ pub const Sim = struct {
     }
 
     pub fn screenshot(self: Sim, gpa: std.mem.Allocator, path: []const u8) !void {
-        const r = try io.runCommand(gpa, &.{ "xcrun", "simctl", "io", self.udid, "screenshot", path }, 64 * 1024 * 1024);
-        gpa.free(r.stdout);
+        const out = try xcode.run(gpa, "simctl", &.{ "io", self.udid, "screenshot", path }, 64 * 1024 * 1024);
+        gpa.free(out);
     }
 
     pub fn launch(self: Sim, gpa: std.mem.Allocator, bundle_id: []const u8) !void {
-        const r = try io.runCommand(gpa, &.{ "xcrun", "simctl", "launch", self.udid, bundle_id }, 1024 * 1024);
-        gpa.free(r.stdout);
+        const out = try xcode.run(gpa, "simctl", &.{ "launch", self.udid, bundle_id }, 1024 * 1024);
+        gpa.free(out);
     }
 
     pub fn terminate(self: Sim, gpa: std.mem.Allocator, bundle_id: []const u8) !void {
-        const r = try io.runCommand(gpa, &.{ "xcrun", "simctl", "terminate", self.udid, bundle_id }, 1024 * 1024);
-        gpa.free(r.stdout);
+        const out = try xcode.run(gpa, "simctl", &.{ "terminate", self.udid, bundle_id }, 1024 * 1024);
+        gpa.free(out);
     }
 
     pub fn listApps(self: Sim, gpa: std.mem.Allocator) ![]u8 {
-        const r = try io.runCommand(gpa, &.{ "xcrun", "simctl", "listapps", self.udid }, 16 * 1024 * 1024);
-        return r.stdout;
+        return xcode.run(gpa, "simctl", &.{ "listapps", self.udid }, 16 * 1024 * 1024);
     }
 
     /// Open a URL in the default handler (https/http → Safari).
     /// This is the "navigate" primitive on iOS Simulator — it's how
     /// you tell Safari to load a page without typing in the address bar.
     pub fn openUrl(self: Sim, gpa: std.mem.Allocator, url: []const u8) !void {
-        const r = try io.runCommand(gpa, &.{ "xcrun", "simctl", "openurl", self.udid, url }, 1024 * 1024);
-        gpa.free(r.stdout);
+        const out = try xcode.run(gpa, "simctl", &.{ "openurl", self.udid, url }, 1024 * 1024);
+        gpa.free(out);
     }
 
     pub fn boot(self: Sim, gpa: std.mem.Allocator) !void {
-        const r = try io.runCommand(gpa, &.{ "xcrun", "simctl", "boot", self.udid }, 1024 * 1024);
-        gpa.free(r.stdout);
+        const out = try xcode.run(gpa, "simctl", &.{ "boot", self.udid }, 1024 * 1024);
+        gpa.free(out);
     }
 
     pub fn shutdown(self: Sim, gpa: std.mem.Allocator) !void {
-        const r = try io.runCommand(gpa, &.{ "xcrun", "simctl", "shutdown", self.udid }, 1024 * 1024);
-        gpa.free(r.stdout);
+        const out = try xcode.run(gpa, "simctl", &.{ "shutdown", self.udid }, 1024 * 1024);
+        gpa.free(out);
+    }
+
+    // --- Permissions --------------------------------------------------------
+
+    /// Grant / revoke / reset a TCC permission for a bundle id.
+    pub fn privacy(
+        self: Sim,
+        gpa: std.mem.Allocator,
+        action: []const u8,
+        service: []const u8,
+        bundle_id: ?[]const u8,
+    ) !void {
+        var argv: std.ArrayList([]const u8) = .empty;
+        defer argv.deinit(gpa);
+        try argv.appendSlice(gpa, &.{ "privacy", self.udid, action, service });
+        if (bundle_id) |b| try argv.append(gpa, b);
+        const out = try xcode.run(gpa, "simctl", argv.items, 1024 * 1024);
+        gpa.free(out);
+    }
+
+    // --- Accessibility / appearance ----------------------------------------
+
+    /// `simctl ui <udid> <option> [value]`. With no value this prints the
+    /// current setting, which is what makes it usable as an assertion.
+    pub fn ui(self: Sim, gpa: std.mem.Allocator, option: []const u8, value: ?[]const u8) ![]u8 {
+        var argv: std.ArrayList([]const u8) = .empty;
+        defer argv.deinit(gpa);
+        try argv.appendSlice(gpa, &.{ "ui", self.udid, option });
+        if (value) |v| try argv.append(gpa, v);
+        return xcode.run(gpa, "simctl", argv.items, 1024 * 1024);
+    }
+
+    /// Pin the status bar so screenshots are byte-comparable across runs.
+    pub fn statusBar(self: Sim, gpa: std.mem.Allocator, extra: []const []const u8) !void {
+        var argv: std.ArrayList([]const u8) = .empty;
+        defer argv.deinit(gpa);
+        try argv.appendSlice(gpa, &.{ "status_bar", self.udid, "override" });
+        try argv.appendSlice(gpa, extra);
+        const out = try xcode.run(gpa, "simctl", argv.items, 1024 * 1024);
+        gpa.free(out);
+    }
+
+    pub fn statusBarClear(self: Sim, gpa: std.mem.Allocator) !void {
+        const out = try xcode.run(gpa, "simctl", &.{ "status_bar", self.udid, "clear" }, 1024 * 1024);
+        gpa.free(out);
+    }
+
+    /// `simctl spawn <udid> defaults write <domain> <key> -int <value>`.
+    /// Used to flip runtime-side settings that have no simctl verb — notably
+    /// app accessibility, which gates the host-visible a11y tree.
+    pub fn spawnDefaultsWrite(
+        self: Sim,
+        gpa: std.mem.Allocator,
+        domain: []const u8,
+        key: []const u8,
+        int_value: []const u8,
+    ) ![]u8 {
+        return xcode.run(gpa, "simctl", &.{
+            "spawn", self.udid, "defaults", "write", domain, key, "-int", int_value,
+        }, 1024 * 1024);
+    }
+
+    // --- Diagnostics --------------------------------------------------------
+
+    /// Retrospective os_log query against the simulator.
+    ///
+    /// Deliberately `log show --last`, not `log stream`: a bounded query
+    /// terminates, so it can back an assertion ("did the app request a
+    /// haptic in the last 30s?"). A stream would block until killed.
+    pub fn logShow(
+        self: Sim,
+        gpa: std.mem.Allocator,
+        last: []const u8,
+        predicate: ?[]const u8,
+    ) ![]u8 {
+        var argv: std.ArrayList([]const u8) = .empty;
+        defer argv.deinit(gpa);
+        try argv.appendSlice(gpa, &.{
+            "spawn", self.udid, "log", "show", "--last", last, "--style", "compact",
+        });
+        if (predicate) |p| try argv.appendSlice(gpa, &.{ "--predicate", p });
+        return xcode.run(gpa, "simctl", argv.items, 64 * 1024 * 1024);
     }
 };
+
+/// TCC services `simctl privacy` accepts, as of Xcode 26.6.
+pub const privacy_services = [_][]const u8{
+    "all",        "calendar",    "contacts-limited", "contacts",
+    "location",   "location-always", "photos-add",  "photos",
+    "media-library", "microphone", "motion",        "reminders",
+    "siri",
+};
+
+/// Services people reach for that `simctl privacy` genuinely does not
+/// implement. Worth naming explicitly: silently passing `camera` through to
+/// simctl produces a confusing failure, and camera permission is exactly
+/// what a first-use camera-authorization bug needs to reset.
+pub const privacy_unsupported = [_][]const u8{ "camera", "speech-recognition", "speech" };
+
+pub fn isPrivacyService(name: []const u8) bool {
+    for (privacy_services) |s| {
+        if (std.mem.eql(u8, s, name)) return true;
+    }
+    return false;
+}
+
+pub fn isPrivacyUnsupported(name: []const u8) bool {
+    for (privacy_unsupported) |s| {
+        if (std.mem.eql(u8, s, name)) return true;
+    }
+    return false;
+}
 
 pub const SimDevice = struct {
     udid: []const u8,
@@ -56,10 +169,10 @@ pub const SimDevice = struct {
 };
 
 pub fn listDevices(gpa: std.mem.Allocator) ![]SimDevice {
-    const r = try io.runCommand(gpa, &.{ "xcrun", "simctl", "list", "devices", "--json" }, 16 * 1024 * 1024);
-    defer gpa.free(r.stdout);
+    const stdout = try xcode.run(gpa, "simctl", &.{ "list", "devices", "--json" }, 16 * 1024 * 1024);
+    defer gpa.free(stdout);
 
-    var parsed = try std.json.parseFromSlice(std.json.Value, gpa, r.stdout, .{});
+    var parsed = try std.json.parseFromSlice(std.json.Value, gpa, stdout, .{});
     defer parsed.deinit();
 
     var list: std.ArrayList(SimDevice) = .empty;
@@ -106,4 +219,14 @@ fn freeFromList(gpa: std.mem.Allocator, list: *std.ArrayList(SimDevice)) void {
         gpa.free(d.state);
     }
     list.deinit(gpa);
+}
+
+test "privacy service classification" {
+    try std.testing.expect(isPrivacyService("microphone"));
+    try std.testing.expect(isPrivacyService("photos"));
+    try std.testing.expect(!isPrivacyService("camera"));
+    // camera is the one people most expect to work, so it must be
+    // classified as explicitly-unsupported rather than merely unknown.
+    try std.testing.expect(isPrivacyUnsupported("camera"));
+    try std.testing.expect(!isPrivacyUnsupported("microphone"));
 }

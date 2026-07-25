@@ -1,5 +1,8 @@
 zig-out/
 .zig-cache/
+zig-pkg/
+dist/
+out/
 __pycache__/
 *.pyc
 *.o
