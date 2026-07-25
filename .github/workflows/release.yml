@@ -142,6 +142,14 @@ jobs:
           mkdir -p "$CHANNEL_DIR"
           cp dist/*.tar.gz "$CHANNEL_DIR/"
 
+          # Publish the installer from the repository rather than leaving the
+          # channel copy to be remembered by hand. These drifted for four
+          # releases: install.sh in the repo gained kuri-mobile, the copy
+          # people actually `curl` did not, so every install produced a kuri
+          # whose `android`/`ios` subcommands could not exec their sibling
+          # binary. The file users run must be generated from the tagged tree.
+          cp install.sh channel/stable/install.sh
+
           python3 - <<'PY'
           from pathlib import Path
           import datetime
