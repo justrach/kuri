@@ -1,4 +1,4 @@
 f470853d3dd9bb553651d0a219f777f359585bf8c2e50e62aa393746598c4ab2  kuri-v0.4.11-aarch64-linux.tar.gz
-70748d2888a078b23b7095baea3ca02d5e6859ba733cd413cac182dc90d5eade  kuri-v0.4.11-aarch64-macos.tar.gz
+c069f1551e6a865758e1e9b757f2dfc84d98d60034bccc00ed589a1b0d8e4541  kuri-v0.4.11-aarch64-macos.tar.gz
 928b256827897ce69fa23f726ba729fc4424729e682605fc9f7449e6ab6c0a45  kuri-v0.4.11-x86_64-linux.tar.gz
-a8c9933fcba6c8233adb734bb3a0ddf4e5b9d8f803ce703cf10f244e833a9f33  kuri-v0.4.11-x86_64-macos.tar.gz
+7f0cd72de3bf65e1b5387dbd7e868fbbaca9dfe978ca62f9d24d16cbcd5cafc6  kuri-v0.4.11-x86_64-macos.tar.gz
