@@ -2,6 +2,23 @@
 
 All notable changes to kuri are documented here.
 
+## [0.4.12] — 2026-07-25
+
+A hotfix for two problems that made the *installed* product diverge from the built one.
+
+### Fixes
+
+- **The installer never installed `kuri-mobile`.** `install.sh` copied out `kuri`, `kuri-agent`, `kuri-fetch` and `kuri-browse` — but not `kuri-mobile`, which has shipped inside the release tarball since 0.4.6. Because `kuri android` and `kuri ios` exec it as a *sibling* binary, every install since then left those subcommands failing with `failed to exec 'kuri-mobile'` despite a successful-looking install. Four releases of mobile work were undeliverable through the documented install path
+
+### Features
+
+- **`kuri update`** (alias `kuri upgrade`). Previously the only way to upgrade was to remember an installer URL and pipe it to a shell; `kuri update` was simply an unknown argument. It reads the stable channel manifest, compares the published version against the one compiled in, and installs if they differ
+  - `--check` reports what would happen and changes nothing
+  - `--dir=<path>` overrides the destination; by default it installs next to the running binary, so an update replaces *this* install rather than creating a second one that may or may not win on PATH
+  - The SHA-256 is verified **in process** rather than shelled out. `install.sh` tries `shasum`, then `sha256sum`, then `openssl`, and silently skips verification when none is present — a verification step that depends on what happens to be on PATH is one that can quietly not happen
+  - Binaries are installed by writing a temp file beside the target and `rename`-ing over it. Copying onto a running executable fails with `ETXTBSY` on Linux and can corrupt a concurrently-executing image elsewhere; rename is atomic and leaves the running process on its old inode
+  - `curl` is used purely as transport, deliberately: routing this through the in-tree TLS stack would let a TLS regression break the one command meant to repair it
+
 ## [0.4.11] — 2026-07-25
 
 ### Fixes — kuri no longer takes over your machine
