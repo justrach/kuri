@@ -128,6 +128,15 @@ jobs:
         with:
           ref: release-channel
           path: channel
+      # The tagged source tree. This job used to check out only the channel
+      # branch, so when publishing install.sh from the repo was added below
+      # there was no repo to copy it from: `cp install.sh` failed, and with
+      # `set -e` the whole job died before writing anything at all. v0.4.13
+      # published to GitHub Releases but never reached the channel, leaving
+      # `kuri update` and the curl-installer serving the previous release.
+      - uses: actions/checkout@v4
+        with:
+          path: repo
       - uses: actions/download-artifact@v4
         with:
           merge-multiple: true
@@ -148,7 +157,7 @@ jobs:
           # people actually `curl` did not, so every install produced a kuri
           # whose `android`/`ios` subcommands could not exec their sibling
           # binary. The file users run must be generated from the tagged tree.
-          cp install.sh channel/stable/install.sh
+          cp repo/install.sh channel/stable/install.sh
 
           python3 - <<'PY'
           from pathlib import Path
