@@ -2,6 +2,32 @@
 
 All notable changes to kuri are documented here.
 
+## [0.4.14] — 2026-07-26
+
+Android element extraction, rebuilt. `uitree` reported what was in the XML; what an agent needs is what can be *acted on*, and named the way it reads on screen. Prompted by a comparison against [CursorTouch/Android-MCP](https://github.com/CursorTouch/Android-MCP), whose element handling was better than ours even though kuri's command surface is roughly twice the size.
+
+### Fixes
+
+- **`android tap --label` never worked.** The tool table advertised the flag and `android tools` printed it, but the dispatcher only ever read positional coordinates — every documented invocation failed with `missing argument: x y`. It now resolves selectors, and the same selectors work on `find`
+- **No `cli.zig` test had ever run.** `main.zig` aggregates tests through an explicit `_ = @import(...)` block and both the Android and iOS dispatchers were missing from it, so their `test` blocks compiled but never executed and a deliberately failing assertion still reported success. That is how a flag could be advertised and unimplemented at the same time. Both are now in the list
+- **uiautomator attribute values were never XML-decoded.** A settings row labelled "Network & internet" was reported as `Network &amp; internet`, so the text an agent read differed from the text on screen and `--label "Network & internet"` could not match it. Named and numeric references are both decoded now, and an ampersand that is not part of an entity is preserved rather than swallowed
+- **Elements with no label were dropped entirely.** The filter kept anything clickable or carrying text/id/content-desc, which discards a scrollable `RecyclerView` or an unlabelled `Switch` — there was no way to discover the list could be scrolled
+
+### Features — Android
+
+- **`android state`** (alias `snapshot`). Foreground activity, screen size and every actionable element with tap-ready centroids, in one call instead of three (`current-activity`, `screen-info`, `uitree`) plus manual filtering
+- **Interactive-element detection.** `focusable`, `clickable`, `long-clickable`, `checkable`, `scrollable`, `selected` and `password`, plus a narrow widget-class allowlist for apps that ship a `Button` without setting `clickable`. `uitree --interactive` restricts output to these: on a Settings screen that is 72 elements down to 14
+- **Names are synthesized from descendants.** A clickable row whose label lives in child `TextView`s — the most common Android list layout there is — used to list as nameless and could not be addressed by label at all. The hierarchy is now parsed with its nesting intact, and a row takes its name from its children, stopping at children that are themselves actionable so their text stays attributed to them
+- **Selectors on `find` and `tap`**: `--id`, `--class`, `--desc` and `--index` alongside `--label`, AND-ed so they narrow. `--id` accepts either `btn_login` or `com.example.app:id/btn_login`, and listings print the short form, so what you read is what you can paste back
+- **State is reported, not just capability**: `*checked`/`*unchecked`, `*password`, `*focused`, `*selected`, `*scrollable`. Whether a switch is on is not something a label can tell you
+- **`android type --clear`** replaces a field's contents rather than appending to them. `input text` only appends, and Android has no select-all keyevent that holds across versions, so the character count comes from the focused element and the deletes go in one round trip
+- **`android notifications`** reads posted notifications as package/title/text; `--open` pulls the shade down instead. Needs no device driver
+- **`android wait <ms>`** for the settle `wait-for-ui` cannot express. Runs without a device attached, so it cannot fail a script with "no device attached"
+
+### Tests
+
+59 in `kuri-mobile`, up from 44 — and 8 of the previous 44 were never being executed. Verified live against a headless Android 16 emulator: `state`, `uitree --interactive`, the selectors, `tap --label` (launcher → Messages), `type --clear` (replaces, does not append), notification parsing, and entity decoding against a real Settings screen.
+
 ## [0.4.13] — 2026-07-26
 
 Seven HTTP routes answered with results they never obtained from the browser. Each returned `200` with a well-formed body, so no caller could distinguish "Chrome reported nothing" from "kuri never asked Chrome" — the failure mode that costs the most, because it looks exactly like success.

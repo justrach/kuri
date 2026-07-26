@@ -53,7 +53,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
         return;
     }
     if (std.mem.eql(u8, sub, "--version")) {
-        try writeStdout("kuri-mobile 0.4.13\n");
+        try writeStdout("kuri-mobile 0.4.14\n");
         return;
     }
 
@@ -122,8 +122,15 @@ fn reportError(err: anyerror) noreturn {
 }
 
 // Pull all module tests in.
+//
+// A file missing from this list is silently untested — its `test` blocks
+// compile but never run, and a broken assertion still reports success. Both
+// `cli.zig` dispatchers were absent, which is why `android tap --label` could
+// advertise a flag in the tool table that the argument parser never read.
 test {
     _ = @import("android/adb.zig");
+    _ = @import("android/cli.zig");
+    _ = @import("ios/cli.zig");
     _ = @import("android/driver.zig");
     _ = @import("common/uitree.zig");
     _ = @import("ios/usbmux.zig");

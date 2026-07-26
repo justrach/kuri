@@ -1,6 +1,6 @@
 ---
 name: kuri-android
-description: Use kuri-android to drive Android devices and emulators from the CLI via a native Zig adb wire-protocol client. Tap, swipe (scroll), double-tap, long-press, type text, press hardware/navigation keys, take PNG screenshots, dump the UI tree as a flat element list, launch/terminate apps by package, list installed packages, and list attached devices. Talks adb directly over TCP 127.0.0.1:5037 — never shells out to the `adb` binary at runtime. Trigger phrases include "tap on android phone", "screenshot the emulator", "list connected android devices", "dump the android ui tree", "launch chrome on android".
+description: Use kuri-android to drive Android devices and emulators from the CLI via a native Zig adb wire-protocol client. Read the screen with `state` (foreground app plus every actionable element, with tap-ready coordinates), tap by selector (--label/--id/--class/--desc/--index) rather than raw coordinates, swipe (scroll), double-tap, long-press, type text with --clear to replace a field, press hardware/navigation keys, take PNG screenshots, dump the UI tree, read notifications, launch/terminate apps by package, list installed packages, and list attached devices. Talks adb directly over TCP 127.0.0.1:5037 — never shells out to the `adb` binary at runtime. Trigger phrases include "tap on android phone", "screenshot the emulator", "list connected android devices", "dump the android ui tree", "what's on the android screen", "launch chrome on android".
 ---
 
 # kuri-android
@@ -55,38 +55,85 @@ kuri android launch com.android.chrome
 sleep 3
 kuri android screenshot chrome.png
 
-# 3. Read the UI as a flat element list
-kuri android uitree
-# @e0 Button "Sign in" @100,200-980,300 *clickable
-# @e1 TextView "Welcome" @40,120-700,180
-# ...
+# 3. Read the screen — start here, not with uitree
+kuri android state
+# app     mCurrentFocus=Window{... com.android.settings/.Settings}
+# screen  Physical size: 1080x2400
+# @e4  LinearLayout id=search_action_bar text=Search Settings  tap=540,178
+# @e19 LinearLayout id=  text=Network & internet Mobile, Wi-Fi, hotspot  tap=540,666
+# @e12 RecyclerView id=recycler_view text=  tap=540,1326  *scrollable
 
-# 4. Interact
-kuri android tap 540 1200
+# Full tree when you need static labels too; --interactive trims it
+kuri android uitree                 # everything meaningful (72 rows on Settings)
+kuri android uitree --interactive   # only what can be acted on (14 rows)
+
+# 4. Interact — prefer selectors over raw coordinates
+kuri android tap --label "Network & internet"
+kuri android tap --id search_action_bar
+kuri android tap --class Button --index 1     # 2nd Button on screen
 kuri android swipe 100 1500 100 500 250       # scroll up
-kuri android type "hello world"
+kuri android type --clear "hello world"       # replaces the field's contents
 kuri android press back
 ```
+
+Coordinates shift between devices and after any layout change; a selector
+survives both. `tap 540 1200` is still there for when you genuinely have a
+point rather than an element.
 
 ## Full command surface
 
 | Command | Purpose |
 |---|---|
 | `kuri android list-devices` | Enumerate via `host:devices` |
-| `kuri android tap <x> <y>` | Single tap at coords |
+| `kuri android state` | Foreground app + screen size + every actionable element (alias: `snapshot`) |
+| `kuri android uitree [--interactive]` | Flat element list from `uiautomator dump` |
+| `kuri android find <selector>` | Matching elements with tap-ready centroids; non-zero exit on no match |
+| `kuri android wait-for-ui --label <t>` | Block until an element appears (`--absent` to invert) |
+| `kuri android notifications [--open]` | Read posted notifications; `--open` pulls the shade down |
+| `kuri android current-activity` | Package/activity holding focus |
+| `kuri android screen-info` | Physical size and density |
+| `kuri android logcat [--last N] [--predicate T]` | Bounded log read |
+| `kuri android getprop <name>` / `dumpsys <section>` | Raw system state |
+| `kuri android tap <x> <y>` / `tap <selector>` | Tap a point or a resolved element |
 | `kuri android double-tap <x> <y>` | Double tap |
 | `kuri android long-press <x> <y> [ms]` | Long press, default 800 ms |
 | `kuri android swipe <x1> <y1> <x2> <y2> [ms]` | Swipe / scroll (alias: `scroll`) |
-| `kuri android type <text...>` | Type text via `input text` |
-| `kuri android press <button>` | `home|back|menu|enter|tab|space|del|volumeUp|volumeDown|power|dpadUp|dpadDown|dpadLeft|dpadRight|dpadCenter` |
+| `kuri android gesture <x,y> <x,y> ...` | Multi-point drag via `input motionevent` (alias: `drag`) |
+| `kuri android touch <down\|up\|move> <x> <y>` | Raw motion phase |
+| `kuri android type <text...> [--clear]` | Type text; `--clear` replaces the field |
+| `kuri android press <button>` | `home\|back\|menu\|enter\|tab\|space\|del\|recents\|volumeUp\|volumeDown\|power\|dpadUp\|dpadDown\|dpadLeft\|dpadRight\|dpadCenter` |
+| `kuri android keyevent <KEYCODE_*>` | Raw keycode |
+| `kuri android wait <ms>` | Sleep; needs no device |
+| `kuri android batch <action> ...` | Several actions over one adb session |
 | `kuri android screenshot [path.png]` | PNG from `exec:screencap -p` |
-| `kuri android uitree` | Flat element list from `uiautomator dump` |
 | `kuri android launch <package>` | `monkey -p <pkg> -c LAUNCHER 1` |
 | `kuri android terminate <package>` | `am force-stop` |
-| `kuri android list-apps` | `pm list packages` |
+| `kuri android openurl <url>` | VIEW intent (alias: `navigate`) |
+| `kuri android list-apps` / `uninstall <pkg>` / `clear <pkg>` | Package management |
+
+`kuri android tools --json` is the machine-readable version of this table and
+is generated from the same source, so it cannot drift from the dispatcher.
 
 Global flag: `--serial <id>` — target a specific device. Omit when
 exactly one device is attached.
+
+### Selectors
+
+`find` and `tap` accept `--label`, `--id`, `--class`, `--desc` and `--index`,
+AND-ed together so each one narrows the match:
+
+- `--label` searches text, resource-id and content-desc at once
+- `--id` takes either the short `btn_login` or the full
+  `com.example.app:id/btn_login`; listings print the short form
+- `--index N` picks the Nth match (0-based) when a selector is ambiguous —
+  `find` prints the ordinal in its first column
+- `--interactive` restricts to elements that can actually be acted on
+
+### Element flags
+
+`state` and `uitree` mark what an element's label cannot tell you:
+`*clickable`, `*long-clickable`, `*scrollable`, `*checked` / `*unchecked`,
+`*password`, `*focused`, `*selected`, `*disabled`.
 
 ## Native Zig surfaces (honesty)
 
@@ -95,9 +142,14 @@ exactly one device is attached.
   framing, issue `host:devices`, `host:transport:<serial>`, `shell:`
   and `exec:` services, and read framed or stream responses. We
   never shell out to the `adb` binary at runtime.
-- **UI tree parser** is a Zig XML scanner that flattens
-  `uiautomator dump` XML into a stable `@e<n>` element list with
-  bounds, text, content-desc, resource-id, clickable, enabled.
+- **UI tree parser** is a Zig XML scanner that turns `uiautomator dump`
+  XML into a stable `@e<n>` element list with bounds, text,
+  content-desc, resource-id and the interactivity/state attributes.
+  It tracks nesting, so a clickable row whose label lives in child
+  `TextView`s is named from those children — that layout is everywhere
+  on Android and such rows are otherwise unaddressable by label.
+  Attribute values are XML-decoded, so "Network & internet" matches the
+  string actually on screen rather than `Network &amp; internet`.
 - Device-side commands (`screencap`, `uiautomator dump`, `input`,
   `monkey`, `am`, `pm`) are Android OS binaries that the device's
   shell runs — we just frame the requests over adb from Zig.
