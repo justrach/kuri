@@ -8,7 +8,7 @@ const api_token = @import("server/api_token.zig");
 const lifecycle = @import("lifecycle.zig");
 const updater = @import("update.zig");
 
-const version = "0.4.12";
+const version = "0.4.13";
 
 const CliAction = enum {
     run,

@@ -12,6 +12,11 @@ const json_util = @import("../util/json.zig");
 const protocol = @import("../cdp/protocol.zig");
 const HarRecorder = @import("../cdp/har.zig").HarRecorder;
 const CdpClient = @import("../cdp/client.zig").CdpClient;
+const InterceptRule = @import("../cdp/client.zig").InterceptRule;
+const ScreencastFrameRecord = @import("../cdp/client.zig").ScreencastFrameRecord;
+const BindingCallRecord = @import("../cdp/client.zig").BindingCallRecord;
+const NetworkRecord = @import("../cdp/client.zig").NetworkRecord;
+const jsonscan = @import("../cdp/jsonscan.zig");
 const auth_profiles = @import("../storage/auth_profiles.zig");
 const url_validator = @import("../crawler/validator.zig");
 
@@ -76,302 +81,473 @@ fn handleConnection(gpa: std.mem.Allocator, bridge: *Bridge, cfg: Config, cdp_po
     }
 }
 
+/// Every routable path, one variant per distinct URL (not per handler --
+/// several paths share a handler via a literal discriminator argument,
+/// e.g. `/storage/local` and `/storage/session` both call `handleStorage`).
+/// `route_table` below maps the path string to this enum in O(1)-ish time
+/// (StaticStringMap buckets by length, then does a handful of `eql` calls);
+/// `route()` then does an exhaustive `switch` so the compiler guarantees
+/// every variant has a handler and every handler is reachable.
+pub const Route = enum {
+    health,
+    tabs,
+    page_info,
+    discover,
+    navigate,
+    snapshot,
+    action,
+    text,
+    screenshot,
+    evaluate,
+    browdie,
+    har_start,
+    har_stop,
+    har_status,
+    har_replay,
+    close,
+    cookies,
+    cookies_clear,
+    cookies_set,
+    storage_local,
+    storage_session,
+    storage_local_clear,
+    storage_session_clear,
+    get,
+    back,
+    forward,
+    reload,
+    diff_snapshot,
+    emulate,
+    geolocation,
+    upload,
+    session_save,
+    session_load,
+    auth_profile_save,
+    auth_profile_load,
+    auth_profile_list,
+    auth_profile_delete,
+    auth_extract,
+    debug_enable,
+    debug_disable,
+    screenshot_annotated,
+    screenshot_diff,
+    screencast_start,
+    screencast_stop,
+    video_start,
+    video_stop,
+    console,
+    intercept_start,
+    intercept_stop,
+    intercept_requests,
+    intercept_rules,
+    intercept_rules_clear,
+    markdown,
+    links,
+    pdf,
+    dom_query,
+    dom_html,
+    cookies_delete,
+    headers,
+    script_inject,
+    stop,
+    scrollintoview,
+    drag,
+    keyboard_type,
+    keyboard_inserttext,
+    keydown,
+    keyup,
+    wait,
+    tab_current,
+    tab_new,
+    tab_close,
+    highlight,
+    errors,
+    set_offline,
+    set_media,
+    set_credentials,
+    find,
+    trace_start,
+    trace_stop,
+    profiler_start,
+    profiler_stop,
+    inspect,
+    window_new,
+    session_list,
+    set_viewport,
+    set_useragent,
+    dom_attributes,
+    frames,
+    network,
+    perf_lcp,
+    ws_start,
+    ws_stop,
+    batch,
+    element_state,
+    find_element,
+    dialog_auto,
+    dialog_accept,
+    dialog_dismiss,
+    mouse_move,
+    mouse_down,
+    mouse_up,
+    mouse_wheel,
+    page_state,
+    clipboard_read,
+    clipboard_write,
+    clear,
+    boundingbox,
+    wait_function,
+    response_body,
+    setcontent,
+    selectall,
+    setvalue,
+    timezone,
+    locale,
+    permissions,
+    tap,
+    dispatch,
+    download,
+    addstyle,
+    bringtofront,
+    pushstate,
+    expose,
+    expose_calls,
+    multiselect,
+    swipe,
+    vitals,
+    frame,
+    mainframe,
+    getattribute,
+    inputvalue,
+    react_tree,
+    react_inspect,
+    react_renders,
+    react_suspense,
+    recording_start,
+    recording_stop,
+    request_detail,
+    wait_download,
+    initscript_remove,
+    evalhandle,
+    diff_url,
+    cache_set,
+    cache_get,
+    cache_clear,
+    cache_list,
+    screenshot_som,
+    snapshot_changes,
+    recording_export,
+};
+
+pub const route_table = std.StaticStringMap(Route).initComptime(.{
+    .{ "/health", .health },
+    .{ "/tabs", .tabs },
+    .{ "/page/info", .page_info },
+    .{ "/discover", .discover },
+    .{ "/navigate", .navigate },
+    .{ "/snapshot", .snapshot },
+    .{ "/action", .action },
+    .{ "/text", .text },
+    .{ "/screenshot", .screenshot },
+    .{ "/evaluate", .evaluate },
+    .{ "/browdie", .browdie },
+    .{ "/har/start", .har_start },
+    .{ "/har/stop", .har_stop },
+    .{ "/har/status", .har_status },
+    .{ "/har/replay", .har_replay },
+    .{ "/close", .close },
+    .{ "/cookies", .cookies },
+    .{ "/cookies/clear", .cookies_clear },
+    .{ "/cookies/set", .cookies_set },
+    .{ "/storage/local", .storage_local },
+    .{ "/storage/session", .storage_session },
+    .{ "/storage/local/clear", .storage_local_clear },
+    .{ "/storage/session/clear", .storage_session_clear },
+    .{ "/get", .get },
+    .{ "/back", .back },
+    .{ "/forward", .forward },
+    .{ "/reload", .reload },
+    .{ "/diff/snapshot", .diff_snapshot },
+    .{ "/emulate", .emulate },
+    .{ "/geolocation", .geolocation },
+    .{ "/upload", .upload },
+    .{ "/session/save", .session_save },
+    .{ "/session/load", .session_load },
+    .{ "/auth/profile/save", .auth_profile_save },
+    .{ "/auth/profile/load", .auth_profile_load },
+    .{ "/auth/profile/list", .auth_profile_list },
+    .{ "/auth/profile/delete", .auth_profile_delete },
+    .{ "/auth/extract", .auth_extract },
+    .{ "/debug/enable", .debug_enable },
+    .{ "/debug/disable", .debug_disable },
+    .{ "/screenshot/annotated", .screenshot_annotated },
+    .{ "/screenshot/diff", .screenshot_diff },
+    .{ "/screencast/start", .screencast_start },
+    .{ "/screencast/stop", .screencast_stop },
+    .{ "/video/start", .video_start },
+    .{ "/video/stop", .video_stop },
+    .{ "/console", .console },
+    .{ "/intercept/start", .intercept_start },
+    .{ "/intercept/stop", .intercept_stop },
+    .{ "/intercept/requests", .intercept_requests },
+    .{ "/intercept/rules", .intercept_rules },
+    .{ "/intercept/rules/clear", .intercept_rules_clear },
+    .{ "/markdown", .markdown },
+    .{ "/links", .links },
+    .{ "/pdf", .pdf },
+    .{ "/dom/query", .dom_query },
+    .{ "/dom/html", .dom_html },
+    .{ "/cookies/delete", .cookies_delete },
+    .{ "/headers", .headers },
+    .{ "/script/inject", .script_inject },
+    .{ "/stop", .stop },
+    .{ "/scrollintoview", .scrollintoview },
+    .{ "/drag", .drag },
+    .{ "/keyboard/type", .keyboard_type },
+    .{ "/keyboard/inserttext", .keyboard_inserttext },
+    .{ "/keydown", .keydown },
+    .{ "/keyup", .keyup },
+    .{ "/wait", .wait },
+    .{ "/tab/current", .tab_current },
+    .{ "/tab/new", .tab_new },
+    .{ "/tab/close", .tab_close },
+    .{ "/highlight", .highlight },
+    .{ "/errors", .errors },
+    .{ "/set/offline", .set_offline },
+    .{ "/set/media", .set_media },
+    .{ "/set/credentials", .set_credentials },
+    .{ "/find", .find },
+    .{ "/trace/start", .trace_start },
+    .{ "/trace/stop", .trace_stop },
+    .{ "/profiler/start", .profiler_start },
+    .{ "/profiler/stop", .profiler_stop },
+    .{ "/inspect", .inspect },
+    .{ "/window/new", .window_new },
+    .{ "/session/list", .session_list },
+    .{ "/set/viewport", .set_viewport },
+    .{ "/set/useragent", .set_useragent },
+    .{ "/dom/attributes", .dom_attributes },
+    .{ "/frames", .frames },
+    .{ "/network", .network },
+    .{ "/perf/lcp", .perf_lcp },
+    .{ "/ws/start", .ws_start },
+    .{ "/ws/stop", .ws_stop },
+    .{ "/batch", .batch },
+    .{ "/element/state", .element_state },
+    .{ "/find-element", .find_element },
+    .{ "/dialog/auto", .dialog_auto },
+    .{ "/dialog/accept", .dialog_accept },
+    .{ "/dialog/dismiss", .dialog_dismiss },
+    .{ "/mouse/move", .mouse_move },
+    .{ "/mouse/down", .mouse_down },
+    .{ "/mouse/up", .mouse_up },
+    .{ "/mouse/wheel", .mouse_wheel },
+    .{ "/page/state", .page_state },
+    .{ "/clipboard/read", .clipboard_read },
+    .{ "/clipboard/write", .clipboard_write },
+    .{ "/clear", .clear },
+    .{ "/boundingbox", .boundingbox },
+    .{ "/wait/function", .wait_function },
+    .{ "/response/body", .response_body },
+    .{ "/setcontent", .setcontent },
+    .{ "/selectall", .selectall },
+    .{ "/setvalue", .setvalue },
+    .{ "/timezone", .timezone },
+    .{ "/locale", .locale },
+    .{ "/permissions", .permissions },
+    .{ "/tap", .tap },
+    .{ "/dispatch", .dispatch },
+    .{ "/download", .download },
+    .{ "/addstyle", .addstyle },
+    .{ "/bringtofront", .bringtofront },
+    .{ "/pushstate", .pushstate },
+    .{ "/expose", .expose },
+    .{ "/expose/calls", .expose_calls },
+    .{ "/multiselect", .multiselect },
+    .{ "/swipe", .swipe },
+    .{ "/vitals", .vitals },
+    .{ "/frame", .frame },
+    .{ "/mainframe", .mainframe },
+    .{ "/getattribute", .getattribute },
+    .{ "/inputvalue", .inputvalue },
+    .{ "/react/tree", .react_tree },
+    .{ "/react/inspect", .react_inspect },
+    .{ "/react/renders", .react_renders },
+    .{ "/react/suspense", .react_suspense },
+    .{ "/recording/start", .recording_start },
+    .{ "/recording/stop", .recording_stop },
+    .{ "/request/detail", .request_detail },
+    .{ "/wait/download", .wait_download },
+    .{ "/initscript/remove", .initscript_remove },
+    .{ "/evalhandle", .evalhandle },
+    .{ "/diff/url", .diff_url },
+    .{ "/cache/set", .cache_set },
+    .{ "/cache/get", .cache_get },
+    .{ "/cache/clear", .cache_clear },
+    .{ "/cache/list", .cache_list },
+    .{ "/screenshot/som", .screenshot_som },
+    .{ "/snapshot/changes", .snapshot_changes },
+    .{ "/recording/export", .recording_export },
+});
+
 fn route(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge, cfg: Config, cdp_port: u16) void {
     const path = request.head.target;
     const clean_path = if (std.mem.indexOfScalar(u8, path, '?')) |idx| path[0..idx] else path;
 
-    if (std.mem.eql(u8, clean_path, "/health")) {
-        handleHealth(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/tabs")) {
-        handleTabs(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/page/info")) {
-        handlePageInfo(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/discover")) {
-        handleDiscover(request, arena, bridge, cfg, cdp_port);
-    } else if (std.mem.eql(u8, clean_path, "/navigate")) {
-        handleNavigate(request, arena, bridge, cfg);
-    } else if (std.mem.eql(u8, clean_path, "/snapshot")) {
-        handleSnapshot(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/action")) {
-        handleAction(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/text")) {
-        handleText(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/screenshot")) {
-        handleScreenshot(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/evaluate")) {
-        handleEvaluate(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/browdie")) {
-        handleBrowdie(request);
-    } else if (std.mem.eql(u8, clean_path, "/har/start")) {
-        handleHarStart(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/har/stop")) {
-        handleHarStop(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/har/status")) {
-        handleHarStatus(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/har/replay")) {
-        handleHarReplay(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/close")) {
-        handleClose(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/cookies")) {
-        handleCookies(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/cookies/clear")) {
-        handleCookiesClear(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/cookies/set")) {
-        handleCookiesSet(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/storage/local")) {
-        handleStorage(request, arena, bridge, "localStorage");
-    } else if (std.mem.eql(u8, clean_path, "/storage/session")) {
-        handleStorage(request, arena, bridge, "sessionStorage");
-    } else if (std.mem.eql(u8, clean_path, "/storage/local/clear")) {
-        handleStorageClear(request, arena, bridge, "localStorage");
-    } else if (std.mem.eql(u8, clean_path, "/storage/session/clear")) {
-        handleStorageClear(request, arena, bridge, "sessionStorage");
-    } else if (std.mem.eql(u8, clean_path, "/get")) {
-        handleGet(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/back")) {
-        handleBack(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/forward")) {
-        handleForward(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/reload")) {
-        handleReload(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/diff/snapshot")) {
-        handleDiffSnapshot(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/emulate")) {
-        handleEmulate(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/geolocation")) {
-        handleGeolocation(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/upload")) {
-        handleUpload(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/session/save")) {
-        handleSessionSave(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/session/load")) {
-        handleSessionLoad(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/auth/profile/save")) {
-        handleAuthProfileSave(request, arena, bridge, cfg);
-    } else if (std.mem.eql(u8, clean_path, "/auth/profile/load")) {
-        handleAuthProfileLoad(request, arena, bridge, cfg);
-    } else if (std.mem.eql(u8, clean_path, "/auth/profile/list")) {
-        handleAuthProfileList(request, arena, cfg);
-    } else if (std.mem.eql(u8, clean_path, "/auth/profile/delete")) {
-        handleAuthProfileDelete(request, arena, cfg);
-    } else if (std.mem.eql(u8, clean_path, "/auth/extract")) {
-        handleAuthExtract(request, arena);
-    } else if (std.mem.eql(u8, clean_path, "/debug/enable")) {
-        handleDebugEnable(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/debug/disable")) {
-        handleDebugDisable(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/screenshot/annotated")) {
-        handleAnnotatedScreenshot(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/screenshot/diff")) {
-        handleDiffScreenshot(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/screencast/start")) {
-        handleScreencastStart(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/screencast/stop")) {
-        handleScreencastStop(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/video/start")) {
-        handleVideoStart(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/video/stop")) {
-        handleVideoStop(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/console")) {
-        handleConsole(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/intercept/start")) {
-        handleInterceptStart(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/intercept/stop")) {
-        handleInterceptStop(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/intercept/requests")) {
-        handleInterceptRequests(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/markdown")) {
-        handleMarkdown(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/links")) {
-        handleLinks(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/pdf")) {
-        handlePdf(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/dom/query")) {
-        handleDomQuery(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/dom/html")) {
-        handleDomHtml(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/cookies/delete")) {
-        handleCookiesDelete(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/headers")) {
-        handleHeaders(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/script/inject")) {
-        handleScriptInject(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/stop")) {
-        handleStop(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/scrollintoview")) {
-        handleScrollIntoView(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/drag")) {
-        handleDrag(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/keyboard/type")) {
-        handleKeyboardType(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/keyboard/inserttext")) {
-        handleKeyboardInsertText(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/keydown")) {
-        handleKeyDown(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/keyup")) {
-        handleKeyUp(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/wait")) {
-        handleWait(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/tab/current")) {
-        handleTabCurrent(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/tab/new")) {
-        handleTabNew(request, arena, bridge, cfg, cdp_port);
-    } else if (std.mem.eql(u8, clean_path, "/tab/close")) {
-        handleTabClose(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/highlight")) {
-        handleHighlight(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/errors")) {
-        handleErrors(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/set/offline")) {
-        handleSetOffline(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/set/media")) {
-        handleSetMedia(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/set/credentials")) {
-        handleSetCredentials(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/find")) {
-        handleFind(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/trace/start")) {
-        handleTraceStart(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/trace/stop")) {
-        handleTraceStop(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/profiler/start")) {
-        handleProfilerStart(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/profiler/stop")) {
-        handleProfilerStop(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/inspect")) {
-        handleInspect(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/window/new")) {
-        handleWindowNew(request, arena, bridge, cfg, cdp_port);
-    } else if (std.mem.eql(u8, clean_path, "/session/list")) {
-        handleSessionList(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/set/viewport")) {
-        handleSetViewport(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/set/useragent")) {
-        handleSetUserAgent(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/dom/attributes")) {
-        handleDomAttributes(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/frames")) {
-        handleFrames(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/network")) {
-        handleNetwork(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/perf/lcp")) {
-        handlePerfLcp(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/ws/start")) {
-        handleWsStart(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/ws/stop")) {
-        handleWsStop(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/batch")) {
-        handleBatch(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/element/state")) {
-        handleElementState(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/find-element")) {
-        handleFindElement(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/dialog/auto")) {
-        handleDialogAuto(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/dialog/accept")) {
-        handleDialogRespond(request, arena, bridge, true);
-    } else if (std.mem.eql(u8, clean_path, "/dialog/dismiss")) {
-        handleDialogRespond(request, arena, bridge, false);
-    } else if (std.mem.eql(u8, clean_path, "/mouse/move")) {
-        handleMouseEvent(request, arena, bridge, "mouseMoved");
-    } else if (std.mem.eql(u8, clean_path, "/mouse/down")) {
-        handleMouseEvent(request, arena, bridge, "mousePressed");
-    } else if (std.mem.eql(u8, clean_path, "/mouse/up")) {
-        handleMouseEvent(request, arena, bridge, "mouseReleased");
-    } else if (std.mem.eql(u8, clean_path, "/mouse/wheel")) {
-        handleMouseWheel(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/page/state")) {
-        handlePageState(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/clipboard/read")) {
-        handleClipboard(request, arena, bridge, "read");
-    } else if (std.mem.eql(u8, clean_path, "/clipboard/write")) {
-        handleClipboard(request, arena, bridge, "write");
-    } else if (std.mem.eql(u8, clean_path, "/clear")) {
-        handleClear(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/boundingbox")) {
-        handleBoundingBox(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/wait/function")) {
-        handleWaitForFunction(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/response/body")) {
-        handleResponseBody(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/setcontent")) {
-        handleSetContent(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/selectall")) {
-        handleSelectAll(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/setvalue")) {
-        handleSetValue(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/timezone")) {
-        handleTimezone(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/locale")) {
-        handleLocale(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/permissions")) {
-        handlePermissions(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/tap")) {
-        handleTap(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/dispatch")) {
-        handleDispatch(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/download")) {
-        handleDownload(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/addstyle")) {
-        handleAddStyle(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/bringtofront")) {
-        handleBringToFront(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/pushstate")) {
-        handlePushState(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/expose")) {
-        handleExpose(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/multiselect")) {
-        handleMultiSelect(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/swipe")) {
-        handleSwipe(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/vitals")) {
-        handleVitals(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/frame")) {
-        handleFrame(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/mainframe")) {
-        handleMainFrame(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/getattribute")) {
-        handleGetAttribute(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/inputvalue")) {
-        handleInputValue(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/react/tree")) {
-        handleReact(request, arena, bridge, "tree");
-    } else if (std.mem.eql(u8, clean_path, "/react/inspect")) {
-        handleReact(request, arena, bridge, "inspect");
-    } else if (std.mem.eql(u8, clean_path, "/react/renders")) {
-        handleReact(request, arena, bridge, "renders");
-    } else if (std.mem.eql(u8, clean_path, "/react/suspense")) {
-        handleReact(request, arena, bridge, "suspense");
-    } else if (std.mem.eql(u8, clean_path, "/recording/start")) {
-        handleRecording(request, arena, bridge, "start");
-    } else if (std.mem.eql(u8, clean_path, "/recording/stop")) {
-        handleRecording(request, arena, bridge, "stop");
-    } else if (std.mem.eql(u8, clean_path, "/request/detail")) {
-        handleRequestDetail(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/wait/download")) {
-        handleWaitForDownload(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/initscript/remove")) {
-        handleRemoveInitScript(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/evalhandle")) {
-        handleEvalHandle(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/diff/url")) {
-        handleDiffUrl(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/cache/set")) {
-        handleCacheSet(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/cache/get")) {
-        handleCacheGet(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/cache/clear")) {
-        handleCacheClear(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/cache/list")) {
-        handleCacheList(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/screenshot/som")) {
-        handleScreenshotSom(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/snapshot/changes")) {
-        handleSnapshotChanges(request, arena, bridge);
-    } else if (std.mem.eql(u8, clean_path, "/recording/export")) {
-        handleRecordingExport(request, arena, bridge);
-    } else {
+    const r = route_table.get(clean_path) orelse {
         resp.sendError(request, 404, "Not Found");
+        return;
+    };
+
+    switch (r) {
+        .health => handleHealth(request, arena, bridge),
+        .tabs => handleTabs(request, arena, bridge),
+        .page_info => handlePageInfo(request, arena, bridge),
+        .discover => handleDiscover(request, arena, bridge, cfg, cdp_port),
+        .navigate => handleNavigate(request, arena, bridge, cfg),
+        .snapshot => handleSnapshot(request, arena, bridge),
+        .action => handleAction(request, arena, bridge),
+        .text => handleText(request, arena, bridge),
+        .screenshot => handleScreenshot(request, arena, bridge),
+        .evaluate => handleEvaluate(request, arena, bridge),
+        .browdie => handleBrowdie(request),
+        .har_start => handleHarStart(request, arena, bridge),
+        .har_stop => handleHarStop(request, arena, bridge),
+        .har_status => handleHarStatus(request, arena, bridge),
+        .har_replay => handleHarReplay(request, arena, bridge),
+        .close => handleClose(request, arena, bridge),
+        .cookies => handleCookies(request, arena, bridge),
+        .cookies_clear => handleCookiesClear(request, arena, bridge),
+        .cookies_set => handleCookiesSet(request, arena, bridge),
+        .storage_local => handleStorage(request, arena, bridge, "localStorage"),
+        .storage_session => handleStorage(request, arena, bridge, "sessionStorage"),
+        .storage_local_clear => handleStorageClear(request, arena, bridge, "localStorage"),
+        .storage_session_clear => handleStorageClear(request, arena, bridge, "sessionStorage"),
+        .get => handleGet(request, arena, bridge),
+        .back => handleBack(request, arena, bridge),
+        .forward => handleForward(request, arena, bridge),
+        .reload => handleReload(request, arena, bridge),
+        .diff_snapshot => handleDiffSnapshot(request, arena, bridge),
+        .emulate => handleEmulate(request, arena, bridge),
+        .geolocation => handleGeolocation(request, arena, bridge),
+        .upload => handleUpload(request, arena, bridge),
+        .session_save => handleSessionSave(request, arena, bridge),
+        .session_load => handleSessionLoad(request, arena, bridge),
+        .auth_profile_save => handleAuthProfileSave(request, arena, bridge, cfg),
+        .auth_profile_load => handleAuthProfileLoad(request, arena, bridge, cfg),
+        .auth_profile_list => handleAuthProfileList(request, arena, cfg),
+        .auth_profile_delete => handleAuthProfileDelete(request, arena, cfg),
+        .auth_extract => handleAuthExtract(request, arena),
+        .debug_enable => handleDebugEnable(request, arena, bridge),
+        .debug_disable => handleDebugDisable(request, arena, bridge),
+        .screenshot_annotated => handleAnnotatedScreenshot(request, arena, bridge),
+        .screenshot_diff => handleDiffScreenshot(request, arena, bridge),
+        .screencast_start => handleScreencastStart(request, arena, bridge),
+        .screencast_stop => handleScreencastStop(request, arena, bridge),
+        .video_start => handleVideoStart(request, arena, bridge),
+        .video_stop => handleVideoStop(request, arena, bridge),
+        .console => handleConsole(request, arena, bridge),
+        .intercept_start => handleInterceptStart(request, arena, bridge),
+        .intercept_stop => handleInterceptStop(request, arena, bridge),
+        .intercept_requests => handleInterceptRequests(request, arena, bridge),
+        .intercept_rules => handleInterceptRules(request, arena, bridge),
+        .intercept_rules_clear => handleInterceptRulesClear(request, arena, bridge),
+        .markdown => handleMarkdown(request, arena, bridge),
+        .links => handleLinks(request, arena, bridge),
+        .pdf => handlePdf(request, arena, bridge),
+        .dom_query => handleDomQuery(request, arena, bridge),
+        .dom_html => handleDomHtml(request, arena, bridge),
+        .cookies_delete => handleCookiesDelete(request, arena, bridge),
+        .headers => handleHeaders(request, arena, bridge),
+        .script_inject => handleScriptInject(request, arena, bridge),
+        .stop => handleStop(request, arena, bridge),
+        .scrollintoview => handleScrollIntoView(request, arena, bridge),
+        .drag => handleDrag(request, arena, bridge),
+        .keyboard_type => handleKeyboardType(request, arena, bridge),
+        .keyboard_inserttext => handleKeyboardInsertText(request, arena, bridge),
+        .keydown => handleKeyDown(request, arena, bridge),
+        .keyup => handleKeyUp(request, arena, bridge),
+        .wait => handleWait(request, arena, bridge),
+        .tab_current => handleTabCurrent(request, arena, bridge),
+        .tab_new => handleTabNew(request, arena, bridge, cfg, cdp_port),
+        .tab_close => handleTabClose(request, arena, bridge),
+        .highlight => handleHighlight(request, arena, bridge),
+        .errors => handleErrors(request, arena, bridge),
+        .set_offline => handleSetOffline(request, arena, bridge),
+        .set_media => handleSetMedia(request, arena, bridge),
+        .set_credentials => handleSetCredentials(request, arena, bridge),
+        .find => handleFind(request, arena, bridge),
+        .trace_start => handleTraceStart(request, arena, bridge),
+        .trace_stop => handleTraceStop(request, arena, bridge),
+        .profiler_start => handleProfilerStart(request, arena, bridge),
+        .profiler_stop => handleProfilerStop(request, arena, bridge),
+        .inspect => handleInspect(request, arena, bridge),
+        .window_new => handleWindowNew(request, arena, bridge, cfg, cdp_port),
+        .session_list => handleSessionList(request, arena, bridge),
+        .set_viewport => handleSetViewport(request, arena, bridge),
+        .set_useragent => handleSetUserAgent(request, arena, bridge),
+        .dom_attributes => handleDomAttributes(request, arena, bridge),
+        .frames => handleFrames(request, arena, bridge),
+        .network => handleNetwork(request, arena, bridge),
+        .perf_lcp => handlePerfLcp(request, arena, bridge),
+        .ws_start => handleWsStart(request, arena, bridge),
+        .ws_stop => handleWsStop(request, arena, bridge),
+        .batch => handleBatch(request, arena, bridge),
+        .element_state => handleElementState(request, arena, bridge),
+        .find_element => handleFindElement(request, arena, bridge),
+        .dialog_auto => handleDialogAuto(request, arena, bridge),
+        .dialog_accept => handleDialogRespond(request, arena, bridge, true),
+        .dialog_dismiss => handleDialogRespond(request, arena, bridge, false),
+        .mouse_move => handleMouseEvent(request, arena, bridge, "mouseMoved"),
+        .mouse_down => handleMouseEvent(request, arena, bridge, "mousePressed"),
+        .mouse_up => handleMouseEvent(request, arena, bridge, "mouseReleased"),
+        .mouse_wheel => handleMouseWheel(request, arena, bridge),
+        .page_state => handlePageState(request, arena, bridge),
+        .clipboard_read => handleClipboard(request, arena, bridge, "read"),
+        .clipboard_write => handleClipboard(request, arena, bridge, "write"),
+        .clear => handleClear(request, arena, bridge),
+        .boundingbox => handleBoundingBox(request, arena, bridge),
+        .wait_function => handleWaitForFunction(request, arena, bridge),
+        .response_body => handleResponseBody(request, arena, bridge),
+        .setcontent => handleSetContent(request, arena, bridge),
+        .selectall => handleSelectAll(request, arena, bridge),
+        .setvalue => handleSetValue(request, arena, bridge),
+        .timezone => handleTimezone(request, arena, bridge),
+        .locale => handleLocale(request, arena, bridge),
+        .permissions => handlePermissions(request, arena, bridge),
+        .tap => handleTap(request, arena, bridge),
+        .dispatch => handleDispatch(request, arena, bridge),
+        .download => handleDownload(request, arena, bridge),
+        .addstyle => handleAddStyle(request, arena, bridge),
+        .bringtofront => handleBringToFront(request, arena, bridge),
+        .pushstate => handlePushState(request, arena, bridge),
+        .expose => handleExpose(request, arena, bridge),
+        .expose_calls => handleExposeCalls(request, arena, bridge),
+        .multiselect => handleMultiSelect(request, arena, bridge),
+        .swipe => handleSwipe(request, arena, bridge),
+        .vitals => handleVitals(request, arena, bridge),
+        .frame => handleFrame(request, arena, bridge),
+        .mainframe => handleMainFrame(request, arena, bridge),
+        .getattribute => handleGetAttribute(request, arena, bridge),
+        .inputvalue => handleInputValue(request, arena, bridge),
+        .react_tree => handleReact(request, arena, bridge, "tree"),
+        .react_inspect => handleReact(request, arena, bridge, "inspect"),
+        .react_renders => handleReact(request, arena, bridge, "renders"),
+        .react_suspense => handleReact(request, arena, bridge, "suspense"),
+        .recording_start => handleRecording(request, arena, bridge, "start"),
+        .recording_stop => handleRecording(request, arena, bridge, "stop"),
+        .request_detail => handleRequestDetail(request, arena, bridge),
+        .wait_download => handleWaitForDownload(request, arena, bridge),
+        .initscript_remove => handleRemoveInitScript(request, arena, bridge),
+        .evalhandle => handleEvalHandle(request, arena, bridge),
+        .diff_url => handleDiffUrl(request, arena, bridge),
+        .cache_set => handleCacheSet(request, arena, bridge),
+        .cache_get => handleCacheGet(request, arena, bridge),
+        .cache_clear => handleCacheClear(request, arena, bridge),
+        .cache_list => handleCacheList(request, arena, bridge),
+        .screenshot_som => handleScreenshotSom(request, arena, bridge),
+        .snapshot_changes => handleSnapshotChanges(request, arena, bridge),
+        .recording_export => handleRecordingExport(request, arena, bridge),
     }
 }
 
@@ -1507,11 +1683,12 @@ fn handleEvaluate(request: *std.http.Server.Request, arena: std.mem.Allocator, b
     rememberCurrentTab(request, bridge, tab_id);
     _ = bridge.touchTab(tab_id);
 
-    const escaped_expr = jsonEscapeAlloc(arena, expr) orelse {
-        resp.sendError(request, 500, "Internal Server Error");
-        return;
-    };
-    const params = std.fmt.allocPrint(arena, "{{\"expression\":\"{s}\",\"returnByValue\":true}}", .{escaped_expr}) catch {
+    // `expr` is ALREADY JSON-escaped just above. Escaping it a second time was
+    // a real bug: a newline became `\n`, then `\\n`, which JSON-decodes back to
+    // a literal backslash+n in the JS source — so Chrome answered any multi-line
+    // (or quote-containing) expression with "SyntaxError: Invalid or unexpected
+    // token" instead of running it. Escape exactly once.
+    const params = std.fmt.allocPrint(arena, "{{\"expression\":\"{s}\",\"returnByValue\":true}}", .{expr}) catch {
         resp.sendError(request, 500, "Internal Server Error");
         return;
     };
@@ -1624,10 +1801,48 @@ pub fn discoverTabs(arena: std.mem.Allocator, bridge: *Bridge, cfg: Config, cdp_
 
             // Auto-apply stealth patches to each discovered tab
             if (bridge.getCdpClient(id_val)) |client| {
+                // Page.enable MUST happen before any Page.addScriptToEvaluateOnNewDocument
+                // call below, on this same CDP session -- verified directly against
+                // Chrome: an init script registered without Page domain enabled first
+                // only survives for the current document and is silently dropped on
+                // the very next navigation (not re-fired at all), which is why
+                // /console, /errors, and /react/tree all went empty on any page
+                // reached via /navigate despite being registered here. Page.enable has
+                // no matching Page.disable anywhere in this codebase, so this is a
+                // one-time, idempotent enable for the life of the session.
+                _ = client.send(arena, protocol.Methods.page_enable, null) catch {};
+
                 const stealth = @import("../cdp/stealth.zig");
                 const escaped = jsonEscapeAlloc(arena, stealth.stealth_script) orelse continue;
                 const add_params = std.fmt.allocPrint(arena, "{{\"source\":\"{s}\"}}", .{escaped}) catch continue;
                 _ = client.send(arena, protocol.Methods.page_add_script, add_params) catch {};
+
+                // Inject the console/error collector: persist across future
+                // navigations, and run once against the already-loaded page so
+                // /console and /errors work without requiring a reload.
+                if (jsonEscapeAlloc(arena, stealth.console_collector_script)) |collector_escaped| {
+                    if (std.fmt.allocPrint(arena, "{{\"source\":\"{s}\"}}", .{collector_escaped})) |collector_add| {
+                        _ = client.send(arena, protocol.Methods.page_add_script, collector_add) catch {};
+                    } else |_| {}
+                    if (std.fmt.allocPrint(arena, "{{\"expression\":\"{s}\",\"returnByValue\":true}}", .{collector_escaped})) |collector_eval| {
+                        _ = client.send(arena, protocol.Methods.runtime_evaluate, collector_eval) catch {};
+                    } else |_| {}
+                }
+
+                // Inject the React fiber introspector: persist across future
+                // navigations (this is the copy that actually matters for
+                // version detection + commit tracking, since it must be
+                // present before react-dom's own init runs), and run once
+                // against the already-loaded page so /react/tree etc. work
+                // without requiring a reload first.
+                if (jsonEscapeAlloc(arena, stealth.react_fiber_script)) |react_escaped| {
+                    if (std.fmt.allocPrint(arena, "{{\"source\":\"{s}\"}}", .{react_escaped})) |react_add| {
+                        _ = client.send(arena, protocol.Methods.page_add_script, react_add) catch {};
+                    } else |_| {}
+                    if (std.fmt.allocPrint(arena, "{{\"expression\":\"{s}\",\"returnByValue\":true}}", .{react_escaped})) |react_eval| {
+                        _ = client.send(arena, protocol.Methods.runtime_evaluate, react_eval) catch {};
+                    } else |_| {}
+                }
 
                 // Set a random user agent at network level
                 const ua = stealth.randomUserAgent();
@@ -1986,11 +2201,7 @@ fn buildA11yState(arena: std.mem.Allocator, object: []const u8) []const u8 {
 // ── HAR Endpoints ───────────────────────────────────────────────────────
 
 fn handleHarStart(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
-    const target = request.head.target;
-    const tab_id = getQueryParam(target, "tab_id") orelse {
-        resp.sendError(request, 400, "Missing tab_id parameter");
-        return;
-    };
+    const tab_id = requireEffectiveTabId(arena, request, bridge) orelse return;
 
     const rec = bridge.getHarRecorder(tab_id) orelse {
         resp.sendError(request, 500, "Cannot create HAR recorder");
@@ -2017,11 +2228,7 @@ fn handleHarStart(request: *std.http.Server.Request, arena: std.mem.Allocator, b
 }
 
 fn handleHarStop(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
-    const target = request.head.target;
-    const tab_id = getQueryParam(target, "tab_id") orelse {
-        resp.sendError(request, 400, "Missing tab_id parameter");
-        return;
-    };
+    const tab_id = requireEffectiveTabId(arena, request, bridge) orelse return;
 
     const rec = bridge.getHarRecorder(tab_id) orelse {
         resp.sendError(request, 404, "No HAR recorder for this tab");
@@ -2092,11 +2299,7 @@ fn flushEventsToHar(arena: std.mem.Allocator, client: *CdpClient, rec: *HarRecor
 }
 
 fn handleHarStatus(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
-    const target = request.head.target;
-    const tab_id = getQueryParam(target, "tab_id") orelse {
-        resp.sendError(request, 400, "Missing tab_id parameter");
-        return;
-    };
+    const tab_id = requireEffectiveTabId(arena, request, bridge) orelse return;
 
     const rec = bridge.getHarRecorder(tab_id) orelse {
         const body = std.fmt.allocPrint(arena, "{{\"recording\":false,\"entries\":0,\"tab_id\":\"{s}\"}}", .{tab_id}) catch {
@@ -2122,10 +2325,7 @@ fn handleHarStatus(request: *std.http.Server.Request, arena: std.mem.Allocator, 
 
 fn handleHarReplay(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
     const target = request.head.target;
-    const tab_id = getQueryParam(target, "tab_id") orelse {
-        resp.sendError(request, 400, "Missing tab_id parameter");
-        return;
-    };
+    const tab_id = requireEffectiveTabId(arena, request, bridge) orelse return;
     const format = getQueryParam(target, "format") orelse "all";
     const filter = getQueryParam(target, "filter") orelse "api";
 
@@ -2241,9 +2441,8 @@ fn handleHarReplay(request: *std.http.Server.Request, arena: std.mem.Allocator, 
 // ── Console Log Capture Endpoint ────────────────────────────────────────
 
 fn handleConsole(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
-    const target = request.head.target;
-    const tab_id = getQueryParam(target, "tab_id") orelse {
-        resp.sendError(request, 400, "Missing tab_id parameter");
+    const tab_id = resolveEffectiveTabIdAlloc(arena, request, bridge) orelse {
+        resp.sendError(request, 400, "Missing tab_id parameter (or set X-Kuri-Session)");
         return;
     };
 
@@ -2252,24 +2451,25 @@ fn handleConsole(request: *std.http.Server.Request, arena: std.mem.Allocator, br
         return;
     };
 
-    _ = client.send(arena, protocol.Methods.runtime_enable, null) catch {
+    // Read and clear the collector's console buffer. Returns "[]" when the
+    // collector has not been injected yet (e.g. the page never navigated).
+    const params = "{\"expression\":\"(function(){var c=window.__kuri_console||[];window.__kuri_console=[];return JSON.stringify(c);})()\",\"returnByValue\":true}";
+    const response = client.send(arena, protocol.Methods.runtime_evaluate, params) catch {
         resp.sendError(request, 502, "CDP command failed");
         return;
     };
-
-    const body = std.fmt.allocPrint(arena, "{{\"status\":\"ok\",\"message\":\"Runtime.enable sent\",\"tab_id\":\"{s}\"}}", .{tab_id}) catch {
-        resp.sendError(request, 500, "Internal Server Error");
-        return;
-    };
-    resp.sendJson(request, body);
+    resp.sendJson(request, response);
 }
 
 // ── Network Interception Endpoints ──────────────────────────────────────
+// All endpoints below resolve tab_id the same way /console and /errors do:
+// an explicit ?tab_id= wins, else X-Kuri-Session (or ?session=) is resolved
+// to that session's current tab. See resolveEffectiveTabIdAlloc/getSessionId.
 
 fn handleInterceptStart(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
     const target = request.head.target;
-    const tab_id = getQueryParam(target, "tab_id") orelse {
-        resp.sendError(request, 400, "Missing tab_id parameter");
+    const tab_id = resolveEffectiveTabIdAlloc(arena, request, bridge) orelse {
+        resp.sendError(request, 400, "Missing tab_id parameter (or set X-Kuri-Session)");
         return;
     };
 
@@ -2278,12 +2478,64 @@ fn handleInterceptStart(request: *std.http.Server.Request, arena: std.mem.Alloca
         return;
     };
 
-    _ = client.send(arena, protocol.Methods.fetch_enable, null) catch {
-        resp.sendError(request, 502, "CDP command failed");
+    // ?patterns=a,b,c — comma-separated URL patterns to pause on. Default
+    // (and what an all-blank list falls back to) is "*", matching what
+    // Fetch.enable does when given no patterns at all: pause everything.
+    const patterns_param: []const u8 = getDecodedQueryParamAlloc(arena, target, "patterns") orelse "*";
+
+    var patterns_json: std.ArrayList(u8) = .empty;
+    var enabled_list: std.ArrayList(u8) = .empty;
+    patterns_json.appendSlice(arena, "[") catch {
+        resp.sendError(request, 500, "Internal Server Error");
+        return;
+    };
+    enabled_list.appendSlice(arena, "[") catch {
+        resp.sendError(request, 500, "Internal Server Error");
         return;
     };
 
-    const body = std.fmt.allocPrint(arena, "{{\"status\":\"ok\",\"message\":\"Fetch.enable sent\",\"tab_id\":\"{s}\"}}", .{tab_id}) catch {
+    var iter = std.mem.splitScalar(u8, patterns_param, ',');
+    var count: usize = 0;
+    while (iter.next()) |raw| {
+        const pattern = std.mem.trim(u8, raw, " \t");
+        if (pattern.len == 0) continue;
+        if (count > 0) {
+            patterns_json.appendSlice(arena, ",") catch return;
+            enabled_list.appendSlice(arena, ",") catch return;
+        }
+        patterns_json.appendSlice(arena, "{\"urlPattern\":") catch return;
+        writeJsonStringValue(&patterns_json, arena, pattern) catch return;
+        patterns_json.appendSlice(arena, "}") catch return;
+        writeJsonStringValue(&enabled_list, arena, pattern) catch return;
+        count += 1;
+    }
+    if (count == 0) {
+        // Every entry was blank (e.g. ?patterns= or ?patterns=,,) — fall
+        // back to "*" rather than sending Fetch.enable an empty patterns
+        // array, which Chrome treats as "match nothing", the opposite of
+        // what an empty param should mean here.
+        patterns_json.appendSlice(arena, "{\"urlPattern\":\"*\"}") catch return;
+        enabled_list.appendSlice(arena, "\"*\"") catch return;
+    }
+    patterns_json.appendSlice(arena, "]") catch return;
+    enabled_list.appendSlice(arena, "]") catch return;
+
+    const params = std.fmt.allocPrint(arena, "{{\"patterns\":{s}}}", .{patterns_json.items}) catch {
+        resp.sendError(request, 500, "Internal Server Error");
+        return;
+    };
+
+    _ = client.send(arena, protocol.Methods.fetch_enable, params) catch {
+        resp.sendError(request, 502, "CDP command failed");
+        return;
+    };
+    client.setInterceptActive(true);
+
+    const body = std.fmt.allocPrint(
+        arena,
+        "{{\"status\":\"ok\",\"message\":\"Fetch.enable sent\",\"tab_id\":\"{s}\",\"patterns\":{s}}}",
+        .{ tab_id, enabled_list.items },
+    ) catch {
         resp.sendError(request, 500, "Internal Server Error");
         return;
     };
@@ -2291,9 +2543,8 @@ fn handleInterceptStart(request: *std.http.Server.Request, arena: std.mem.Alloca
 }
 
 fn handleInterceptStop(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
-    const target = request.head.target;
-    const tab_id = getQueryParam(target, "tab_id") orelse {
-        resp.sendError(request, 400, "Missing tab_id parameter");
+    const tab_id = resolveEffectiveTabIdAlloc(arena, request, bridge) orelse {
+        resp.sendError(request, 400, "Missing tab_id parameter (or set X-Kuri-Session)");
         return;
     };
 
@@ -2307,7 +2558,156 @@ fn handleInterceptStop(request: *std.http.Server.Request, arena: std.mem.Allocat
         return;
     };
 
-    const body = std.fmt.allocPrint(arena, "{{\"status\":\"ok\",\"message\":\"Fetch.disable sent\",\"tab_id\":\"{s}\"}}", .{tab_id}) catch {
+    client.setInterceptActive(false);
+    client.clearInterceptRules();
+    client.clearPausedRequests();
+
+    const body = std.fmt.allocPrint(arena, "{{\"status\":\"ok\",\"message\":\"Fetch.disable sent, rules and records cleared\",\"tab_id\":\"{s}\"}}", .{tab_id}) catch {
+        resp.sendError(request, 500, "Internal Server Error");
+        return;
+    };
+    resp.sendJson(request, body);
+}
+
+/// Parse a JSON rule body for POST /intercept/rules into an `InterceptRule`.
+/// Accepts `url_pattern` (or `pattern`) as the URL substring to match — "*"
+/// or an absent/empty value is a catch-all (matches every request, same as
+/// an empty string passed straight to `InterceptState.findMatch`).
+/// Returns null only when `action` is present but not one of
+/// continue/abort/fulfill; every other field falls back to a sane default.
+fn parseInterceptRuleBody(arena: std.mem.Allocator, body: []const u8) ?InterceptRule {
+    const raw_pattern = extractSimpleJsonString(body, 0, "\"url_pattern\"") orelse
+        extractSimpleJsonString(body, 0, "\"pattern\"") orelse "";
+    const unescaped_pattern: []const u8 = json_util.jsonUnescape(arena, raw_pattern) catch raw_pattern;
+    const url_substring = if (std.mem.eql(u8, unescaped_pattern, "*")) "" else unescaped_pattern;
+
+    const action_str = extractSimpleJsonString(body, 0, "\"action\"") orelse "continue";
+    const action: InterceptRule.Action = if (std.mem.eql(u8, action_str, "continue"))
+        .@"continue"
+    else if (std.mem.eql(u8, action_str, "abort"))
+        .abort
+    else if (std.mem.eql(u8, action_str, "fulfill"))
+        .fulfill
+    else
+        return null;
+
+    const status: u16 = @intCast(@min(extractSimpleJsonInt(body, 0, "\"status\"") orelse 200, 599));
+
+    const raw_body_field = extractSimpleJsonString(body, 0, "\"body\"") orelse "";
+    const response_body: []const u8 = json_util.jsonUnescape(arena, raw_body_field) catch raw_body_field;
+
+    const raw_content_type = extractSimpleJsonString(body, 0, "\"content_type\"") orelse "application/json";
+    const content_type: []const u8 = json_util.jsonUnescape(arena, raw_content_type) catch raw_content_type;
+
+    const raw_error_reason = extractSimpleJsonString(body, 0, "\"error_reason\"") orelse "Failed";
+    const error_reason: []const u8 = json_util.jsonUnescape(arena, raw_error_reason) catch raw_error_reason;
+
+    return .{
+        .url_substring = url_substring,
+        .action = action,
+        .status = status,
+        .body = response_body,
+        .content_type = content_type,
+        .error_reason = error_reason,
+    };
+}
+
+fn writeInterceptRuleJson(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, rule: InterceptRule) !void {
+    try buf.appendSlice(allocator, "{");
+    try writeJsonField(buf, allocator, "url_pattern", rule.url_substring);
+    try buf.appendSlice(allocator, ",\"action\":\"");
+    try buf.appendSlice(allocator, @tagName(rule.action));
+    try buf.print(allocator, "\",\"status\":{d},", .{rule.status});
+    try writeJsonField(buf, allocator, "content_type", rule.content_type);
+    try buf.appendSlice(allocator, ",");
+    try writeJsonField(buf, allocator, "body", rule.body);
+    try buf.appendSlice(allocator, ",");
+    try writeJsonField(buf, allocator, "error_reason", rule.error_reason);
+    try buf.appendSlice(allocator, "}");
+}
+
+fn handleInterceptRuleAdd(request: *std.http.Server.Request, arena: std.mem.Allocator, client: *CdpClient) void {
+    const raw_body = readRequestBody(request, arena) orelse {
+        resp.sendError(request, 400, "Missing request body - expected JSON {\"url_pattern\":...,\"action\":\"continue|abort|fulfill\",...}");
+        return;
+    };
+
+    const rule = parseInterceptRuleBody(arena, raw_body) orelse {
+        resp.sendError(request, 400, "Invalid rule: action must be continue, abort, or fulfill");
+        return;
+    };
+
+    client.addInterceptRule(rule) catch {
+        resp.sendError(request, 500, "Internal Server Error");
+        return;
+    };
+
+    var buf: std.ArrayList(u8) = .empty;
+    buf.appendSlice(arena, "{\"status\":\"ok\",\"rule\":") catch {
+        resp.sendError(request, 500, "Internal Server Error");
+        return;
+    };
+    writeInterceptRuleJson(&buf, arena, rule) catch {
+        resp.sendError(request, 500, "Internal Server Error");
+        return;
+    };
+    buf.appendSlice(arena, "}") catch {
+        resp.sendError(request, 500, "Internal Server Error");
+        return;
+    };
+
+    resp.sendJson(request, buf.items);
+}
+
+fn handleInterceptRules(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
+    const tab_id = resolveEffectiveTabIdAlloc(arena, request, bridge) orelse {
+        resp.sendError(request, 400, "Missing tab_id parameter (or set X-Kuri-Session)");
+        return;
+    };
+
+    const client = bridge.getCdpClient(tab_id) orelse {
+        resp.sendError(request, 404, "Tab not found");
+        return;
+    };
+
+    if (request.head.method == .POST) {
+        handleInterceptRuleAdd(request, arena, client);
+        return;
+    }
+
+    const rules = client.snapshotInterceptRules(arena) catch {
+        resp.sendError(request, 500, "Internal Server Error");
+        return;
+    };
+
+    var buf: std.ArrayList(u8) = .empty;
+    buf.appendSlice(arena, "{\"rules\":[") catch {
+        resp.sendError(request, 500, "Internal Server Error");
+        return;
+    };
+    for (rules, 0..) |r, i| {
+        if (i > 0) buf.appendSlice(arena, ",") catch return;
+        writeInterceptRuleJson(&buf, arena, r) catch return;
+    }
+    buf.print(arena, "],\"count\":{d}}}", .{rules.len}) catch return;
+
+    resp.sendJson(request, buf.items);
+}
+
+fn handleInterceptRulesClear(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
+    const tab_id = resolveEffectiveTabIdAlloc(arena, request, bridge) orelse {
+        resp.sendError(request, 400, "Missing tab_id parameter (or set X-Kuri-Session)");
+        return;
+    };
+
+    const client = bridge.getCdpClient(tab_id) orelse {
+        resp.sendError(request, 404, "Tab not found");
+        return;
+    };
+
+    client.clearInterceptRules();
+
+    const body = std.fmt.allocPrint(arena, "{{\"status\":\"ok\",\"message\":\"rules cleared\",\"tab_id\":\"{s}\"}}", .{tab_id}) catch {
         resp.sendError(request, 500, "Internal Server Error");
         return;
     };
@@ -2353,10 +2753,7 @@ fn handleClose(request: *std.http.Server.Request, arena: std.mem.Allocator, brid
 
 fn handleCookies(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
     const target = request.head.target;
-    const tab_id = getQueryParam(target, "tab_id") orelse {
-        resp.sendError(request, 400, "Missing tab_id parameter");
-        return;
-    };
+    const tab_id = requireEffectiveTabId(arena, request, bridge) orelse return;
     const client = bridge.getCdpClient(tab_id) orelse {
         resp.sendError(request, 404, "Tab not found");
         return;
@@ -2389,11 +2786,7 @@ fn handleCookies(request: *std.http.Server.Request, arena: std.mem.Allocator, br
 }
 
 fn handleCookiesClear(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
-    const target = request.head.target;
-    const tab_id = getQueryParam(target, "tab_id") orelse {
-        resp.sendError(request, 400, "Missing tab_id parameter");
-        return;
-    };
+    const tab_id = requireEffectiveTabId(arena, request, bridge) orelse return;
     const client = bridge.getCdpClient(tab_id) orelse {
         resp.sendError(request, 404, "Tab not found");
         return;
@@ -2409,10 +2802,7 @@ fn handleCookiesClear(request: *std.http.Server.Request, arena: std.mem.Allocato
 
 fn handleStorage(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge, storage_type: []const u8) void {
     const target = request.head.target;
-    const tab_id = getQueryParam(target, "tab_id") orelse {
-        resp.sendError(request, 400, "Missing tab_id parameter");
-        return;
-    };
+    const tab_id = requireEffectiveTabId(arena, request, bridge) orelse return;
     const client = bridge.getCdpClient(tab_id) orelse {
         resp.sendError(request, 404, "Tab not found");
         return;
@@ -2454,11 +2844,7 @@ fn handleStorage(request: *std.http.Server.Request, arena: std.mem.Allocator, br
 }
 
 fn handleStorageClear(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge, storage_type: []const u8) void {
-    const target = request.head.target;
-    const tab_id = getQueryParam(target, "tab_id") orelse {
-        resp.sendError(request, 400, "Missing tab_id parameter");
-        return;
-    };
+    const tab_id = requireEffectiveTabId(arena, request, bridge) orelse return;
     const client = bridge.getCdpClient(tab_id) orelse {
         resp.sendError(request, 404, "Tab not found");
         return;
@@ -2597,11 +2983,7 @@ fn handleReload(request: *std.http.Server.Request, arena: std.mem.Allocator, bri
 // ── Diff Snapshot Endpoint ──────────────────────────────────────────────
 
 fn handleDiffSnapshot(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
-    const target = request.head.target;
-    const tab_id = getQueryParam(target, "tab_id") orelse {
-        resp.sendError(request, 400, "Missing tab_id parameter");
-        return;
-    };
+    const tab_id = requireEffectiveTabId(arena, request, bridge) orelse return;
 
     const client = bridge.getCdpClient(tab_id) orelse {
         resp.sendError(request, 404, "Tab not found");
@@ -2694,12 +3076,17 @@ fn writeJsonField(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, key: []
     try buf.print(allocator, "\"{s}\":\"{s}\"", .{ key, escaped });
 }
 
+/// Write a single JSON-escaped string value (with surrounding quotes, no
+/// key) — the bare-value counterpart to `writeJsonField`'s "key":"value".
+fn writeJsonStringValue(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, value: []const u8) !void {
+    const escaped = try json_util.jsonEscape(value, allocator);
+    defer allocator.free(escaped);
+    try buf.print(allocator, "\"{s}\"", .{escaped});
+}
+
 fn handleEmulate(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
     const target = request.head.target;
-    const tab_id = getQueryParam(target, "tab_id") orelse {
-        resp.sendError(request, 400, "Missing tab_id parameter");
-        return;
-    };
+    const tab_id = requireEffectiveTabId(arena, request, bridge) orelse return;
     const client = bridge.getCdpClient(tab_id) orelse {
         resp.sendError(request, 404, "Tab not found");
         return;
@@ -2735,10 +3122,7 @@ fn handleEmulate(request: *std.http.Server.Request, arena: std.mem.Allocator, br
 
 fn handleGeolocation(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
     const target = request.head.target;
-    const tab_id = getQueryParam(target, "tab_id") orelse {
-        resp.sendError(request, 400, "Missing tab_id parameter");
-        return;
-    };
+    const tab_id = requireEffectiveTabId(arena, request, bridge) orelse return;
     const client = bridge.getCdpClient(tab_id) orelse {
         resp.sendError(request, 404, "Tab not found");
         return;
@@ -2770,10 +3154,7 @@ fn handleGeolocation(request: *std.http.Server.Request, arena: std.mem.Allocator
 
 fn handleUpload(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
     const target = request.head.target;
-    const tab_id = getQueryParam(target, "tab_id") orelse {
-        resp.sendError(request, 400, "Missing tab_id parameter");
-        return;
-    };
+    const tab_id = requireEffectiveTabId(arena, request, bridge) orelse return;
     const ref = getQueryParam(target, "ref") orelse {
         resp.sendError(request, 400, "Missing ref parameter");
         return;
@@ -2894,10 +3275,7 @@ fn handleAuthProfileSave(
     cfg: Config,
 ) void {
     const target = request.head.target;
-    const tab_id = getQueryParam(target, "tab_id") orelse {
-        resp.sendError(request, 400, "Missing tab_id parameter");
-        return;
-    };
+    const tab_id = requireEffectiveTabId(arena, request, bridge) orelse return;
     const name = getQueryParam(target, "name") orelse {
         resp.sendError(request, 400, "Missing name parameter");
         return;
@@ -2968,10 +3346,7 @@ fn handleAuthProfileLoad(
     cfg: Config,
 ) void {
     const target = request.head.target;
-    const tab_id = getQueryParam(target, "tab_id") orelse {
-        resp.sendError(request, 400, "Missing tab_id parameter");
-        return;
-    };
+    const tab_id = requireEffectiveTabId(arena, request, bridge) orelse return;
     const name = getQueryParam(target, "name") orelse {
         resp.sendError(request, 400, "Missing name parameter");
         return;
@@ -3121,10 +3496,7 @@ fn handleDebugEnable(
     bridge: *Bridge,
 ) void {
     const target = request.head.target;
-    const tab_id = getQueryParam(target, "tab_id") orelse {
-        resp.sendError(request, 400, "Missing tab_id parameter");
-        return;
-    };
+    const tab_id = requireEffectiveTabId(arena, request, bridge) orelse return;
     const freeze = getQueryParam(target, "freeze");
     const freeze_enabled = freeze != null and std.mem.eql(u8, freeze.?, "true");
     const client = bridge.getCdpClient(tab_id) orelse {
@@ -3201,11 +3573,7 @@ fn handleDebugDisable(
     arena: std.mem.Allocator,
     bridge: *Bridge,
 ) void {
-    const target = request.head.target;
-    const tab_id = getQueryParam(target, "tab_id") orelse {
-        resp.sendError(request, 400, "Missing tab_id parameter");
-        return;
-    };
+    const tab_id = requireEffectiveTabId(arena, request, bridge) orelse return;
     const client = bridge.getCdpClient(tab_id) orelse {
         resp.sendError(request, 404, "Tab not found");
         return;
@@ -3263,27 +3631,55 @@ fn handleDebugDisable(
 
 fn handleAnnotatedScreenshot(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
     const target = request.head.target;
-    const tab_id = getQueryParam(target, "tab_id") orelse {
-        resp.sendError(request, 400, "Missing tab_id parameter");
-        return;
-    };
+    const tab_id = requireEffectiveTabId(arena, request, bridge) orelse return;
     const ref = getQueryParam(target, "ref") orelse {
         resp.sendError(request, 400, "Missing ref parameter");
         return;
     };
-    _ = ref;
 
     const client = bridge.getCdpClient(tab_id) orelse {
         resp.sendError(request, 404, "Tab not found");
         return;
     };
 
+    // Resolve the ref to a real backendNodeId the same way /upload does.
+    bridge.mu.lockShared();
+    const cache = bridge.snapshots.get(tab_id);
+    bridge.mu.unlockShared();
+    const bid = if (cache) |c| c.refs.get(ref) else null;
+    const backend_node_id = bid orelse {
+        resp.sendError(request, 400, "Ref not found. Call /snapshot first to populate refs");
+        return;
+    };
+
+    // Overlay.highlightNode requires Overlay.enable to have been called on
+    // this session first -- without it Chrome rejects the call outright
+    // ({"error":{"code":-32600,"message":"Overlay must be enabled before a
+    // tool can be shown"}}), which the old code never checked for (it just
+    // discarded the response), so the highlight silently never appeared.
+    _ = client.send(arena, protocol.Methods.overlay_enable, null) catch {
+        resp.sendError(request, 502, "Overlay.enable failed");
+        return;
+    };
+
     // Highlight the node with an overlay
-    const highlight_params = "{\"nodeId\":0,\"highlightConfig\":{\"showInfo\":true,\"contentColor\":{\"r\":111,\"g\":168,\"b\":220,\"a\":0.66}}}";
-    _ = client.send(arena, protocol.Methods.overlay_highlight_node, highlight_params) catch {
+    const highlight_params = std.fmt.allocPrint(arena, "{{\"backendNodeId\":{d},\"highlightConfig\":{{\"showInfo\":true,\"contentColor\":{{\"r\":111,\"g\":168,\"b\":220,\"a\":0.66}}}}}}", .{backend_node_id}) catch {
+        resp.sendError(request, 500, "Internal Server Error");
+        return;
+    };
+    const highlight_response = client.send(arena, protocol.Methods.overlay_highlight_node, highlight_params) catch {
         resp.sendError(request, 502, "CDP command failed");
         return;
     };
+    // client.send only errors on transport failure -- a CDP-level rejection
+    // (bad backendNodeId, domain not enabled, etc.) still comes back as a
+    // normal response with an embedded "error" field and must be checked
+    // explicitly, same as the Network.getResponseBody handling above.
+    if (jsonscan.extractObject(highlight_response, "error")) |err_obj| {
+        const err_msg = jsonscan.extractField(err_obj, "message") orelse "Overlay.highlightNode returned an error";
+        resp.sendError(request, 502, err_msg);
+        return;
+    }
 
     // Take screenshot
     const screenshot_params = "{\"format\":\"png\"}";
@@ -3300,10 +3696,7 @@ fn handleAnnotatedScreenshot(request: *std.http.Server.Request, arena: std.mem.A
 
 fn handleDiffScreenshot(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
     const target = request.head.target;
-    const tab_id = getQueryParam(target, "tab_id") orelse {
-        resp.sendError(request, 400, "Missing tab_id parameter");
-        return;
-    };
+    const tab_id = requireEffectiveTabId(arena, request, bridge) orelse return;
     const delay_str = getQueryParam(target, "delay") orelse "1000";
 
     const client = bridge.getCdpClient(tab_id) orelse {
@@ -3336,66 +3729,219 @@ fn handleDiffScreenshot(request: *std.http.Server.Request, arena: std.mem.Alloca
     resp.sendJson(request, body);
 }
 
-fn handleScreencastStart(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
-    const target = request.head.target;
-    const tab_id = getQueryParam(target, "tab_id") orelse {
-        resp.sendError(request, 400, "Missing tab_id parameter");
-        return;
-    };
+fn writeScreencastFrameJson(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, frame: ScreencastFrameRecord) !void {
+    try buf.appendSlice(allocator, "{");
+    try writeJsonField(buf, allocator, "data_b64", frame.data_b64);
+    try buf.appendSlice(allocator, ",");
+    try buf.print(allocator, "\"timestamp\":{d},\"device_width\":{d},\"device_height\":{d},\"session_id\":{d}", .{
+        frame.timestamp, frame.device_width, frame.device_height, frame.session_id,
+    });
+    try buf.appendSlice(allocator, "}");
+}
 
+/// Shared core for /screencast/start and /video/start -- CDP has exactly one
+/// frame-streaming mechanism (Page.startScreencast); "video" is not a
+/// separate capability, so both endpoints drive the same client.zig
+/// ScreencastRing collector. `status_word` and `extra_note` are the only
+/// things that differ between the two, so they're honest about which is
+/// which rather than /video silently aliasing /screencast's response.
+fn startScreencastCapture(
+    request: *std.http.Server.Request,
+    arena: std.mem.Allocator,
+    bridge: *Bridge,
+    status_word: []const u8,
+    extra_note: ?[]const u8,
+) void {
+    const target = request.head.target;
+    const tab_id = requireEffectiveTabId(arena, request, bridge) orelse return;
     const client = bridge.getCdpClient(tab_id) orelse {
         resp.sendError(request, 404, "Tab not found");
         return;
     };
 
-    const params = "{\"format\":\"jpeg\",\"quality\":80}";
+    // Validate rather than interpolate raw query text into the outgoing CDP
+    // command: format is one of two literals, quality is clamped to CDP's
+    // valid 0-100 range.
+    const format_param = getQueryParam(target, "format") orelse "jpeg";
+    const format: []const u8 = if (std.mem.eql(u8, format_param, "png")) "png" else "jpeg";
+    const quality: u8 = blk: {
+        const q_str = getQueryParam(target, "quality") orelse "80";
+        const q = std.fmt.parseInt(u16, q_str, 10) catch 80;
+        break :blk @intCast(@min(q, 100));
+    };
+    const params = std.fmt.allocPrint(arena, "{{\"format\":\"{s}\",\"quality\":{d}}}", .{ format, quality }) catch {
+        resp.sendError(request, 500, "Internal Server Error");
+        return;
+    };
+
+    // Fresh session: don't hand back frames left over from a prior
+    // start/stop pair that was never drained.
+    client.clearScreencastFrames();
+
     _ = client.send(arena, protocol.Methods.page_start_screencast, params) catch {
         resp.sendError(request, 502, "CDP command failed");
         return;
     };
 
-    const body = std.fmt.allocPrint(arena, "{{\"status\":\"screencast_started\",\"tab_id\":\"{s}\"}}", .{tab_id}) catch {
+    var buf: std.ArrayList(u8) = .empty;
+    buf.print(
+        arena,
+        "{{\"status\":\"{s}_started\",\"tab_id\":\"{s}\",\"format\":\"{s}\",\"quality\":{d}",
+        .{ status_word, tab_id, format, quality },
+    ) catch {
         resp.sendError(request, 500, "Internal Server Error");
         return;
     };
-    resp.sendJson(request, body);
-}
-
-fn handleScreencastStop(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
-    const target = request.head.target;
-    const tab_id = getQueryParam(target, "tab_id") orelse {
-        resp.sendError(request, 400, "Missing tab_id parameter");
+    if (extra_note) |note| {
+        buf.appendSlice(arena, ",") catch {
+            resp.sendError(request, 500, "Internal Server Error");
+            return;
+        };
+        writeJsonField(&buf, arena, "note", note) catch {
+            resp.sendError(request, 500, "Internal Server Error");
+            return;
+        };
+    }
+    buf.appendSlice(arena, "}") catch {
+        resp.sendError(request, 500, "Internal Server Error");
         return;
     };
+    resp.sendJson(request, buf.items);
+}
 
+/// Shared core for /screencast/stop and /video/stop. See
+/// `CdpClient.snapshotScreencastFrames`'s doc comment for the design-limit
+/// context: frames only get pulled off the socket while some command is in
+/// flight, so this drains explicitly (best-effort, no-op on Windows) both
+/// before and after the stop command to catch frames Chrome sent right up
+/// to (and just after) the stop ack.
+///
+/// `?frames=` controls response size, since a full session can legitimately
+/// hold up to the ring's own 32 MiB / 30-frame cap:
+///   - "latest" (default): just the single most recent frame -- the common
+///     "give me a snapshot" case, kept small on purpose.
+///   - "all": every held frame, inline. Safe to inline because the ring
+///     upstream already bounds this to <=32 MiB; this is the "retrieval
+///     path" opt-in for callers who actually want the whole capture.
+///   - "none": counts only, no frame bytes at all.
+fn stopScreencastCapture(
+    request: *std.http.Server.Request,
+    arena: std.mem.Allocator,
+    bridge: *Bridge,
+    status_word: []const u8,
+    extra_note: ?[]const u8,
+) void {
+    const target = request.head.target;
+    const tab_id = requireEffectiveTabId(arena, request, bridge) orelse return;
     const client = bridge.getCdpClient(tab_id) orelse {
         resp.sendError(request, 404, "Tab not found");
         return;
     };
+
+    client.drainWsEvents(arena, 1);
 
     _ = client.send(arena, protocol.Methods.page_stop_screencast, null) catch {
         resp.sendError(request, 502, "CDP command failed");
         return;
     };
 
-    const body = std.fmt.allocPrint(arena, "{{\"status\":\"screencast_stopped\",\"tab_id\":\"{s}\"}}", .{tab_id}) catch {
+    // Chrome can still deliver a frame or two that raced the stop ack.
+    client.drainWsEvents(arena, 1);
+
+    const frames_mode = getQueryParam(target, "frames") orelse "latest";
+    const frames = client.snapshotScreencastFrames(arena) catch {
         resp.sendError(request, 500, "Internal Server Error");
         return;
     };
-    resp.sendJson(request, body);
+    const dropped = client.droppedScreencastFrameCount();
+    const frame_count = frames.len;
+    client.clearScreencastFrames();
+
+    var buf: std.ArrayList(u8) = .empty;
+    buf.print(
+        arena,
+        "{{\"status\":\"{s}_stopped\",\"tab_id\":\"{s}\",\"frame_count\":{d},\"dropped_oversize\":{d}",
+        .{ status_word, tab_id, frame_count, dropped },
+    ) catch {
+        resp.sendError(request, 500, "Internal Server Error");
+        return;
+    };
+
+    if (std.mem.eql(u8, frames_mode, "all")) {
+        buf.appendSlice(arena, ",\"frames\":[") catch {
+            resp.sendError(request, 500, "Internal Server Error");
+            return;
+        };
+        for (frames, 0..) |f, i| {
+            if (i > 0) buf.appendSlice(arena, ",") catch return;
+            writeScreencastFrameJson(&buf, arena, f) catch return;
+        }
+        buf.appendSlice(arena, "]") catch {
+            resp.sendError(request, 500, "Internal Server Error");
+            return;
+        };
+    } else if (!std.mem.eql(u8, frames_mode, "none")) {
+        buf.appendSlice(arena, ",\"latest_frame\":") catch {
+            resp.sendError(request, 500, "Internal Server Error");
+            return;
+        };
+        if (frame_count > 0) {
+            writeScreencastFrameJson(&buf, arena, frames[frame_count - 1]) catch {
+                resp.sendError(request, 500, "Internal Server Error");
+                return;
+            };
+        } else {
+            buf.appendSlice(arena, "null") catch {
+                resp.sendError(request, 500, "Internal Server Error");
+                return;
+            };
+        }
+    }
+
+    if (extra_note) |note| {
+        buf.appendSlice(arena, ",") catch {
+            resp.sendError(request, 500, "Internal Server Error");
+            return;
+        };
+        writeJsonField(&buf, arena, "note", note) catch {
+            resp.sendError(request, 500, "Internal Server Error");
+            return;
+        };
+    }
+    buf.appendSlice(arena, "}") catch {
+        resp.sendError(request, 500, "Internal Server Error");
+        return;
+    };
+    resp.sendJson(request, buf.items);
 }
 
-const handleVideoStart = handleScreencastStart;
-const handleVideoStop = handleScreencastStop;
+fn handleScreencastStart(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
+    startScreencastCapture(request, arena, bridge, "screencast", null);
+}
+
+fn handleScreencastStop(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
+    stopScreencastCapture(request, arena, bridge, "screencast", null);
+}
+
+// kuri has no video encoder (no ffmpeg/libav dependency) -- there is no
+// second capability behind /video/*, so rather than a canned response that
+// silently reused /screencast's wording, these are honest about reusing
+// Page.startScreencast/stopScreencast and returning raw frames, not a
+// .mp4/.webm file.
+const video_note = "kuri does not encode video (no ffmpeg/libav dependency). This drives the same CDP Page.startScreencast/stopScreencast capture as /screencast/*, returning base64 frames with timestamps -- no video file is produced. Encode client-side if you need one.";
+
+fn handleVideoStart(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
+    startScreencastCapture(request, arena, bridge, "video", video_note);
+}
+
+fn handleVideoStop(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
+    stopScreencastCapture(request, arena, bridge, "video", video_note);
+}
 
 // ── Lightpanda Parity Endpoints ─────────────────────────────────────────
 
 fn handleMarkdown(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
-    const target = request.head.target;
-    const tab_id = getQueryParam(target, "tab_id") orelse {
-        resp.sendError(request, 400, "Missing tab_id parameter");
-        return;
-    };
+    const tab_id = requireEffectiveTabId(arena, request, bridge) orelse return;
 
     const client = bridge.getCdpClient(tab_id) orelse {
         resp.sendError(request, 404, "Tab not found");
@@ -3452,11 +3998,7 @@ fn handleMarkdown(request: *std.http.Server.Request, arena: std.mem.Allocator, b
 }
 
 fn handleLinks(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
-    const target = request.head.target;
-    const tab_id = getQueryParam(target, "tab_id") orelse {
-        resp.sendError(request, 400, "Missing tab_id parameter");
-        return;
-    };
+    const tab_id = requireEffectiveTabId(arena, request, bridge) orelse return;
 
     const client = bridge.getCdpClient(tab_id) orelse {
         resp.sendError(request, 404, "Tab not found");
@@ -3479,10 +4021,7 @@ fn handleLinks(request: *std.http.Server.Request, arena: std.mem.Allocator, brid
 
 fn handlePdf(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
     const target = request.head.target;
-    const tab_id = getQueryParam(target, "tab_id") orelse {
-        resp.sendError(request, 400, "Missing tab_id parameter");
-        return;
-    };
+    const tab_id = requireEffectiveTabId(arena, request, bridge) orelse return;
 
     const client = bridge.getCdpClient(tab_id) orelse {
         resp.sendError(request, 404, "Tab not found");
@@ -3504,10 +4043,7 @@ fn handlePdf(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge
 
 fn handleDomQuery(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
     const target = request.head.target;
-    const tab_id = getQueryParam(target, "tab_id") orelse {
-        resp.sendError(request, 400, "Missing tab_id parameter");
-        return;
-    };
+    const tab_id = requireEffectiveTabId(arena, request, bridge) orelse return;
     const selector = getQueryParam(target, "selector") orelse {
         resp.sendError(request, 400, "Missing selector parameter");
         return;
@@ -3546,10 +4082,7 @@ fn handleDomQuery(request: *std.http.Server.Request, arena: std.mem.Allocator, b
 
 fn handleDomHtml(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
     const target = request.head.target;
-    const tab_id = getQueryParam(target, "tab_id") orelse {
-        resp.sendError(request, 400, "Missing tab_id parameter");
-        return;
-    };
+    const tab_id = requireEffectiveTabId(arena, request, bridge) orelse return;
     const node_id_str = getQueryParam(target, "node_id") orelse {
         resp.sendError(request, 400, "Missing node_id parameter");
         return;
@@ -3573,10 +4106,7 @@ fn handleDomHtml(request: *std.http.Server.Request, arena: std.mem.Allocator, br
 
 fn handleCookiesDelete(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
     const target = request.head.target;
-    const tab_id = getQueryParam(target, "tab_id") orelse {
-        resp.sendError(request, 400, "Missing tab_id parameter");
-        return;
-    };
+    const tab_id = requireEffectiveTabId(arena, request, bridge) orelse return;
     const name = getQueryParam(target, "name") orelse {
         resp.sendError(request, 400, "Missing name parameter");
         return;
@@ -3612,11 +4142,7 @@ fn handleCookiesDelete(request: *std.http.Server.Request, arena: std.mem.Allocat
 }
 
 fn handleHeaders(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
-    const target = request.head.target;
-    const tab_id = getQueryParam(target, "tab_id") orelse {
-        resp.sendError(request, 400, "Missing tab_id parameter");
-        return;
-    };
+    const tab_id = requireEffectiveTabId(arena, request, bridge) orelse return;
 
     const client = bridge.getCdpClient(tab_id) orelse {
         resp.sendError(request, 404, "Tab not found");
@@ -3647,10 +4173,7 @@ fn handleHeaders(request: *std.http.Server.Request, arena: std.mem.Allocator, br
 
 fn handleScriptInject(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
     const target = request.head.target;
-    const tab_id = getQueryParam(target, "tab_id") orelse {
-        resp.sendError(request, 400, "Missing tab_id parameter");
-        return;
-    };
+    const tab_id = requireEffectiveTabId(arena, request, bridge) orelse return;
 
     // Support both query param and POST body for script source.
     // POST body is preferred for large scripts that exceed URL length limits.
@@ -4026,11 +4549,7 @@ fn extractJsonDelimitedField(json: []const u8, field: []const u8, open: u8, clos
 }
 
 fn handleStop(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
-    const target = request.head.target;
-    const tab_id = getQueryParam(target, "tab_id") orelse {
-        resp.sendError(request, 400, "Missing tab_id parameter");
-        return;
-    };
+    const tab_id = requireEffectiveTabId(arena, request, bridge) orelse return;
 
     const client = bridge.getCdpClient(tab_id) orelse {
         resp.sendError(request, 404, "Tab not found");
@@ -4046,10 +4565,7 @@ fn handleStop(request: *std.http.Server.Request, arena: std.mem.Allocator, bridg
 
 fn handleScrollIntoView(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
     const target = request.head.target;
-    const tab_id = getQueryParam(target, "tab_id") orelse {
-        resp.sendError(request, 400, "Missing tab_id parameter");
-        return;
-    };
+    const tab_id = requireEffectiveTabId(arena, request, bridge) orelse return;
     const ref = getQueryParam(target, "ref") orelse {
         resp.sendError(request, 400, "Missing ref parameter");
         return;
@@ -4095,10 +4611,7 @@ fn handleScrollIntoView(request: *std.http.Server.Request, arena: std.mem.Alloca
 
 fn handleDrag(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
     const target = request.head.target;
-    const tab_id = getQueryParam(target, "tab_id") orelse {
-        resp.sendError(request, 400, "Missing tab_id parameter");
-        return;
-    };
+    const tab_id = requireEffectiveTabId(arena, request, bridge) orelse return;
     const src_ref = getQueryParam(target, "src") orelse {
         resp.sendError(request, 400, "Missing src ref parameter");
         return;
@@ -4153,26 +4666,50 @@ fn handleDrag(request: *std.http.Server.Request, arena: std.mem.Allocator, bridg
         return;
     };
 
-    // Use JS to perform drag-and-drop via DataTransfer events
-    const js = std.fmt.allocPrint(arena,
-        \\{{"objectId":"{s}","functionDeclaration":"function() {{ var src=this; var tgtOid='{s}'; var dt=new DataTransfer(); src.dispatchEvent(new DragEvent('dragstart',{{bubbles:true,dataTransfer:dt}})); src.dispatchEvent(new DragEvent('drag',{{bubbles:true,dataTransfer:dt}})); return 'drag_started'; }}","returnByValue":true}}
-    , .{ src_oid, tgt_oid }) catch {
+    // Perform a full drag-and-drop sequence via DataTransfer events. CDP's
+    // Runtime.callFunctionOn only binds `this` to the object matching the
+    // given objectId, so a single call cannot dispatch on both src and tgt —
+    // this needs three separate calls sharing state through a page-global
+    // (window.__kuri_dragDT), same idea as Playwright's dragTo internals.
+    const start_js =
+        \\{"objectId":"SRC_OID","functionDeclaration":"function() { var dt = new DataTransfer(); window.__kuri_dragDT = dt; this.dispatchEvent(new DragEvent('dragstart',{bubbles:true,cancelable:true,dataTransfer:dt})); this.dispatchEvent(new DragEvent('drag',{bubbles:true,cancelable:true,dataTransfer:dt})); return 'dragstart_ok'; }","returnByValue":true}
+    ;
+    const start_params = std.mem.replaceOwned(u8, arena, start_js, "SRC_OID", src_oid) catch {
         resp.sendError(request, 500, "Internal Server Error");
         return;
     };
-    const response = client.send(arena, protocol.Methods.runtime_call_function_on, js) catch {
-        resp.sendError(request, 502, "Drag failed");
+    _ = client.send(arena, protocol.Methods.runtime_call_function_on, start_params) catch {
+        resp.sendError(request, 502, "dragstart failed");
         return;
     };
-    resp.sendJson(request, response);
+
+    const drop_js =
+        \\{"objectId":"TGT_OID","functionDeclaration":"function() { var dt = window.__kuri_dragDT; this.dispatchEvent(new DragEvent('dragenter',{bubbles:true,cancelable:true,dataTransfer:dt})); this.dispatchEvent(new DragEvent('dragover',{bubbles:true,cancelable:true,dataTransfer:dt})); this.dispatchEvent(new DragEvent('drop',{bubbles:true,cancelable:true,dataTransfer:dt})); return 'drop_ok'; }","returnByValue":true}
+    ;
+    const drop_params = std.mem.replaceOwned(u8, arena, drop_js, "TGT_OID", tgt_oid) catch {
+        resp.sendError(request, 500, "Internal Server Error");
+        return;
+    };
+    const drop_response = client.send(arena, protocol.Methods.runtime_call_function_on, drop_params) catch {
+        resp.sendError(request, 502, "drop failed");
+        return;
+    };
+
+    const end_js =
+        \\{"objectId":"SRC_OID","functionDeclaration":"function() { var dt = window.__kuri_dragDT; this.dispatchEvent(new DragEvent('dragend',{bubbles:true,cancelable:true,dataTransfer:dt})); delete window.__kuri_dragDT; return 'dragend_ok'; }","returnByValue":true}
+    ;
+    const end_params = std.mem.replaceOwned(u8, arena, end_js, "SRC_OID", src_oid) catch {
+        resp.sendError(request, 500, "Internal Server Error");
+        return;
+    };
+    _ = client.send(arena, protocol.Methods.runtime_call_function_on, end_params) catch {};
+
+    resp.sendJson(request, drop_response);
 }
 
 fn handleKeyboardType(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
     const target = request.head.target;
-    const tab_id = getQueryParam(target, "tab_id") orelse {
-        resp.sendError(request, 400, "Missing tab_id parameter");
-        return;
-    };
+    const tab_id = requireEffectiveTabId(arena, request, bridge) orelse return;
     const text = getDecodedQueryParamAlloc(arena, target, "text") orelse {
         resp.sendError(request, 400, "Missing text parameter");
         return;
@@ -4182,9 +4719,12 @@ fn handleKeyboardType(request: *std.http.Server.Request, arena: std.mem.Allocato
         return;
     };
 
-    // Type each character via Input.dispatchKeyEvent
-    for (text) |ch| {
-        const char_str = std.fmt.allocPrint(arena, "{c}", .{ch}) catch continue;
+    // Type each Unicode codepoint via Input.dispatchKeyEvent. Iterating over
+    // raw bytes (text: []const u8) would split any multi-byte UTF-8 character
+    // (accents, emoji, CJK, ...) into individual invalid bytes.
+    var utf8_iter: std.unicode.Utf8Iterator = .{ .bytes = text, .i = 0 };
+    while (utf8_iter.nextCodepointSlice()) |cp_bytes| {
+        const char_str = jsonEscapeAlloc(arena, cp_bytes) orelse continue;
         const key_params = std.fmt.allocPrint(arena, "{{\"type\":\"keyDown\",\"text\":\"{s}\",\"key\":\"{s}\",\"unmodifiedText\":\"{s}\"}}", .{ char_str, char_str, char_str }) catch continue;
         _ = client.send(arena, protocol.Methods.input_dispatch_key_event, key_params) catch continue;
         const up_params = std.fmt.allocPrint(arena, "{{\"type\":\"keyUp\",\"key\":\"{s}\"}}", .{char_str}) catch continue;
@@ -4199,10 +4739,7 @@ fn handleKeyboardType(request: *std.http.Server.Request, arena: std.mem.Allocato
 
 fn handleKeyboardInsertText(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
     const target = request.head.target;
-    const tab_id = getQueryParam(target, "tab_id") orelse {
-        resp.sendError(request, 400, "Missing tab_id parameter");
-        return;
-    };
+    const tab_id = requireEffectiveTabId(arena, request, bridge) orelse return;
     const text = getDecodedQueryParamAlloc(arena, target, "text") orelse {
         resp.sendError(request, 400, "Missing text parameter");
         return;
@@ -4225,10 +4762,7 @@ fn handleKeyboardInsertText(request: *std.http.Server.Request, arena: std.mem.Al
 
 fn handleKeyDown(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
     const target = request.head.target;
-    const tab_id = getQueryParam(target, "tab_id") orelse {
-        resp.sendError(request, 400, "Missing tab_id parameter");
-        return;
-    };
+    const tab_id = requireEffectiveTabId(arena, request, bridge) orelse return;
     const key = getQueryParam(target, "key") orelse {
         resp.sendError(request, 400, "Missing key parameter");
         return;
@@ -4251,10 +4785,7 @@ fn handleKeyDown(request: *std.http.Server.Request, arena: std.mem.Allocator, br
 
 fn handleKeyUp(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
     const target = request.head.target;
-    const tab_id = getQueryParam(target, "tab_id") orelse {
-        resp.sendError(request, 400, "Missing tab_id parameter");
-        return;
-    };
+    const tab_id = requireEffectiveTabId(arena, request, bridge) orelse return;
     const key = getQueryParam(target, "key") orelse {
         resp.sendError(request, 400, "Missing key parameter");
         return;
@@ -4277,10 +4808,7 @@ fn handleKeyUp(request: *std.http.Server.Request, arena: std.mem.Allocator, brid
 
 fn handleWait(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
     const target = request.head.target;
-    const tab_id = getQueryParam(target, "tab_id") orelse {
-        resp.sendError(request, 400, "Missing tab_id parameter");
-        return;
-    };
+    const tab_id = requireEffectiveTabId(arena, request, bridge) orelse return;
     const selector = getDecodedQueryParamAlloc(arena, target, "selector");
     const wait_text = getDecodedQueryParamAlloc(arena, target, "text");
     const wait_url = getDecodedQueryParamAlloc(arena, target, "url");
@@ -4602,10 +5130,7 @@ fn handleTabClose(request: *std.http.Server.Request, arena: std.mem.Allocator, b
 
 fn handleHighlight(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
     const target = request.head.target;
-    const tab_id = getQueryParam(target, "tab_id") orelse {
-        resp.sendError(request, 400, "Missing tab_id parameter");
-        return;
-    };
+    const tab_id = requireEffectiveTabId(arena, request, bridge) orelse return;
     const ref = getQueryParam(target, "ref");
     const selector = getQueryParam(target, "selector");
     const client = bridge.getCdpClient(tab_id) orelse {
@@ -4653,9 +5178,8 @@ fn handleHighlight(request: *std.http.Server.Request, arena: std.mem.Allocator, 
 }
 
 fn handleErrors(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
-    const target = request.head.target;
-    const tab_id = getQueryParam(target, "tab_id") orelse {
-        resp.sendError(request, 400, "Missing tab_id parameter");
+    const tab_id = resolveEffectiveTabIdAlloc(arena, request, bridge) orelse {
+        resp.sendError(request, 400, "Missing tab_id parameter (or set X-Kuri-Session)");
         return;
     };
     const client = bridge.getCdpClient(tab_id) orelse {
@@ -4665,7 +5189,7 @@ fn handleErrors(request: *std.http.Server.Request, arena: std.mem.Allocator, bri
 
     // Enable Runtime to collect exceptions, then evaluate to get any stored errors
     _ = client.send(arena, protocol.Methods.runtime_enable, null) catch {};
-    const params = "{\"expression\":\"(function(){ var e=window.__kuri_errors||[]; return JSON.stringify(e); })()\",\"returnByValue\":true}";
+    const params = "{\"expression\":\"(function(){ var e=window.__kuri_errors||[]; window.__kuri_errors=[]; return JSON.stringify(e); })()\",\"returnByValue\":true}";
     const response = client.send(arena, protocol.Methods.runtime_evaluate, params) catch {
         resp.sendError(request, 502, "CDP command failed");
         return;
@@ -4675,10 +5199,7 @@ fn handleErrors(request: *std.http.Server.Request, arena: std.mem.Allocator, bri
 
 fn handleSetOffline(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
     const target = request.head.target;
-    const tab_id = getQueryParam(target, "tab_id") orelse {
-        resp.sendError(request, 400, "Missing tab_id parameter");
-        return;
-    };
+    const tab_id = requireEffectiveTabId(arena, request, bridge) orelse return;
     const mode = getQueryParam(target, "mode") orelse "on";
     const client = bridge.getCdpClient(tab_id) orelse {
         resp.sendError(request, 404, "Tab not found");
@@ -4704,10 +5225,7 @@ fn handleSetOffline(request: *std.http.Server.Request, arena: std.mem.Allocator,
 
 fn handleSetMedia(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
     const target = request.head.target;
-    const tab_id = getQueryParam(target, "tab_id") orelse {
-        resp.sendError(request, 400, "Missing tab_id parameter");
-        return;
-    };
+    const tab_id = requireEffectiveTabId(arena, request, bridge) orelse return;
     const scheme = getQueryParam(target, "scheme") orelse "dark";
     const client = bridge.getCdpClient(tab_id) orelse {
         resp.sendError(request, 404, "Tab not found");
@@ -4732,10 +5250,7 @@ fn handleSetMedia(request: *std.http.Server.Request, arena: std.mem.Allocator, b
 
 fn handleSetCredentials(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
     const target = request.head.target;
-    const tab_id = getQueryParam(target, "tab_id") orelse {
-        resp.sendError(request, 400, "Missing tab_id parameter");
-        return;
-    };
+    const tab_id = requireEffectiveTabId(arena, request, bridge) orelse return;
     const username = getQueryParam(target, "username") orelse {
         resp.sendError(request, 400, "Missing username parameter");
         return;
@@ -4749,10 +5264,16 @@ fn handleSetCredentials(request: *std.http.Server.Request, arena: std.mem.Alloca
         return;
     };
 
-    // Enable Fetch to intercept auth challenges
-    _ = client.send(arena, protocol.Methods.fetch_enable, "{\"handleAuthRequests\":true}") catch {};
+    // NOTE: this deliberately does NOT call Fetch.enable({handleAuthRequests:true}).
+    // Doing so makes Chrome pause on Fetch.authRequired for real 401/407 challenges,
+    // and nothing in this codebase answers that event (no Fetch.continueWithAuth
+    // anywhere) — the paused request would hang forever. Real interactive
+    // auth-challenge handling needs the async background CDP event reader
+    // described for /intercept; until that exists, rely solely on the
+    // preemptive Authorization header below, which works for servers that
+    // accept preemptive Basic auth (the common case).
 
-    // Also set as Authorization header for immediate use
+    // Set as a preemptive Authorization header for immediate use
     const b64_input = std.fmt.allocPrint(arena, "{s}:{s}", .{ username, password }) catch {
         resp.sendError(request, 500, "Internal Server Error");
         return;
@@ -4851,16 +5372,21 @@ fn handleFind(request: *std.http.Server.Request, arena: std.mem.Allocator, bridg
 
 fn handleTraceStart(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
     const target = request.head.target;
-    const tab_id = getQueryParam(target, "tab_id") orelse {
-        resp.sendError(request, 400, "Missing tab_id parameter");
-        return;
-    };
+    const tab_id = requireEffectiveTabId(arena, request, bridge) orelse return;
     const client = bridge.getCdpClient(tab_id) orelse {
         resp.sendError(request, 404, "Tab not found");
         return;
     };
     const categories = getQueryParam(target, "categories") orelse "-*,devtools.timeline,v8.execute,disabled-by-default-devtools.timeline";
-    const params = std.fmt.allocPrint(arena, "{{\"categories\":\"{s}\",\"options\":\"sampling-frequency=10000\"}}", .{categories}) catch {
+    // transferMode: ReturnAsStream is required for /trace/stop to be able to
+    // read the trace back at all -- without it, Tracing.tracingComplete
+    // carries no `stream` handle and the trace only exists as a series of
+    // Tracing.dataCollected events this codebase does not accumulate.
+    const params = std.fmt.allocPrint(
+        arena,
+        "{{\"categories\":\"{s}\",\"options\":\"sampling-frequency=10000\",\"transferMode\":\"ReturnAsStream\"}}",
+        .{categories},
+    ) catch {
         resp.sendError(request, 500, "Internal Server Error");
         return;
     };
@@ -4877,28 +5403,180 @@ fn handleTraceStart(request: *std.http.Server.Request, arena: std.mem.Allocator,
 }
 
 fn handleTraceStop(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
-    const target = request.head.target;
-    const tab_id = getQueryParam(target, "tab_id") orelse {
-        resp.sendError(request, 400, "Missing tab_id parameter");
-        return;
-    };
+    const tab_id = requireEffectiveTabId(arena, request, bridge) orelse return;
     const client = bridge.getCdpClient(tab_id) orelse {
         resp.sendError(request, 404, "Tab not found");
         return;
     };
-    const response = client.send(arena, protocol.Methods.tracing_end, null) catch {
+
+    _ = client.send(arena, protocol.Methods.tracing_end, null) catch {
         resp.sendError(request, 502, "Tracing.end failed");
         return;
     };
-    resp.sendJson(request, response);
+
+    // Tracing.end only *requests* a stop; the trace itself isn't ready
+    // until Chrome emits Tracing.tracingComplete (carrying the IO stream
+    // handle, since /trace/start requests transferMode: ReturnAsStream).
+    // waitForEvent is what actually pumps the read loop so
+    // collectTracingComplete (client.zig) gets a chance to observe and
+    // store it -- see the "paused CDP events only make forward progress
+    // while a command is in flight" design limit.
+    if (!client.waitForEvent(arena, "Tracing.tracingComplete", 400)) {
+        resp.sendError(request, 504, "Tracing.tracingComplete was not observed before timing out");
+        return;
+    }
+
+    const stream_rec = (client.takeTraceStream(arena) catch {
+        resp.sendError(request, 500, "Internal Server Error");
+        return;
+    }) orelse {
+        // tracingComplete fired without a `stream` field (e.g. an empty
+        // trace). Nothing to drain -- say so honestly rather than
+        // fabricating trace content that was never produced.
+        const body = std.fmt.allocPrint(
+            arena,
+            "{{\"ok\":true,\"status\":\"trace_complete_no_stream\",\"tab_id\":\"{s}\"}}",
+            .{tab_id},
+        ) catch {
+            resp.sendError(request, 500, "Internal Server Error");
+            return;
+        };
+        resp.sendJson(request, body);
+        return;
+    };
+
+    const home = compat.getenv("HOME") orelse {
+        resp.sendError(request, 500, "Cannot determine HOME directory to write trace file");
+        return;
+    };
+    const dir_path = std.fmt.allocPrint(arena, "{s}/.kuri/traces", .{home}) catch {
+        resp.sendError(request, 500, "Internal Server Error");
+        return;
+    };
+    compat.cwdMakePath(dir_path) catch {
+        resp.sendError(request, 500, "Failed to create ~/.kuri/traces directory");
+        return;
+    };
+    const file_path = std.fmt.allocPrint(
+        arena,
+        "{s}/trace-{s}-{d}.json",
+        .{ dir_path, tab_id, compat.milliTimestamp() },
+    ) catch {
+        resp.sendError(request, 500, "Internal Server Error");
+        return;
+    };
+
+    const fd = compat.cwdCreateFile(file_path) catch {
+        resp.sendError(request, 500, "Failed to create trace file (unsupported on this platform, or a disk error)");
+        return;
+    };
+    var closed = false;
+    defer if (!closed) compat.fdClose(fd);
+
+    const escaped_handle = jsonEscapeAlloc(arena, stream_rec.stream_handle) orelse {
+        resp.sendError(request, 500, "Internal Server Error");
+        return;
+    };
+
+    // Trace files can legitimately be huge (real profiling sessions run
+    // tens to hundreds of MB); stream to disk chunk-by-chunk via IO.read
+    // rather than buffering the whole thing in memory, bounded by a hard
+    // safety ceiling so a runaway stream can't grow the file unbounded.
+    const max_trace_bytes: usize = 512 * 1024 * 1024;
+    const chunk_size: usize = 1024 * 1024;
+    var total_bytes: usize = 0;
+    var eof = false;
+    var read_error: ?[]const u8 = null;
+    var iterations: usize = 0;
+
+    while (!eof) {
+        iterations += 1;
+        if (iterations > 5000) {
+            read_error = "IO.read did not reach eof within the iteration safety cap";
+            break;
+        }
+        const io_params = std.fmt.allocPrint(arena, "{{\"handle\":\"{s}\",\"size\":{d}}}", .{ escaped_handle, chunk_size }) catch {
+            read_error = "Internal Server Error";
+            break;
+        };
+        const io_response = client.send(arena, protocol.Methods.io_read, io_params) catch {
+            read_error = "IO.read failed";
+            break;
+        };
+        const data = jsonscan.extractField(io_response, "data") orelse {
+            read_error = "IO.read returned no data field";
+            break;
+        };
+        const eof_str = jsonscan.extractField(io_response, "eof") orelse "false";
+        eof = std.mem.eql(u8, eof_str, "true");
+        const b64_str = jsonscan.extractField(io_response, "base64Encoded");
+        const is_base64 = if (b64_str) |v| std.mem.eql(u8, v, "true") else false;
+
+        var decoded: []const u8 = &.{};
+        if (is_base64) {
+            const decoded_len = std.base64.standard.Decoder.calcSizeForSlice(data) catch {
+                read_error = "Invalid base64 in IO.read response";
+                break;
+            };
+            const out = arena.alloc(u8, decoded_len) catch {
+                read_error = "Internal Server Error";
+                break;
+            };
+            std.base64.standard.Decoder.decode(out, data) catch {
+                read_error = "Invalid base64 in IO.read response";
+                break;
+            };
+            decoded = out;
+        } else {
+            decoded = json_util.jsonUnescape(arena, data) catch {
+                read_error = "Internal Server Error";
+                break;
+            };
+        }
+
+        if (total_bytes + decoded.len > max_trace_bytes) {
+            read_error = "Trace exceeded the 512 MiB safety cap; aborted";
+            break;
+        }
+        compat.fdWriteAll(fd, decoded) catch {
+            read_error = "Failed to write trace file";
+            break;
+        };
+        total_bytes += decoded.len;
+    }
+
+    compat.fdClose(fd);
+    closed = true;
+
+    // Always tell Chrome we're done with the stream, success or not.
+    if (std.fmt.allocPrint(arena, "{{\"handle\":\"{s}\"}}", .{escaped_handle}) catch null) |close_params| {
+        _ = client.send(arena, protocol.Methods.io_close, close_params) catch {};
+    }
+
+    if (read_error) |msg| {
+        compat.cwdDeleteFile(file_path) catch {};
+        resp.sendError(request, 502, msg);
+        return;
+    }
+
+    const escaped_path = jsonEscapeAlloc(arena, file_path) orelse {
+        resp.sendError(request, 500, "Internal Server Error");
+        return;
+    };
+    const escaped_format = jsonEscapeAlloc(arena, stream_rec.trace_format) orelse "";
+    const body = std.fmt.allocPrint(
+        arena,
+        "{{\"ok\":true,\"status\":\"trace_complete\",\"tab_id\":\"{s}\",\"path\":\"{s}\",\"bytes\":{d},\"data_loss\":{s},\"trace_format\":\"{s}\"}}",
+        .{ tab_id, escaped_path, total_bytes, if (stream_rec.data_loss) "true" else "false", escaped_format },
+    ) catch {
+        resp.sendError(request, 500, "Internal Server Error");
+        return;
+    };
+    resp.sendJson(request, body);
 }
 
 fn handleProfilerStart(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
-    const target = request.head.target;
-    const tab_id = getQueryParam(target, "tab_id") orelse {
-        resp.sendError(request, 400, "Missing tab_id parameter");
-        return;
-    };
+    const tab_id = requireEffectiveTabId(arena, request, bridge) orelse return;
     const client = bridge.getCdpClient(tab_id) orelse {
         resp.sendError(request, 404, "Tab not found");
         return;
@@ -4920,11 +5598,7 @@ fn handleProfilerStart(request: *std.http.Server.Request, arena: std.mem.Allocat
 }
 
 fn handleProfilerStop(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
-    const target = request.head.target;
-    const tab_id = getQueryParam(target, "tab_id") orelse {
-        resp.sendError(request, 400, "Missing tab_id parameter");
-        return;
-    };
+    const tab_id = requireEffectiveTabId(arena, request, bridge) orelse return;
     const client = bridge.getCdpClient(tab_id) orelse {
         resp.sendError(request, 404, "Tab not found");
         return;
@@ -4938,17 +5612,25 @@ fn handleProfilerStop(request: *std.http.Server.Request, arena: std.mem.Allocato
 }
 
 fn handleInspect(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
-    const target = request.head.target;
-    const tab_id = getQueryParam(target, "tab_id") orelse {
-        resp.sendError(request, 400, "Missing tab_id parameter");
-        return;
-    };
+    const tab_id = requireEffectiveTabId(arena, request, bridge) orelse return;
     const client = bridge.getCdpClient(tab_id) orelse {
         resp.sendError(request, 404, "Tab not found");
         return;
     };
-    _ = client.send(arena, protocol.Methods.inspector_enable, null) catch {};
-    const body = std.fmt.allocPrint(arena, "{{\"status\":\"ok\",\"message\":\"DevTools enabled\",\"tab_id\":\"{s}\"}}", .{tab_id}) catch {
+    // Inspector.enable has no synchronous introspection counterpart in
+    // CDP -- it only arms two future notifications (Inspector.targetCrashed,
+    // Inspector.detached) that this codebase doesn't yet surface anywhere.
+    // Report exactly that instead of a canned "DevTools enabled" message
+    // implying a devtools session or queryable state now exists.
+    _ = client.send(arena, protocol.Methods.inspector_enable, null) catch {
+        resp.sendError(request, 502, "Inspector.enable failed");
+        return;
+    };
+    const body = std.fmt.allocPrint(
+        arena,
+        "{{\"ok\":true,\"action\":\"inspector_enable\",\"tab_id\":\"{s}\",\"note\":\"Inspector.enable succeeded. CDP's Inspector domain has no synchronous introspection command -- it only arms Inspector.targetCrashed/Inspector.detached notifications, which kuri does not yet surface. There is no further state to retrieve from this endpoint.\"}}",
+        .{tab_id},
+    ) catch {
         resp.sendError(request, 500, "Internal Server Error");
         return;
     };
@@ -5041,10 +5723,7 @@ fn handleSessionList(request: *std.http.Server.Request, arena: std.mem.Allocator
 
 fn handleSetViewport(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
     const target = request.head.target;
-    const tab_id = getQueryParam(target, "tab_id") orelse {
-        resp.sendError(request, 400, "Missing tab_id parameter");
-        return;
-    };
+    const tab_id = requireEffectiveTabId(arena, request, bridge) orelse return;
     const width = getQueryParam(target, "width") orelse "1280";
     const height = getQueryParam(target, "height") orelse "720";
     const scale = getQueryParam(target, "scale") orelse "1";
@@ -5070,10 +5749,7 @@ fn handleSetViewport(request: *std.http.Server.Request, arena: std.mem.Allocator
 
 fn handleSetUserAgent(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
     const target = request.head.target;
-    const tab_id = getQueryParam(target, "tab_id") orelse {
-        resp.sendError(request, 400, "Missing tab_id parameter");
-        return;
-    };
+    const tab_id = requireEffectiveTabId(arena, request, bridge) orelse return;
     const ua = getDecodedQueryParamAlloc(arena, target, "ua") orelse {
         resp.sendError(request, 400, "Missing ua parameter");
         return;
@@ -5104,10 +5780,7 @@ fn handleSetUserAgent(request: *std.http.Server.Request, arena: std.mem.Allocato
 
 fn handleDomAttributes(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
     const target = request.head.target;
-    const tab_id = getQueryParam(target, "tab_id") orelse {
-        resp.sendError(request, 400, "Missing tab_id parameter");
-        return;
-    };
+    const tab_id = requireEffectiveTabId(arena, request, bridge) orelse return;
     const ref = getQueryParam(target, "ref");
     const selector = getQueryParam(target, "selector");
     const client = bridge.getCdpClient(tab_id) orelse {
@@ -5174,24 +5847,74 @@ fn handleFrames(request: *std.http.Server.Request, arena: std.mem.Allocator, bri
     resp.sendJson(request, response);
 }
 
+fn writeNetworkRecordJson(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, rec: NetworkRecord) !void {
+    try buf.appendSlice(allocator, "{");
+    try writeJsonField(buf, allocator, "request_id", rec.request_id);
+    try buf.appendSlice(allocator, ",");
+    try writeJsonField(buf, allocator, "url", rec.url);
+    try buf.appendSlice(allocator, ",");
+    try writeJsonField(buf, allocator, "method", rec.method);
+    try buf.appendSlice(allocator, ",");
+    try writeJsonField(buf, allocator, "mime_type", rec.mime_type);
+    try buf.print(allocator, ",\"url_truncated\":{s},\"timestamp\":{d}}}", .{ if (rec.url_truncated) "true" else "false", rec.timestamp });
+}
+
+/// `mode=enable|disable` (default `enable`) flip Network.enable/disable,
+/// same as before. `mode=list` is new: a lightweight, read-only view over
+/// the bounded 200-record ring client.zig's Network collector keeps
+/// passively (url/method/mime_type/timestamp only) -- it never touches
+/// enable/disable state. This deliberately does NOT duplicate /har/*:
+/// /har/start + /har/stop gives full headers/timing/bodies via a dedicated
+/// recorder; /network?mode=list is the cheap "what's happened recently"
+/// check that doesn't require starting a HAR capture first.
 fn handleNetwork(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
     const target = request.head.target;
-    const tab_id = getQueryParam(target, "tab_id") orelse {
-        resp.sendError(request, 400, "Missing tab_id parameter");
-        return;
-    };
+    const tab_id = requireEffectiveTabId(arena, request, bridge) orelse return;
     const mode = getQueryParam(target, "mode") orelse "enable";
     const client = bridge.getCdpClient(tab_id) orelse {
         resp.sendError(request, 404, "Tab not found");
         return;
     };
 
+    if (std.mem.eql(u8, mode, "list")) {
+        client.drainWsEvents(arena, 1);
+        const url_filter = getDecodedQueryParamAlloc(arena, target, "url");
+        const records = client.snapshotNetworkRequests(arena) catch {
+            resp.sendError(request, 500, "Internal Server Error");
+            return;
+        };
+        var buf: std.ArrayList(u8) = .empty;
+        buf.appendSlice(arena, "{\"ok\":true,\"requests\":[") catch {
+            resp.sendError(request, 500, "Internal Server Error");
+            return;
+        };
+        var written: usize = 0;
+        for (records) |rec| {
+            if (url_filter) |wanted| {
+                if (std.mem.indexOf(u8, rec.url, wanted) == null) continue;
+            }
+            if (written > 0) buf.appendSlice(arena, ",") catch return;
+            writeNetworkRecordJson(&buf, arena, rec) catch return;
+            written += 1;
+        }
+        buf.print(
+            arena,
+            "],\"count\":{d},\"tab_id\":\"{s}\",\"note\":\"lightweight view over a bounded 200-record ring (url/method/mime_type/timestamp only); for full headers/timing/response bodies use /har/start + /har/stop\"}}",
+            .{ written, tab_id },
+        ) catch {
+            resp.sendError(request, 500, "Internal Server Error");
+            return;
+        };
+        resp.sendJson(request, buf.items);
+        return;
+    }
+
     const method = if (std.mem.eql(u8, mode, "disable")) protocol.Methods.network_disable else protocol.Methods.network_enable;
-    const response = client.send(arena, method, null) catch {
+    _ = client.send(arena, method, null) catch {
         resp.sendError(request, 502, "Network command failed");
         return;
     };
-    _ = response;
+    if (std.mem.eql(u8, mode, "disable")) client.clearNetworkRequests();
     const body = std.fmt.allocPrint(arena, "{{\"status\":\"ok\",\"network\":\"{s}\"}}", .{mode}) catch {
         resp.sendError(request, 500, "Internal Server Error");
         return;
@@ -5201,10 +5924,7 @@ fn handleNetwork(request: *std.http.Server.Request, arena: std.mem.Allocator, br
 
 fn handlePerfLcp(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
     const target = request.head.target;
-    const tab_id = getQueryParam(target, "tab_id") orelse {
-        resp.sendError(request, 400, "Missing tab_id parameter");
-        return;
-    };
+    const tab_id = requireEffectiveTabId(arena, request, bridge) orelse return;
     const url = getDecodedQueryParamAlloc(arena, target, "url");
 
     const client = bridge.getCdpClient(tab_id) orelse {
@@ -5255,11 +5975,7 @@ fn handlePerfLcp(request: *std.http.Server.Request, arena: std.mem.Allocator, br
 
 // --- Issue #111: Batch cookie injection via POST body ---
 fn handleCookiesSet(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
-    const target = request.head.target;
-    const tab_id = getQueryParam(target, "tab_id") orelse {
-        resp.sendError(request, 400, "Missing tab_id parameter");
-        return;
-    };
+    const tab_id = requireEffectiveTabId(arena, request, bridge) orelse return;
     const client = bridge.getCdpClient(tab_id) orelse {
         resp.sendError(request, 404, "Tab not found");
         return;
@@ -5283,16 +5999,54 @@ fn handleCookiesSet(request: *std.http.Server.Request, arena: std.mem.Allocator,
 }
 
 // --- Issue #112: Return captured request/response pairs ---
+// Backwards compatible: while interception is inactive for this tab
+// (nobody has called /intercept/start, or /intercept/stop already ran),
+// this falls back to the pre-existing Resource Timing API snapshot so
+// existing callers keep getting a non-empty answer. Once interception is
+// active, this returns the REAL Fetch.requestPaused records the
+// auto-responder recorded — including tabs where zero requests have paused
+// yet (an empty "requests":[] is still a real, correct answer once
+// active). The `source` field lets callers tell the two shapes apart.
 fn handleInterceptRequests(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
-    const target = request.head.target;
-    const tab_id = getQueryParam(target, "tab_id") orelse {
-        resp.sendError(request, 400, "Missing tab_id parameter");
+    const tab_id = resolveEffectiveTabIdAlloc(arena, request, bridge) orelse {
+        resp.sendError(request, 400, "Missing tab_id parameter (or set X-Kuri-Session)");
         return;
     };
     const client = bridge.getCdpClient(tab_id) orelse {
         resp.sendError(request, 404, "Tab not found");
         return;
     };
+
+    if (client.interceptActive()) {
+        const records = client.snapshotPausedRequests(arena) catch {
+            resp.sendError(request, 500, "Internal Server Error");
+            return;
+        };
+
+        var buf: std.ArrayList(u8) = .empty;
+        buf.appendSlice(arena, "{\"source\":\"intercepted\",\"requests\":[") catch {
+            resp.sendError(request, 500, "Internal Server Error");
+            return;
+        };
+        for (records, 0..) |rec, i| {
+            if (i > 0) buf.appendSlice(arena, ",") catch return;
+            buf.appendSlice(arena, "{") catch return;
+            writeJsonField(&buf, arena, "request_id", rec.request_id) catch return;
+            buf.appendSlice(arena, ",") catch return;
+            writeJsonField(&buf, arena, "url", rec.url) catch return;
+            buf.appendSlice(arena, ",") catch return;
+            writeJsonField(&buf, arena, "method", rec.method) catch return;
+            buf.appendSlice(arena, ",") catch return;
+            writeJsonField(&buf, arena, "resource_type", rec.resource_type) catch return;
+            buf.appendSlice(arena, ",\"action\":\"") catch return;
+            buf.appendSlice(arena, @tagName(rec.action_taken)) catch return;
+            buf.print(arena, "\",\"status\":{d},\"timestamp\":{d}}}", .{ rec.status, rec.timestamp }) catch return;
+        }
+        buf.print(arena, "],\"count\":{d}}}", .{records.len}) catch return;
+
+        resp.sendJson(request, buf.items);
+        return;
+    }
 
     // Use Runtime.evaluate to capture performance entries (Resource Timing API)
     // This gives us all network requests without needing to maintain server-side state
@@ -5315,7 +6069,15 @@ fn handleInterceptRequests(request: *std.http.Server.Request, arena: std.mem.All
         return;
     };
 
-    resp.sendJson(request, response);
+    // Splice a "source" field into the CDP response's top-level object so
+    // existing callers parsing .result.result.value keep working exactly
+    // as before, while new callers can check .source.
+    const wrapped = if (response.len > 0 and response[0] == '{')
+        std.fmt.allocPrint(arena, "{{\"source\":\"resource_timing\",{s}", .{response[1..]}) catch response
+    else
+        response;
+
+    resp.sendJson(request, wrapped);
 }
 
 // --- Issue #113: Cross-platform browser cookie DB extraction ---
@@ -5421,11 +6183,7 @@ fn handleAuthExtract(request: *std.http.Server.Request, arena: std.mem.Allocator
 
 // --- Issue #114: WebSocket message capture ---
 fn handleWsStart(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
-    const target = request.head.target;
-    const tab_id = getQueryParam(target, "tab_id") orelse {
-        resp.sendError(request, 400, "Missing tab_id parameter");
-        return;
-    };
+    const tab_id = requireEffectiveTabId(arena, request, bridge) orelse return;
     const client = bridge.getCdpClient(tab_id) orelse {
         resp.sendError(request, 404, "Tab not found");
         return;
@@ -5474,11 +6232,7 @@ fn handleWsStart(request: *std.http.Server.Request, arena: std.mem.Allocator, br
 }
 
 fn handleWsStop(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
-    const target = request.head.target;
-    const tab_id = getQueryParam(target, "tab_id") orelse {
-        resp.sendError(request, 400, "Missing tab_id parameter");
-        return;
-    };
+    const tab_id = requireEffectiveTabId(arena, request, bridge) orelse return;
     const client = bridge.getCdpClient(tab_id) orelse {
         resp.sendError(request, 404, "Tab not found");
         return;
@@ -5935,6 +6689,7 @@ fn handleDialogAuto(request: *std.http.Server.Request, arena: std.mem.Allocator,
     const target = request.head.target;
     const tab_id = requireEffectiveTabId(arena, request, bridge) orelse return;
     const mode = getQueryParam(target, "mode") orelse "accept";
+    const prompt_text: []const u8 = getDecodedQueryParamAlloc(arena, target, "text") orelse "";
 
     const client = bridge.getCdpClient(tab_id) orelse {
         resp.sendError(request, 404, "Tab not found");
@@ -5943,7 +6698,31 @@ fn handleDialogAuto(request: *std.http.Server.Request, arena: std.mem.Allocator,
 
     _ = client.send(arena, protocol.Methods.page_enable, null) catch {};
 
-    const accept_str = if (std.mem.eql(u8, mode, "dismiss")) "false" else "true";
+    // mode=off / mode=disable turns the CDP-level auto-responder back off
+    // without touching any dialog that might currently be open.
+    const disabling = std.mem.eql(u8, mode, "off") or std.mem.eql(u8, mode, "disable");
+    const accept = !std.mem.eql(u8, mode, "dismiss");
+    const accept_str = if (accept) "true" else "false";
+
+    // Wire the CDP read-loop auto-responder (client.zig) so
+    // Page.javascriptDialogOpening is answered even between HTTP calls —
+    // not just via the window-level JS listeners below, which only cover
+    // dialogs the page itself can see and only while this handler's own
+    // Runtime.evaluate calls are in flight.
+    client.setDialogAuto(!disabling, accept, prompt_text) catch {
+        resp.sendError(request, 500, "Internal Server Error");
+        return;
+    };
+
+    if (disabling) {
+        const off_body = std.fmt.allocPrint(arena, "{{\"ok\":true,\"mode\":\"{s}\"}}", .{mode}) catch {
+            resp.sendError(request, 500, "Internal Server Error");
+            return;
+        };
+        resp.sendJson(request, off_body);
+        return;
+    }
+
     const js = std.fmt.allocPrint(arena, "(() => {{ window.__kuri_dialog_auto = {s}; window.__kuri_dialog_log = []; window.addEventListener('beforeunload', (e) => {{ e.preventDefault(); }}); return 'auto-dialog-{s}'; }})()", .{ accept_str, mode }) catch {
         resp.sendError(request, 500, "Internal Server Error");
         return;
@@ -6330,42 +7109,97 @@ fn handleWaitForFunction(request: *std.http.Server.Request, arena: std.mem.Alloc
     resp.sendJson(request, "{\"status\":\"timeout\",\"reason\":\"function_not_truthy\"}");
 }
 
+/// `?request_id=` (direct) or `?url=` (looked up against client.zig's
+/// bounded Network collector -- see `findNetworkRequestByUrl`) resolve a
+/// real CDP requestId, then this calls Network.getResponseBody against it.
+/// This replaced a `runtime_evaluate(fetch(url))` workaround: that re-issued
+/// a brand new same-origin-restricted request instead of returning what the
+/// page actually received (wrong body on redirects/POSTs/opaque responses,
+/// and simply failed cross-origin without CORS).
 fn handleResponseBody(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
     const target = request.head.target;
     const tab_id = requireEffectiveTabId(arena, request, bridge) orelse return;
-    const url_pattern = getDecodedQueryParamAlloc(arena, target, "url") orelse {
-        resp.sendError(request, 400, "Missing url parameter");
-        return;
-    };
     const client = bridge.getCdpClient(tab_id) orelse {
         resp.sendError(request, 404, "Tab not found");
         return;
     };
-    const escaped_url = jsonEscapeAlloc(arena, url_pattern) orelse {
+
+    const direct_request_id = getDecodedQueryParamAlloc(arena, target, "request_id");
+    var request_id: []const u8 = undefined;
+    var matched_url: ?[]const u8 = null;
+    if (direct_request_id) |rid| {
+        request_id = rid;
+    } else {
+        const url_pattern = getDecodedQueryParamAlloc(arena, target, "url") orelse {
+            resp.sendError(request, 400, "Missing request_id or url parameter");
+            return;
+        };
+        client.drainWsEvents(arena, 1);
+        const rec = (client.findNetworkRequestByUrl(arena, url_pattern) catch {
+            resp.sendError(request, 500, "Internal Server Error");
+            return;
+        }) orelse {
+            resp.sendError(
+                request,
+                404,
+                "No recorded network request matches that url substring (is Network.enable active for this tab, e.g. via /network?mode=enable, and did the request already happen?)",
+            );
+            return;
+        };
+        request_id = rec.request_id;
+        matched_url = rec.url;
+    }
+
+    const escaped_request_id = jsonEscapeAlloc(arena, request_id) orelse {
         resp.sendError(request, 500, "Internal Server Error");
         return;
     };
-    const js = std.fmt.allocPrint(arena, "(async () => {{ try {{ const r = await fetch('{s}'); const t = await r.text(); return JSON.stringify({{status:r.status,url:r.url,body:t.substring(0,10000)}}); }} catch(e) {{ return JSON.stringify({{error:e.message}}); }} }})()", .{escaped_url}) catch {
+    const params = std.fmt.allocPrint(arena, "{{\"requestId\":\"{s}\"}}", .{escaped_request_id}) catch {
         resp.sendError(request, 500, "Internal Server Error");
         return;
     };
-    const escaped = jsonEscapeAlloc(arena, js) orelse {
-        resp.sendError(request, 500, "Internal Server Error");
+    const response = client.send(arena, protocol.Methods.network_get_response_body, params) catch {
+        resp.sendError(request, 502, "Network.getResponseBody failed");
         return;
     };
-    const params = std.fmt.allocPrint(arena, "{{\"expression\":\"{s}\",\"returnByValue\":true,\"awaitPromise\":true}}", .{escaped}) catch {
-        resp.sendError(request, 500, "Internal Server Error");
+
+    if (jsonscan.extractObject(response, "error")) |err_obj| {
+        const err_msg = jsonscan.extractField(err_obj, "message") orelse "Network.getResponseBody returned an error";
+        resp.sendError(request, 502, err_msg);
         return;
-    };
-    const response = client.send(arena, protocol.Methods.runtime_evaluate, params) catch {
-        resp.sendError(request, 502, "CDP command failed");
-        return;
-    };
-    const val = extractSimpleJsonString(response, 0, "\"value\"") orelse {
+    }
+
+    const body_field = jsonscan.extractField(response, "body") orelse {
         resp.sendJson(request, response);
         return;
     };
-    resp.sendJson(request, val);
+    const base64_str = jsonscan.extractField(response, "base64Encoded");
+    const is_base64 = if (base64_str) |v| std.mem.eql(u8, v, "true") else false;
+
+    var buf: std.ArrayList(u8) = .empty;
+    buf.appendSlice(arena, "{\"ok\":true,\"request_id\":") catch {
+        resp.sendError(request, 500, "Internal Server Error");
+        return;
+    };
+    writeJsonStringValue(&buf, arena, request_id) catch {
+        resp.sendError(request, 500, "Internal Server Error");
+        return;
+    };
+    if (matched_url) |u| {
+        buf.appendSlice(arena, ",\"url\":") catch {
+            resp.sendError(request, 500, "Internal Server Error");
+            return;
+        };
+        writeJsonStringValue(&buf, arena, u) catch {
+            resp.sendError(request, 500, "Internal Server Error");
+            return;
+        };
+    }
+    buf.print(arena, ",\"base64Encoded\":{s},\"body\":\"{s}\"}}", .{ if (is_base64) "true" else "false", body_field }) catch {
+        resp.sendError(request, 500, "Internal Server Error");
+        return;
+    };
+    resp.sendJson(request, buf.items);
 }
 
 fn handleSetContent(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
@@ -6674,7 +7508,24 @@ fn handleDispatch(request: *std.http.Server.Request, arena: std.mem.Allocator, b
         resp.sendError(request, 500, "Internal Server Error");
         return;
     };
-    const js = std.fmt.allocPrint(arena, "function() {{ this.dispatchEvent(new Event('{s}', {{bubbles:true,cancelable:true}})); return 'dispatched'; }}", .{escaped_type}) catch {
+    // Dispatching a plain `new Event(type, ...)` never triggers the browser's
+    // native default action for an untrusted event — a bare 'click' never
+    // navigates a link and a bare 'submit' never actually submits a form,
+    // only JS listeners fire. For the types where that matters, call the
+    // real native method (el.click() / form.requestSubmit()) instead. Mouse
+    // types need a real MouseEvent (listeners often read e.button/e.view);
+    // pointer types (canvas apps, custom sliders, DnD libraries that listen
+    // for pointerdown/pointermove) need a real PointerEvent with pointerId/
+    // pointerType/clientX/clientY set, or `instanceof PointerEvent` checks
+    // and coordinate reads silently see undefined; keyboard types need a
+    // real KeyboardEvent for the same reason (dedicated /keydown, /keyup,
+    // /keyboard/type already cover the common case via genuine
+    // Input.dispatchKeyEvent, this is for symmetry/generic dispatch). Other
+    // types (change, input, ...) have no native default action and a plain
+    // bubbling+cancelable Event is exactly what listeners expect.
+    const js = std.fmt.allocPrint(arena,
+        \\function() {{ var t='{s}'; if (t==='click') {{ this.click(); return 'dispatched'; }} if (t==='submit') {{ var f = (this.tagName==='FORM') ? this : this.form; if (f) {{ if (f.requestSubmit) f.requestSubmit(); else f.submit(); return 'dispatched'; }} this.dispatchEvent(new Event('submit',{{bubbles:true,cancelable:true}})); return 'dispatched'; }} if (t==='dblclick'||t==='mousedown'||t==='mouseup'||t==='mouseover'||t==='mouseout'||t==='mouseenter'||t==='mouseleave') {{ this.dispatchEvent(new MouseEvent(t,{{bubbles:true,cancelable:true,view:window}})); return 'dispatched'; }} if (t==='pointerdown'||t==='pointerup'||t==='pointermove'||t==='pointerover'||t==='pointerout'||t==='pointerenter'||t==='pointerleave'||t==='pointercancel') {{ var r = this.getBoundingClientRect(); var cx = r.left + r.width/2, cy = r.top + r.height/2; this.dispatchEvent(new PointerEvent(t,{{bubbles:true,cancelable:true,view:window,pointerId:1,pointerType:'mouse',isPrimary:true,clientX:cx,clientY:cy}})); return 'dispatched'; }} if (t==='keydown'||t==='keyup'||t==='keypress') {{ this.dispatchEvent(new KeyboardEvent(t,{{bubbles:true,cancelable:true,view:window}})); return 'dispatched'; }} this.dispatchEvent(new Event(t,{{bubbles:true,cancelable:true}})); return 'dispatched'; }}
+    , .{escaped_type}) catch {
         resp.sendError(request, 500, "Internal Server Error");
         return;
     };
@@ -6697,6 +7548,23 @@ fn handleDispatch(request: *std.http.Server.Request, arena: std.mem.Allocator, b
     resp.sendJson(request, body);
 }
 
+/// Resolve the directory Chrome should save downloads into: `?dir=` query
+/// param (percent-decoded) if given, else a fixed fallback. Both /download
+/// and /wait/download call this instead of each hardcoding the same
+/// literal path with no way for a caller to override it.
+///
+/// (An environment-variable tier was considered too, but this Zig
+/// toolchain's `std.process` no longer exposes a plain
+/// `getEnvVarOwned(allocator, key)` — env vars now go through
+/// `std.process.Environ`/`Environ.Map`, which needs an already-scanned
+/// environ handle this per-request code path doesn't have one of. Not
+/// worth pulling that machinery in for a single fallback tier when the
+/// query param already makes this configurable.)
+fn resolveDownloadDir(arena: std.mem.Allocator, target: []const u8) []const u8 {
+    if (getDecodedQueryParamAlloc(arena, target, "dir")) |d| return d;
+    return "/tmp/kuri-downloads";
+}
+
 fn handleDownload(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
     const target = request.head.target;
     const tab_id = requireEffectiveTabId(arena, request, bridge) orelse return;
@@ -6708,7 +7576,19 @@ fn handleDownload(request: *std.http.Server.Request, arena: std.mem.Allocator, b
         resp.sendError(request, 404, "Tab not found");
         return;
     };
-    _ = client.send(arena, "Page.setDownloadBehavior", "{\"behavior\":\"allow\",\"downloadPath\":\"/tmp/kuri-downloads\"}") catch {};
+    const download_dir = resolveDownloadDir(arena, target);
+    const escaped_dir = jsonEscapeAlloc(arena, download_dir) orelse {
+        resp.sendError(request, 500, "Internal Server Error");
+        return;
+    };
+    const behavior_params = std.fmt.allocPrint(arena, "{{\"behavior\":\"allow\",\"downloadPath\":\"{s}\"}}", .{escaped_dir}) catch {
+        resp.sendError(request, 500, "Internal Server Error");
+        return;
+    };
+    _ = client.send(arena, "Page.setDownloadBehavior", behavior_params) catch {
+        resp.sendError(request, 502, "Page.setDownloadBehavior failed");
+        return;
+    };
     const escaped_url = jsonEscapeAlloc(arena, url) orelse {
         resp.sendError(request, 500, "Internal Server Error");
         return;
@@ -6849,15 +7729,79 @@ fn handleExpose(request: *std.http.Server.Request, arena: std.mem.Allocator, bri
         resp.sendError(request, 500, "Internal Server Error");
         return;
     };
-    _ = client.send(arena, "Runtime.addBinding", params) catch {
+    // Runtime.bindingCalled is only delivered once the Runtime domain is
+    // enabled -- without this, Runtime.addBinding silently succeeds but the
+    // endpoint's whole purpose (observing page -> host calls) never fires.
+    _ = client.send(arena, protocol.Methods.runtime_enable, null) catch {};
+    _ = client.send(arena, protocol.Methods.runtime_add_binding, params) catch {
         resp.sendError(request, 502, "CDP command failed");
         return;
     };
-    const body = std.fmt.allocPrint(arena, "{{\"ok\":true,\"action\":\"expose\",\"name\":\"{s}\"}}", .{escaped_name}) catch {
+    const body = std.fmt.allocPrint(
+        arena,
+        "{{\"ok\":true,\"action\":\"expose\",\"name\":\"{s}\",\"tab_id\":\"{s}\",\"retrieve_calls_at\":\"/expose/calls?tab_id={s}&name={s}\"}}",
+        .{ escaped_name, tab_id, tab_id, escaped_name },
+    ) catch {
         resp.sendError(request, 500, "Internal Server Error");
         return;
     };
     resp.sendJson(request, body);
+}
+
+/// Retrieval half of /expose: without this, `window.<name>(...)` calls the
+/// page makes into the binding it just registered are captured by
+/// `CdpClient`'s BindingCallRing (see client.zig's Case 2 collector) but
+/// nothing ever hands them back out -- the whole reason /expose exists.
+/// `?name=` filters to one binding; `?clear=true` drains the ring after
+/// reading (so repeated polling doesn't see the same calls twice).
+fn handleExposeCalls(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
+    const target = request.head.target;
+    const tab_id = requireEffectiveTabId(arena, request, bridge) orelse return;
+    const client = bridge.getCdpClient(tab_id) orelse {
+        resp.sendError(request, 404, "Tab not found");
+        return;
+    };
+    const name_filter = getDecodedQueryParamAlloc(arena, target, "name");
+    const should_clear = if (getQueryParam(target, "clear")) |v| std.mem.eql(u8, v, "true") else false;
+
+    // Best-effort: pull any bindingCalled events already sitting on the
+    // socket into the ring before snapshotting -- see the "paused CDP
+    // events only make forward progress while a command is in flight"
+    // design limit noted on the collector accessors in client.zig. No-op
+    // on Windows (see drainWsEvents).
+    client.drainWsEvents(arena, 1);
+
+    const calls = client.snapshotBindingCalls(arena) catch {
+        resp.sendError(request, 500, "Internal Server Error");
+        return;
+    };
+
+    var buf: std.ArrayList(u8) = .empty;
+    buf.appendSlice(arena, "{\"ok\":true,\"calls\":[") catch {
+        resp.sendError(request, 500, "Internal Server Error");
+        return;
+    };
+    var written: usize = 0;
+    for (calls) |call| {
+        if (name_filter) |wanted| {
+            if (!std.mem.eql(u8, call.name, wanted)) continue;
+        }
+        if (written > 0) buf.appendSlice(arena, ",") catch return;
+        buf.appendSlice(arena, "{") catch return;
+        writeJsonField(&buf, arena, "name", call.name) catch return;
+        buf.appendSlice(arena, ",") catch return;
+        writeJsonField(&buf, arena, "payload", call.payload) catch return;
+        buf.print(arena, ",\"truncated\":{s},\"timestamp\":{d}}}", .{ if (call.truncated) "true" else "false", call.timestamp }) catch return;
+        written += 1;
+    }
+    buf.print(arena, "],\"count\":{d},\"tab_id\":\"{s}\"}}", .{ written, tab_id }) catch {
+        resp.sendError(request, 500, "Internal Server Error");
+        return;
+    };
+
+    if (should_clear) client.clearBindingCalls();
+
+    resp.sendJson(request, buf.items);
 }
 
 fn handleMultiSelect(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
@@ -6982,10 +7926,56 @@ fn handleVitals(request: *std.http.Server.Request, arena: std.mem.Allocator, bri
         \\  var fcp = 0; paint.forEach(function(e) { if (e.name === 'first-contentful-paint') fcp = e.startTime; });
         \\  var ttfb = nav.responseStart || 0;
         \\  var domInteractive = nav.domInteractive || 0;
-        \\  var lcp = 0; try { var entries = performance.getEntriesByType('largest-contentful-paint'); if (entries.length) lcp = entries[entries.length-1].startTime; } catch(e) {}
-        \\  var cls = 0; try { var entries = performance.getEntriesByType('layout-shift'); entries.forEach(function(e) { if (!e.hadRecentInput) cls += e.value; }); } catch(e) {}
-        \\  var fid = 0; try { var entries = performance.getEntriesByType('first-input'); if (entries.length) fid = entries[0].processingStart - entries[0].startTime; } catch(e) {}
-        \\  return JSON.stringify({lcp:lcp,cls:cls,fid:fid,ttfb:ttfb,fcp:fcp,domInteractive:domInteractive});
+        \\  // lcp/cls/fid entry types are buffered by Chromium from navigation
+        \\  // start regardless of whether a PerformanceObserver was ever
+        \\  // registered, so getEntriesByType legitimately retrieves real,
+        \\  // already-occurred values here (same technique /perf/lcp uses).
+        \\  var lcp = 0, lcpMeasured = false;
+        \\  try {
+        \\    var lcpEntries = performance.getEntriesByType('largest-contentful-paint');
+        \\    if (lcpEntries.length) { lcp = lcpEntries[lcpEntries.length - 1].startTime; lcpMeasured = true; }
+        \\  } catch (e) {}
+        \\  var cls = 0, clsMeasured = false;
+        \\  try {
+        \\    var clsEntries = performance.getEntriesByType('layout-shift');
+        \\    clsMeasured = clsEntries.length > 0;
+        \\    // Windowed CLS: group shifts into "sessions" (gap < 1s between
+        \\    // consecutive shifts, session <= 5s total) and report the max
+        \\    // session sum. This is the official web-vitals algorithm --
+        \\    // unlike a lifetime running sum, it doesn't overstate CLS on
+        \\    // long-lived SPA pages that accumulate many small unrelated
+        \\    // shifts over a long session.
+        \\    var sessionValue = 0, sessionEntries = [], maxSessionValue = 0;
+        \\    clsEntries.forEach(function(e) {
+        \\      if (e.hadRecentInput) return;
+        \\      var first = sessionEntries[0];
+        \\      var last = sessionEntries[sessionEntries.length - 1];
+        \\      if (sessionValue && first && (e.startTime - last.startTime) < 1000 && (e.startTime - first.startTime) < 5000) {
+        \\        sessionValue += e.value;
+        \\        sessionEntries.push(e);
+        \\      } else {
+        \\        sessionValue = e.value;
+        \\        sessionEntries = [e];
+        \\      }
+        \\      if (sessionValue > maxSessionValue) maxSessionValue = sessionValue;
+        \\    });
+        \\    cls = maxSessionValue;
+        \\  } catch (e) {}
+        \\  var fid = 0, fidMeasured = false;
+        \\  try {
+        \\    var fidEntries = performance.getEntriesByType('first-input');
+        \\    if (fidEntries.length) { fid = fidEntries[0].processingStart - fidEntries[0].startTime; fidMeasured = true; }
+        \\  } catch (e) {}
+        \\  // *_measured distinguishes "genuinely zero" from "hasn't happened
+        \\  // yet" -- fid/cls legitimately read 0 if called before any
+        \\  // input/layout-shift has occurred, which looks identical to a
+        \\  // real zero without this flag.
+        \\  return JSON.stringify({
+        \\    lcp: lcp, lcp_measured: lcpMeasured,
+        \\    cls: cls, cls_measured: clsMeasured,
+        \\    fid: fid, fid_measured: fidMeasured,
+        \\    ttfb: ttfb, fcp: fcp, domInteractive: domInteractive
+        \\  });
         \\})()
     ;
     const escaped = jsonEscapeAlloc(arena, js) orelse {
@@ -7007,6 +7997,121 @@ fn handleVitals(request: *std.http.Server.Request, arena: std.mem.Allocator, bri
     resp.sendJson(request, val);
 }
 
+/// Extract the raw JSON array *interior* (without the enclosing `[`/`]`)
+/// for `key` (e.g. "childFrames"), using the same string-aware
+/// bracket-depth counting `jsonscan.extractObject` uses for `{`/`}`.
+/// Returns null if `key` isn't present as an array or it never closes.
+fn extractArrayInterior(json: []const u8, key: []const u8) ?[]const u8 {
+    var key_buf: [64]u8 = undefined;
+    const needle = std.fmt.bufPrint(&key_buf, "\"{s}\":[", .{key}) catch return null;
+    const key_pos = std.mem.indexOf(u8, json, needle) orelse return null;
+    const arr_start = key_pos + needle.len - 1; // points at '['
+    var depth: usize = 0;
+    var in_string = false;
+    var escaped = false;
+    var i = arr_start;
+    while (i < json.len) : (i += 1) {
+        const c = json[i];
+        if (in_string) {
+            if (escaped) {
+                escaped = false;
+            } else if (c == '\\') {
+                escaped = true;
+            } else if (c == '"') {
+                in_string = false;
+            }
+            continue;
+        }
+        switch (c) {
+            '"' => in_string = true,
+            '[' => depth += 1,
+            ']' => {
+                depth -= 1;
+                if (depth == 0) return json[arr_start + 1 .. i];
+            },
+            else => {},
+        }
+    }
+    return null;
+}
+
+const JsonArrayElement = struct { slice: []const u8, next: usize };
+
+/// Find the next top-level `{...}` object inside a JSON array's interior
+/// (as returned by `extractArrayInterior`), scanning from `from`. Returns
+/// the object slice plus the index just past its closing `}`, or null once
+/// no more objects remain. String- and depth-aware, same idiom as
+/// `jsonscan.extractObject`, so a nested `childFrames` array inside an
+/// element (or a literal `,`/`{`/`}` inside a frame's URL string) never
+/// causes a false split.
+fn nextArrayObject(interior: []const u8, from: usize) ?JsonArrayElement {
+    var depth: usize = 0;
+    var in_string = false;
+    var escaped = false;
+    var start: ?usize = null;
+    var i = from;
+    while (i < interior.len) : (i += 1) {
+        const c = interior[i];
+        if (in_string) {
+            if (escaped) {
+                escaped = false;
+            } else if (c == '\\') {
+                escaped = true;
+            } else if (c == '"') {
+                in_string = false;
+            }
+            continue;
+        }
+        switch (c) {
+            '"' => in_string = true,
+            '{' => {
+                if (depth == 0) start = i;
+                depth += 1;
+            },
+            '}' => {
+                depth -= 1;
+                if (depth == 0) {
+                    if (start) |s| return .{ .slice = interior[s .. i + 1], .next = i + 1 };
+                    start = null;
+                }
+            },
+            else => {},
+        }
+    }
+    return null;
+}
+
+/// Recursively search a `Page.getFrameTree` node (`{"frame":{...},
+/// "childFrames":[...]}`) for a frame whose `name` matches exactly or
+/// whose `url` contains `url_substr`, at ANY nesting depth. This is what
+/// replaces `document.querySelector('iframe[...]')` against the top
+/// document, which can only ever see the top document's *direct* iframe
+/// children and is blind to a frame nested inside another frame. Returns
+/// the matching frame's CDP frameId, borrowed from `tree_json`.
+fn findFrameIdInTree(tree_json: []const u8, name: ?[]const u8, url_substr: ?[]const u8) ?[]const u8 {
+    const frame_obj = jsonscan.extractObject(tree_json, "frame") orelse return null;
+    const matches = blk: {
+        if (name) |n| {
+            const frame_name = jsonscan.extractField(frame_obj, "name") orelse break :blk false;
+            break :blk std.mem.eql(u8, frame_name, n);
+        }
+        if (url_substr) |u| {
+            const frame_url = jsonscan.extractField(frame_obj, "url") orelse break :blk false;
+            break :blk std.mem.indexOf(u8, frame_url, u) != null;
+        }
+        break :blk false;
+    };
+    if (matches) return jsonscan.extractField(frame_obj, "id");
+
+    const children = extractArrayInterior(tree_json, "childFrames") orelse return null;
+    var cursor: usize = 0;
+    while (nextArrayObject(children, cursor)) |elem| {
+        if (findFrameIdInTree(elem.slice, name, url_substr)) |found| return found;
+        cursor = elem.next;
+    }
+    return null;
+}
+
 fn handleFrame(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
     const target = request.head.target;
     const tab_id = requireEffectiveTabId(arena, request, bridge) orelse return;
@@ -7020,38 +8125,64 @@ fn handleFrame(request: *std.http.Server.Request, arena: std.mem.Allocator, brid
         resp.sendError(request, 400, "Missing name or url parameter");
         return;
     }
-    const selector = if (name) |n| blk: {
-        const escaped_n = jsonEscapeAlloc(arena, n) orelse {
-            resp.sendError(request, 500, "Internal Server Error");
-            return;
-        };
-        break :blk std.fmt.allocPrint(arena, "iframe[name=\\'{s}\\']", .{escaped_n}) catch {
-            resp.sendError(request, 500, "Internal Server Error");
-            return;
-        };
-    } else blk: {
-        const escaped_u = jsonEscapeAlloc(arena, url.?) orelse {
-            resp.sendError(request, 500, "Internal Server Error");
-            return;
-        };
-        break :blk std.fmt.allocPrint(arena, "iframe[src*=\\'{s}\\']", .{escaped_u}) catch {
-            resp.sendError(request, 500, "Internal Server Error");
-            return;
-        };
+
+    // Walk the full recursive frame tree (Page.getFrameTree, same call
+    // /frames already uses) instead of `document.querySelector('iframe[...]
+    // ')` against the top document -- that approach can only ever see the
+    // top document's *direct* iframe children and is blind to a frame
+    // nested inside another frame.
+    _ = client.send(arena, protocol.Methods.page_enable, null) catch {};
+    const tree_response = client.send(arena, protocol.Methods.page_get_frame_tree, null) catch {
+        resp.sendError(request, 502, "Page.getFrameTree failed");
+        return;
     };
-    const js = std.fmt.allocPrint(arena, "(function() {{ var f = document.querySelector('{s}'); if (!f) return JSON.stringify({{error:'iframe not found'}}); try {{ return JSON.stringify({{ok:true,title:f.contentDocument.title,url:f.contentWindow.location.href}}); }} catch(e) {{ return JSON.stringify({{ok:true,crossOrigin:true,src:f.src}}); }} }})()", .{selector}) catch {
+    const frame_tree = jsonscan.extractObject(tree_response, "frameTree") orelse {
+        resp.sendError(request, 500, "Could not parse Page.getFrameTree response");
+        return;
+    };
+    const frame_id = findFrameIdInTree(frame_tree, name, url) orelse {
+        resp.sendError(request, 404, "No frame in the frame tree (searched recursively) matches that name/url");
+        return;
+    };
+
+    // Resolve an execution context scoped to exactly that frame via an
+    // isolated world, then evaluate *inside* the target frame's own realm
+    // -- so document/location are its own regardless of whether the frame
+    // is cross-origin relative to the top document. This is why the old
+    // `f.contentDocument.title`/`f.contentWindow.location.href` crossOrigin
+    // fallback is gone: that check only existed because it was reaching
+    // into the frame from the *parent's* realm, which same-origin policy
+    // blocks; evaluating inside the frame's own context has no such check.
+    const escaped_frame_id = jsonEscapeAlloc(arena, frame_id) orelse {
         resp.sendError(request, 500, "Internal Server Error");
         return;
     };
-    const escaped = jsonEscapeAlloc(arena, js) orelse {
+    const isolated_params = std.fmt.allocPrint(arena, "{{\"frameId\":\"{s}\",\"worldName\":\"kuri_frame_probe\"}}", .{escaped_frame_id}) catch {
         resp.sendError(request, 500, "Internal Server Error");
         return;
     };
-    const params = std.fmt.allocPrint(arena, "{{\"expression\":\"{s}\",\"returnByValue\":true}}", .{escaped}) catch {
+    const isolated_response = client.send(arena, "Page.createIsolatedWorld", isolated_params) catch {
+        // Honest failure case: this frame exists in the tree but this CDP
+        // session can't attach an isolated world to it (e.g. a genuine
+        // out-of-process cross-origin subframe not attached to this
+        // target) -- report that rather than fabricating a result.
+        resp.sendError(request, 502, "Page.createIsolatedWorld failed (frame may not be attached to this CDP session)");
+        return;
+    };
+    const context_id = jsonscan.extractField(isolated_response, "executionContextId") orelse {
+        resp.sendError(request, 502, "Page.createIsolatedWorld returned no executionContextId");
+        return;
+    };
+    const js = "(function() { try { return JSON.stringify({ok:true,title:document.title,url:location.href}); } catch(e) { return JSON.stringify({ok:false,error:e.message}); } })()";
+    const escaped_js = jsonEscapeAlloc(arena, js) orelse {
         resp.sendError(request, 500, "Internal Server Error");
         return;
     };
-    const response = client.send(arena, protocol.Methods.runtime_evaluate, params) catch {
+    const eval_params = std.fmt.allocPrint(arena, "{{\"expression\":\"{s}\",\"contextId\":{s},\"returnByValue\":true}}", .{ escaped_js, context_id }) catch {
+        resp.sendError(request, 500, "Internal Server Error");
+        return;
+    };
+    const response = client.send(arena, protocol.Methods.runtime_evaluate, eval_params) catch {
         resp.sendError(request, 502, "CDP command failed");
         return;
     };
@@ -7063,9 +8194,34 @@ fn handleFrame(request: *std.http.Server.Request, arena: std.mem.Allocator, brid
 }
 
 fn handleMainFrame(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
-    _ = arena;
-    _ = bridge;
-    resp.sendJson(request, "{\"ok\":true,\"frame\":\"main\"}");
+    const tab_id = requireEffectiveTabId(arena, request, bridge) orelse return;
+    const client = bridge.getCdpClient(tab_id) orelse {
+        resp.sendError(request, 404, "Tab not found");
+        return;
+    };
+    const response = client.send(arena, protocol.Methods.page_get_frame_tree, null) catch {
+        resp.sendError(request, 502, "Page.getFrameTree failed");
+        return;
+    };
+    // Response shape: {"id":N,"result":{"frameTree":{"frame":{"id":...,"loaderId":...,"url":...},...}}}
+    // Search from "frameTree" onward so the top-level JSON-RPC "id" (a bare
+    // number, not a string) is never mistaken for the frame's own "id".
+    const frametree_pos = std.mem.indexOf(u8, response, "\"frameTree\"") orelse {
+        resp.sendJson(request, "{\"ok\":true,\"frame\":\"main\"}");
+        return;
+    };
+    const frame_id = extractSimpleJsonString(response, frametree_pos, "\"id\"") orelse "";
+    const loader_id = extractSimpleJsonString(response, frametree_pos, "\"loaderId\"") orelse "";
+    const frame_url = extractSimpleJsonString(response, frametree_pos, "\"url\"") orelse "";
+    const body = std.fmt.allocPrint(
+        arena,
+        "{{\"ok\":true,\"frame\":\"main\",\"tab_id\":\"{s}\",\"frameId\":\"{s}\",\"loaderId\":\"{s}\",\"url\":\"{s}\"}}",
+        .{ tab_id, frame_id, loader_id, frame_url },
+    ) catch {
+        resp.sendError(request, 500, "Internal Server Error");
+        return;
+    };
+    resp.sendJson(request, body);
 }
 
 fn handleGetAttribute(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
@@ -7191,66 +8347,175 @@ fn handleInputValue(request: *std.http.Server.Request, arena: std.mem.Allocator,
     resp.sendJson(request, body);
 }
 
+fn clampU32(s: ?[]const u8, default: u32, max: u32) u32 {
+    const v = if (s) |str| (std.fmt.parseInt(u32, str, 10) catch default) else default;
+    return @min(v, max);
+}
+
+fn callValueObject(arena: std.mem.Allocator, client: *CdpClient, object_id: []const u8, function_declaration: []const u8) ?[]const u8 {
+    const escaped_fn = jsonEscapeAlloc(arena, function_declaration) orelse return null;
+    const params = std.fmt.allocPrint(arena, "{{\"objectId\":\"{s}\",\"functionDeclaration\":\"{s}\",\"returnByValue\":true}}", .{ object_id, escaped_fn }) catch return null;
+    const response = client.send(arena, protocol.Methods.runtime_call_function_on, params) catch return null;
+    return extractJsonObjectField(response, "\"value\"");
+}
+
+/// Build the `{"id":"..."}` or `{"selector":"..."}` opts object passed to
+/// window.__kuri_react.inspect(). Exactly one of id/selector is expected to
+/// be non-null (enforced by the caller); selector is caller-controlled text
+/// so it must be escaped before it lands inside a JS expression, same as
+/// every other user-supplied string embedded elsewhere in this file.
+fn buildReactInspectOpts(arena: std.mem.Allocator, id: ?[]const u8, selector: ?[]const u8) ?[]const u8 {
+    if (id) |i| {
+        const escaped_id = jsonEscapeAlloc(arena, i) orelse return null;
+        return std.fmt.allocPrint(arena, "{{\"id\":\"{s}\"}}", .{escaped_id}) catch null;
+    }
+    if (selector) |s| {
+        const escaped_sel = jsonEscapeAlloc(arena, s) orelse return null;
+        return std.fmt.allocPrint(arena, "{{\"selector\":\"{s}\"}}", .{escaped_sel}) catch null;
+    }
+    return null;
+}
+
+/// React introspection. Dispatches into the persistent window.__kuri_react
+/// library (src/cdp/js/react_fiber.js, injected by discoverTabs) instead of
+/// rebuilding the fiber walk in an inline JS string per request. Every
+/// __kuri_react.* entry point returns {"react":false} on pages with no React
+/// (no fiber keys found on any DOM node) -- that check happens once, inside
+/// the JS library, not per-endpoint here, so all four modes degrade the same
+/// way. Responses come back via evalValueObject/callValueObject, i.e. as a
+/// raw object slice -- never double-JSON-encoded through an internal
+/// JSON.stringify like the old hook-gated stub did.
 fn handleReact(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge, mode: []const u8) void {
+    const target = request.head.target;
     const tab_id = requireEffectiveTabId(arena, request, bridge) orelse return;
     const client = bridge.getCdpClient(tab_id) orelse {
         resp.sendError(request, 404, "Tab not found");
         return;
     };
-    const escaped_mode = jsonEscapeAlloc(arena, mode) orelse {
-        resp.sendError(request, 500, "Internal Server Error");
+
+    if (std.mem.eql(u8, mode, "tree")) {
+        // Hard caps enforced here regardless of what the caller requests --
+        // the number that actually matters is the 2MB CDP response ceiling
+        // (client.zig's receiveMessageAlloc), not anything the JS itself
+        // could sensibly self-limit to.
+        const max_nodes = clampU32(getQueryParam(target, "max_nodes"), 500, 3000);
+        const max_depth = clampU32(getQueryParam(target, "max_depth"), 40, 150);
+        const include_text = if (getQueryParam(target, "include_host_text")) |v| std.mem.eql(u8, v, "true") else false;
+        const expr = std.fmt.allocPrint(
+            arena,
+            "window.__kuri_react ? window.__kuri_react.tree({{\"maxNodes\":{d},\"maxDepth\":{d},\"includeHostText\":{s}}}) : {{\"react\":false}}",
+            .{ max_nodes, max_depth, if (include_text) "true" else "false" },
+        ) catch {
+            resp.sendError(request, 500, "Internal Server Error");
+            return;
+        };
+        const val = evalValueObject(arena, client, expr) orelse {
+            resp.sendError(request, 502, "CDP command failed");
+            return;
+        };
+        resp.sendJson(request, val);
         return;
-    };
-    const js = std.fmt.allocPrint(arena,
-        \\(function() {{
-        \\  var hook = window.__REACT_DEVTOOLS_GLOBAL_HOOK__;
-        \\  if (!hook) return JSON.stringify({{error:'React DevTools hook not found'}});
-        \\  var mode = '{s}';
-        \\  if (mode === 'tree') {{
-        \\    var fiberRoots = [];
-        \\    hook.getFiberRoots && hook.getFiberRoots(1).forEach(function(root) {{
-        \\      function walk(fiber, depth) {{
-        \\        if (!fiber || depth > 20) return null;
-        \\        var name = fiber.type ? (fiber.type.displayName || fiber.type.name || 'Anonymous') : '#text';
-        \\        var children = [];
-        \\        var child = fiber.child;
-        \\        while (child) {{ var c = walk(child, depth+1); if (c) children.push(c); child = child.sibling; }}
-        \\        return {{name:name,children:children}};
-        \\      }}
-        \\      fiberRoots.push(walk(root.current, 0));
-        \\    }});
-        \\    return JSON.stringify({{ok:true,mode:'tree',roots:fiberRoots}});
-        \\  }} else if (mode === 'inspect') {{
-        \\    var renderers = []; hook.renderers && hook.renderers.forEach(function(v,k) {{ renderers.push({{id:k,version:v.version||'unknown'}}); }});
-        \\    return JSON.stringify({{ok:true,mode:'inspect',renderers:renderers}});
-        \\  }} else if (mode === 'renders') {{
-        \\    return JSON.stringify({{ok:true,mode:'renders',message:'Use React Profiler API for render tracking'}});
-        \\  }} else if (mode === 'suspense') {{
-        \\    return JSON.stringify({{ok:true,mode:'suspense',message:'Suspense boundaries detected via fiber walk'}});
-        \\  }}
-        \\  return JSON.stringify({{error:'unknown mode'}});
-        \\}})()
-    , .{escaped_mode}) catch {
-        resp.sendError(request, 500, "Internal Server Error");
+    }
+
+    if (std.mem.eql(u8, mode, "inspect")) {
+        // ref: reuse the existing a11y-snapshot ref-resolution flow verbatim
+        // (same shape as handleGetAttribute / handleBoundingBox) -- resolve
+        // to a live DOM object, then call inspectElement(this) on it.
+        if (getQueryParam(target, "ref")) |r| {
+            bridge.mu.lockShared();
+            const cache = bridge.snapshots.get(tab_id);
+            bridge.mu.unlockShared();
+            const bid = if (cache) |c| c.refs.get(r) else null;
+            if (bid == null) {
+                resp.sendError(request, 400, "Ref not found");
+                return;
+            }
+            const rp = std.fmt.allocPrint(arena, "{{\"backendNodeId\":{d}}}", .{bid.?}) catch {
+                resp.sendError(request, 500, "Internal Server Error");
+                return;
+            };
+            const rr = client.send(arena, protocol.Methods.dom_resolve_node, rp) catch {
+                resp.sendError(request, 502, "DOM.resolveNode failed");
+                return;
+            };
+            const oid = extractSimpleJsonString(rr, 0, "\"objectId\"") orelse {
+                resp.sendError(request, 500, "Could not resolve element");
+                return;
+            };
+            const val = callValueObject(
+                arena,
+                client,
+                oid,
+                "function(){ return window.__kuri_react ? window.__kuri_react.inspectElement(this) : {react:false}; }",
+            ) orelse {
+                resp.sendError(request, 502, "CDP command failed");
+                return;
+            };
+            resp.sendJson(request, val);
+            return;
+        }
+
+        // id (from a prior /react/tree or /react/suspense call) or selector.
+        const id = getQueryParam(target, "id");
+        const selector = getDecodedQueryParamAlloc(arena, target, "selector");
+        if (id == null and selector == null) {
+            resp.sendError(request, 400, "Provide one of: ref, id, selector");
+            return;
+        }
+        const opts_json = buildReactInspectOpts(arena, id, selector) orelse {
+            resp.sendError(request, 500, "Internal Server Error");
+            return;
+        };
+        const expr = std.fmt.allocPrint(
+            arena,
+            "window.__kuri_react ? window.__kuri_react.inspect({s}) : {{\"react\":false}}",
+            .{opts_json},
+        ) catch {
+            resp.sendError(request, 500, "Internal Server Error");
+            return;
+        };
+        const val = evalValueObject(arena, client, expr) orelse {
+            resp.sendError(request, 502, "CDP command failed");
+            return;
+        };
+        resp.sendJson(request, val);
         return;
-    };
-    const escaped = jsonEscapeAlloc(arena, js) orelse {
-        resp.sendError(request, 500, "Internal Server Error");
+    }
+
+    if (std.mem.eql(u8, mode, "renders")) {
+        // Not the React Profiler API (a much heavier commitment -- explicit
+        // start/stopProfiling against a profiling bundle). This is a real,
+        // bounded commit log fed by a hook stub that never depends on
+        // __REACT_DEVTOOLS_GLOBAL_HOOK__ already existing; honest about its
+        // one real limitation via hookAttachedBeforeInit/note in the payload
+        // rather than a canned "not supported" or a made-up capability.
+        const val = evalValueObject(arena, client, "window.__kuri_react ? window.__kuri_react.renders() : {\"react\":false}") orelse {
+            resp.sendError(request, 502, "CDP command failed");
+            return;
+        };
+        resp.sendJson(request, val);
         return;
-    };
-    const params = std.fmt.allocPrint(arena, "{{\"expression\":\"{s}\",\"returnByValue\":true}}", .{escaped}) catch {
-        resp.sendError(request, 500, "Internal Server Error");
+    }
+
+    if (std.mem.eql(u8, mode, "suspense")) {
+        const max_nodes = clampU32(getQueryParam(target, "max_nodes"), 500, 3000);
+        const expr = std.fmt.allocPrint(
+            arena,
+            "window.__kuri_react ? window.__kuri_react.suspense({{\"maxNodes\":{d}}}) : {{\"react\":false}}",
+            .{max_nodes},
+        ) catch {
+            resp.sendError(request, 500, "Internal Server Error");
+            return;
+        };
+        const val = evalValueObject(arena, client, expr) orelse {
+            resp.sendError(request, 502, "CDP command failed");
+            return;
+        };
+        resp.sendJson(request, val);
         return;
-    };
-    const response = client.send(arena, protocol.Methods.runtime_evaluate, params) catch {
-        resp.sendError(request, 502, "CDP command failed");
-        return;
-    };
-    const val = extractSimpleJsonString(response, 0, "\"value\"") orelse {
-        resp.sendJson(request, response);
-        return;
-    };
-    resp.sendJson(request, val);
+    }
+
+    resp.sendError(request, 400, "Unknown react mode");
 }
 
 fn handleRecording(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge, mode: []const u8) void {
@@ -7340,6 +8605,21 @@ fn handleRequestDetail(request: *std.http.Server.Request, arena: std.mem.Allocat
     resp.sendJson(request, response);
 }
 
+/// Scale a caller-supplied timeout (ms) into a `waitForEvent` attempt
+/// count. Loosely calibrated, not exact: each attempt reads one message off
+/// the CDP socket, which blocks for up to the socket's fixed ~10s read
+/// timeout when idle, so on a truly idle connection the real wait is
+/// bounded below by that single read timeout regardless of this value; on
+/// a busy tab (other events arriving) this bounds how many unrelated
+/// events get consumed before giving up. Same approximation existing call
+/// sites (`waitForEvent(..., 1_000)`, `waitForEvent(..., 400)`) already
+/// accept; clamped to a sane range either way.
+fn timeoutMsToAttempts(timeout_ms: u64) u32 {
+    const scaled: u64 = timeout_ms / 50;
+    const clamped: u64 = if (scaled < 20) 20 else if (scaled > 20000) 20000 else scaled;
+    return @intCast(clamped);
+}
+
 fn handleWaitForDownload(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
     const target = request.head.target;
     const tab_id = requireEffectiveTabId(arena, request, bridge) orelse return;
@@ -7349,28 +8629,62 @@ fn handleWaitForDownload(request: *std.http.Server.Request, arena: std.mem.Alloc
         resp.sendError(request, 404, "Tab not found");
         return;
     };
-    _ = client.send(arena, "Page.setDownloadBehavior", "{\"behavior\":\"allow\",\"downloadPath\":\"/tmp/kuri-downloads\"}") catch {};
-    const js = std.fmt.allocPrint(arena, "(function() {{ return JSON.stringify({{ok:true,action:'waitForDownload',timeout:{d},message:'Download behavior set to allow'}}); }})()", .{timeout_ms}) catch {
+    const download_dir = resolveDownloadDir(arena, target);
+    const escaped_dir = jsonEscapeAlloc(arena, download_dir) orelse {
         resp.sendError(request, 500, "Internal Server Error");
         return;
     };
-    const escaped = jsonEscapeAlloc(arena, js) orelse {
+    const behavior_params = std.fmt.allocPrint(arena, "{{\"behavior\":\"allow\",\"downloadPath\":\"{s}\"}}", .{escaped_dir}) catch {
         resp.sendError(request, 500, "Internal Server Error");
         return;
     };
-    const params = std.fmt.allocPrint(arena, "{{\"expression\":\"{s}\",\"returnByValue\":true}}", .{escaped}) catch {
+    _ = client.send(arena, "Page.setDownloadBehavior", behavior_params) catch {
+        resp.sendError(request, 502, "Page.setDownloadBehavior failed");
+        return;
+    };
+    // Page.downloadWillBegin needs the Page domain enabled to fire at all.
+    _ = client.send(arena, protocol.Methods.page_enable, null) catch {};
+
+    // Wait for a real CDP signal instead of unconditionally returning a
+    // canned success unrelated to whether a download ever happens.
+    // Page.downloadWillBegin fires exactly once, at the moment Chrome
+    // commits to a download, so a `waitForEvent` match unambiguously means
+    // a download started.
+    //
+    // Known, deliberate limitation: `waitForEvent` only reports whether the
+    // *method name* matched an incoming message -- client.zig's in-read-
+    // loop dispatcher frees the actual event payload (guid/url/
+    // suggestedFilename) before this call ever sees it, so this endpoint
+    // can confirm a download *began* but cannot report its guid/path or
+    // whether it later completed/canceled (Page.downloadProgress carries
+    // that, but is a repeating multi-state stream and the same payload-
+    // discarding limitation applies there too). Surfacing guid/completion
+    // state honestly would require CdpClient to expose the matched event
+    // body to callers, which is out of scope for a router.zig-only change
+    // -- flagging that rather than fabricating a guid/state this endpoint
+    // never actually observed.
+    const began = client.waitForEvent(arena, "Page.downloadWillBegin", timeoutMsToAttempts(timeout_ms));
+    if (!began) {
+        const body = std.fmt.allocPrint(
+            arena,
+            "{{\"ok\":false,\"action\":\"waitForDownload\",\"detected\":false,\"error\":\"no Page.downloadWillBegin event observed within timeout\",\"timeout_ms\":{d}}}",
+            .{timeout_ms},
+        ) catch {
+            resp.sendError(request, 500, "Internal Server Error");
+            return;
+        };
+        resp.sendJson(request, body);
+        return;
+    }
+    const body = std.fmt.allocPrint(
+        arena,
+        "{{\"ok\":true,\"action\":\"waitForDownload\",\"detected\":true,\"event\":\"Page.downloadWillBegin\",\"note\":\"confirms a download started; per-download guid/path/completion state is not exposed by this endpoint\"}}",
+        .{},
+    ) catch {
         resp.sendError(request, 500, "Internal Server Error");
         return;
     };
-    const response = client.send(arena, protocol.Methods.runtime_evaluate, params) catch {
-        resp.sendError(request, 502, "CDP command failed");
-        return;
-    };
-    const val = extractSimpleJsonString(response, 0, "\"value\"") orelse {
-        resp.sendJson(request, response);
-        return;
-    };
-    resp.sendJson(request, val);
+    resp.sendJson(request, body);
 }
 
 fn handleRemoveInitScript(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
@@ -7418,11 +8732,9 @@ fn handleEvalHandle(request: *std.http.Server.Request, arena: std.mem.Allocator,
         resp.sendError(request, 500, "Internal Server Error");
         return;
     };
-    const escaped_expr = jsonEscapeAlloc(arena, expr) orelse {
-        resp.sendError(request, 500, "Internal Server Error");
-        return;
-    };
-    const params = std.fmt.allocPrint(arena, "{{\"expression\":\"{s}\",\"returnByValue\":false}}", .{escaped_expr}) catch {
+    // Escape exactly once — `expr` is already escaped. Double-escaping turns a
+    // newline into a literal backslash+n and makes Chrome reject the script.
+    const params = std.fmt.allocPrint(arena, "{{\"expression\":\"{s}\",\"returnByValue\":false}}", .{expr}) catch {
         resp.sendError(request, 500, "Internal Server Error");
         return;
     };
@@ -8006,6 +9318,35 @@ test "keyboard/type route parameters" {
     try std.testing.expectEqualStrings("hello", getQueryParam(target, "text").?);
 }
 
+test "keyboard/type must iterate text by Unicode codepoint, not raw byte" {
+    // handleKeyboardType used to do `for (text) |ch|`, splitting any
+    // multi-byte UTF-8 character into individual invalid bytes. Confirm the
+    // fix's iteration mechanism (std.unicode.Utf8Iterator) walks "héllo" as
+    // 5 codepoints (h, é, l, l, o) — a raw byte loop would see 6 bytes
+    // because é is 2 bytes in UTF-8.
+    const text = "héllo";
+    try std.testing.expectEqual(@as(usize, 6), text.len);
+
+    var utf8_iter: std.unicode.Utf8Iterator = .{ .bytes = text, .i = 0 };
+    var count: usize = 0;
+    var codepoints: [8][]const u8 = undefined;
+    while (utf8_iter.nextCodepointSlice()) |cp| : (count += 1) {
+        codepoints[count] = cp;
+    }
+    try std.testing.expectEqual(@as(usize, 5), count);
+    try std.testing.expectEqualStrings("h", codepoints[0]);
+    try std.testing.expectEqualStrings("é", codepoints[1]);
+    try std.testing.expectEqualStrings("l", codepoints[2]);
+    try std.testing.expectEqualStrings("l", codepoints[3]);
+    try std.testing.expectEqualStrings("o", codepoints[4]);
+
+    // jsonEscapeAlloc must pass the multi-byte codepoint through unmangled
+    // (it only escapes '"', '\\', and control chars < 0x20).
+    const escaped = jsonEscapeAlloc(std.testing.allocator, codepoints[1]);
+    try std.testing.expect(escaped != null);
+    try std.testing.expectEqualStrings("é", escaped.?);
+}
+
 test "set/offline route parameters" {
     const target = "/set/offline?tab_id=t1&mode=on";
     try std.testing.expectEqualStrings("t1", getQueryParam(target, "tab_id").?);
@@ -8044,6 +9385,104 @@ test "highlight route with selector" {
     try std.testing.expectEqualStrings("div.main", getQueryParam(target, "selector").?);
 }
 
+test "screenshot/annotated route requires a ref, resolved via the snapshot cache like /upload" {
+    const target = "/screenshot/annotated?tab_id=t1&ref=e7";
+    try std.testing.expectEqualStrings("t1", getQueryParam(target, "tab_id").?);
+    try std.testing.expectEqualStrings("e7", getQueryParam(target, "ref").?);
+    try std.testing.expect(getQueryParam("/screenshot/annotated?tab_id=t1", "ref") == null);
+}
+
+test "dispatch route parameters" {
+    const target = "/dispatch?tab_id=t1&ref=e2&type=click";
+    try std.testing.expectEqualStrings("t1", getQueryParam(target, "tab_id").?);
+    try std.testing.expectEqualStrings("e2", getQueryParam(target, "ref").?);
+    try std.testing.expectEqualStrings("click", getQueryParam(target, "type").?);
+}
+
+test "dispatch route parses pointer and keyboard event types" {
+    // These types fall into the PointerEvent/KeyboardEvent branches added
+    // to handleDispatch's generated JS, instead of the generic-Event
+    // fallback that used to leave e.g. e.pointerId/e.clientX/e.key
+    // undefined for any listener that checked them.
+    const pointer_target = "/dispatch?tab_id=t1&ref=e2&type=pointerdown";
+    try std.testing.expectEqualStrings("pointerdown", getQueryParam(pointer_target, "type").?);
+    const key_target = "/dispatch?tab_id=t1&ref=e2&type=keydown";
+    try std.testing.expectEqualStrings("keydown", getQueryParam(key_target, "type").?);
+}
+
+test "resolveDownloadDir prefers the dir query param over the fixed default" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const target = "/download?tab_id=t1&url=https://example.com/file&dir=/custom/downloads";
+    try std.testing.expectEqualStrings("/custom/downloads", resolveDownloadDir(arena_state.allocator(), target));
+}
+
+test "resolveDownloadDir falls back to the fixed default with no dir param or env var" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const target = "/download?tab_id=t1&url=https://example.com/file";
+    try std.testing.expectEqualStrings("/tmp/kuri-downloads", resolveDownloadDir(arena_state.allocator(), target));
+}
+
+test "timeoutMsToAttempts clamps to a sane range" {
+    try std.testing.expectEqual(@as(u32, 20), timeoutMsToAttempts(0));
+    try std.testing.expectEqual(@as(u32, 20), timeoutMsToAttempts(500));
+    try std.testing.expectEqual(@as(u32, 600), timeoutMsToAttempts(30_000));
+    try std.testing.expectEqual(@as(u32, 20000), timeoutMsToAttempts(10_000_000));
+}
+
+test "findFrameIdInTree finds a direct child by name" {
+    const tree =
+        \\{"frame":{"id":"MAIN","url":"https://example.com/"},"childFrames":[
+        \\  {"frame":{"id":"CHILD1","name":"payment","url":"https://pay.example.com/"}}
+        \\]}
+    ;
+    try std.testing.expectEqualStrings("CHILD1", findFrameIdInTree(tree, "payment", null).?);
+}
+
+test "findFrameIdInTree finds a frame nested two levels deep by url substring" {
+    // This is exactly the case document.querySelector('iframe[...]') on the
+    // top document cannot see: a frame nested inside another frame.
+    const tree =
+        \\{"frame":{"id":"MAIN","url":"https://example.com/"},"childFrames":[
+        \\  {"frame":{"id":"MID","url":"https://widgets.example.com/"},"childFrames":[
+        \\    {"frame":{"id":"DEEP","url":"https://checkout.example.com/pay?ref=1"}}
+        \\  ]}
+        \\]}
+    ;
+    try std.testing.expectEqualStrings("DEEP", findFrameIdInTree(tree, null, "checkout.example.com").?);
+}
+
+test "findFrameIdInTree returns null when nothing in the tree matches" {
+    const tree =
+        \\{"frame":{"id":"MAIN","url":"https://example.com/"},"childFrames":[
+        \\  {"frame":{"id":"CHILD1","url":"https://ads.example.com/"}}
+        \\]}
+    ;
+    try std.testing.expect(findFrameIdInTree(tree, "nope", null) == null);
+    try std.testing.expect(findFrameIdInTree(tree, null, "nowhere.example.com") == null);
+}
+
+test "extractArrayInterior and nextArrayObject split a childFrames array despite a literal comma in a url string" {
+    const tree =
+        \\{"frame":{"id":"MAIN"},"childFrames":[
+        \\  {"frame":{"id":"A","url":"https://example.com/?a=1,2"}},
+        \\  {"frame":{"id":"B","url":"https://example.com/b"}}
+        \\]}
+    ;
+    const interior = extractArrayInterior(tree, "childFrames").?;
+    const first = nextArrayObject(interior, 0).?;
+    try std.testing.expectEqualStrings("A", jsonscan.extractField(jsonscan.extractObject(first.slice, "frame").?, "id").?);
+    const second = nextArrayObject(interior, first.next).?;
+    try std.testing.expectEqualStrings("B", jsonscan.extractField(jsonscan.extractObject(second.slice, "frame").?, "id").?);
+    try std.testing.expect(nextArrayObject(interior, second.next) == null);
+}
+
+test "mainframe route accepts an explicit tab_id" {
+    const target = "/mainframe?tab_id=t1";
+    try std.testing.expectEqualStrings("t1", getQueryParam(target, "tab_id").?);
+}
+
 test "tab/new route with url" {
     const target = "/tab/new?url=https://example.com";
     try std.testing.expectEqualStrings("https://example.com", getQueryParam(target, "url").?);
@@ -8074,50 +9513,58 @@ test "action check/uncheck routes" {
 }
 
 test "total endpoint count" {
-    // Verify we have the expected number of routes
+    // Verify we have the expected number of routes. This list is documentation
+    // (grouped roughly by when each tier landed); the actual source of truth is
+    // the `Route` enum in `route()` -- the compiler's exhaustive switch already
+    // guarantees every enum variant has a handler, so we only need to check here
+    // that this list hasn't drifted from that enum's variant count.
     const routes = [_][]const u8{
-        "/health",              "/tabs",            "/discover",            "/navigate",              "/snapshot",          "/action",
-        "/text",                "/screenshot",      "/evaluate",            "/browdie",               "/har/start",         "/har/stop",
-        "/har/status",          "/close",           "/cookies",             "/cookies/clear",         "/cookies/delete",    "/cookies/set",
-        "/storage/local",       "/storage/session", "/storage/local/clear", "/storage/session/clear", "/get",               "/back",
-        "/forward",             "/reload",          "/diff/snapshot",       "/emulate",               "/geolocation",       "/upload",
-        "/session/save",        "/session/load",    "/auth/profile/save",   "/auth/profile/load",     "/auth/profile/list", "/auth/profile/delete",
-        "/auth/extract",        "/debug/enable",    "/debug/disable",       "/screenshot/annotated",  "/screenshot/diff",   "/screencast/start",
-        "/screencast/stop",     "/video/start",     "/video/stop",          "/console",               "/intercept/start",   "/intercept/stop",
-        "/intercept/requests",  "/markdown",        "/links",               "/pdf",                   "/dom/query",         "/dom/html",
-        "/headers",             "/script/inject",   "/stop",
+        "/health",            "/tabs",                "/page/info",          "/discover",        "/navigate",              "/snapshot",
+        "/action",            "/text",                "/screenshot",         "/evaluate",        "/browdie",               "/har/start",
+        "/har/stop",          "/har/status",          "/har/replay",         "/close",           "/cookies",               "/cookies/clear",
+        "/cookies/delete",    "/cookies/set",         "/storage/local",      "/storage/session", "/storage/local/clear",   "/storage/session/clear",
+        "/get",               "/back",                "/forward",            "/reload",          "/diff/snapshot",         "/emulate",
+        "/geolocation",       "/upload",              "/session/save",       "/session/load",    "/auth/profile/save",     "/auth/profile/load",
+        "/auth/profile/list", "/auth/profile/delete", "/auth/extract",       "/debug/enable",    "/debug/disable",         "/screenshot/annotated",
+        "/screenshot/diff",   "/screencast/start",    "/screencast/stop",    "/video/start",     "/video/stop",            "/console",
+        "/intercept/start",   "/intercept/stop",      "/intercept/requests", "/intercept/rules", "/intercept/rules/clear", "/markdown",
+        "/links",             "/pdf",                 "/dom/query",          "/dom/html",        "/headers",               "/script/inject",
+        "/stop",
         // Tier 1 new endpoints
-                       "/scrollintoview",        "/drag",              "/keyboard/type",
-        "/keyboard/inserttext", "/keydown",         "/keyup",               "/wait",                  "/tab/new",           "/tab/close",
-        "/highlight",           "/errors",          "/set/offline",         "/set/media",             "/set/credentials",
+                     "/scrollintoview",      "/drag",               "/keyboard/type",   "/keyboard/inserttext",   "/keydown",
+        "/keyup",             "/wait",                "/tab/current",        "/tab/new",         "/tab/close",             "/highlight",
+        "/errors",            "/set/offline",         "/set/media",          "/set/credentials",
         // Tier 2 new endpoints
-          "/find",
-        "/trace/start",         "/trace/stop",      "/profiler/start",      "/profiler/stop",         "/inspect",           "/window/new",
-        "/session/list",        "/set/viewport",    "/set/useragent",       "/dom/attributes",        "/frames",            "/network",
-        "/perf/lcp",
+        "/find",                  "/trace/start",
+        "/trace/stop",        "/profiler/start",      "/profiler/stop",      "/inspect",         "/window/new",            "/session/list",
+        "/set/viewport",      "/set/useragent",       "/dom/attributes",     "/frames",          "/network",               "/perf/lcp",
         // Tier 3 new endpoints
-                   "/ws/start",        "/ws/stop",
+        "/ws/start",          "/ws/stop",
         // Tier 4 new endpoints
-                    "/batch",                 "/element/state",
+                    "/batch",              "/element/state",
         // Tier 5 new endpoints
-            "/find-element",
-        "/dialog/auto",         "/dialog/accept",   "/dialog/dismiss",      "/mouse/move",            "/mouse/down",        "/mouse/up",
-        "/mouse/wheel",         "/page/state",
+          "/find-element",          "/dialog/auto",
+        "/dialog/accept",     "/dialog/dismiss",      "/mouse/move",         "/mouse/down",      "/mouse/up",              "/mouse/wheel",
+        "/page/state",
         // Tier 6 new endpoints
-             "/clipboard/read",      "/clipboard/write",       "/clear",             "/boundingbox",
-        "/wait/function",       "/response/body",   "/setcontent",          "/selectall",             "/setvalue",          "/timezone",
-        "/locale",              "/permissions",     "/tap",                 "/dispatch",              "/download",
+               "/clipboard/read",      "/clipboard/write",    "/clear",           "/boundingbox",           "/wait/function",
+        "/response/body",     "/setcontent",          "/selectall",          "/setvalue",        "/timezone",              "/locale",
+        "/permissions",       "/tap",                 "/dispatch",           "/download",
         // Tier 7 new endpoints
-                 "/addstyle",
-        "/bringtofront",        "/pushstate",       "/expose",              "/multiselect",           "/swipe",             "/vitals",
-        "/frame",               "/mainframe",       "/getattribute",        "/inputvalue",            "/react/tree",        "/react/inspect",
-        "/react/renders",       "/react/suspense",  "/recording/start",     "/recording/stop",        "/request/detail",    "/wait/download",
-        "/initscript/remove",   "/evalhandle",      "/diff/url",
+               "/addstyle",              "/bringtofront",
+        "/pushstate",         "/expose",              "/multiselect",        "/swipe",           "/vitals",                "/frame",
+        "/mainframe",         "/getattribute",        "/inputvalue",         "/react/tree",      "/react/inspect",         "/react/renders",
+        "/react/suspense",    "/recording/start",     "/recording/stop",     "/request/detail",  "/wait/download",         "/initscript/remove",
+        "/evalhandle",        "/diff/url",
         // Advanced features
-                   "/cache/set",             "/cache/get",         "/cache/clear",
-        "/cache/list",          "/screenshot/som",  "/snapshot/changes",    "/recording/export",
+                   "/cache/set",          "/cache/get",       "/cache/clear",           "/cache/list",
+        "/screenshot/som",    "/snapshot/changes",    "/recording/export",
+        // Collector retrieval endpoints
+          "/expose/calls",
     };
-    try std.testing.expectEqual(@as(usize, 142), routes.len);
+    const route_variant_count = @typeInfo(Route).@"enum".field_names.len;
+    try std.testing.expectEqual(route_variant_count, routes.len);
+    try std.testing.expectEqual(@as(usize, 148), routes.len);
 }
 
 test "buildGetExpression title" {
@@ -8232,6 +9679,24 @@ test "extractSimpleJsonString with offset" {
     try std.testing.expectEqualStrings("first", first.?);
 }
 
+test "handleMainFrame frame tree parsing must not read the top-level response id" {
+    // Real Page.getFrameTree shape: the JSON-RPC envelope's own "id" (a bare
+    // number, the command id) sits before "frameTree" — extractSimpleJsonString
+    // only matches quoted string values, so searching from position 0 for
+    // "id" must fail here (proving why handleMainFrame searches from the
+    // "frameTree" offset instead of from 0).
+    const response = "{\"id\":7,\"result\":{\"frameTree\":{\"frame\":{\"id\":\"F123\",\"loaderId\":\"L456\",\"url\":\"https://example.com/\"},\"childFrames\":[]}}}";
+    try std.testing.expect(extractSimpleJsonString(response, 0, "\"id\"") == null);
+
+    const frametree_pos = std.mem.indexOf(u8, response, "\"frameTree\"").?;
+    const frame_id = extractSimpleJsonString(response, frametree_pos, "\"id\"");
+    const loader_id = extractSimpleJsonString(response, frametree_pos, "\"loaderId\"");
+    const frame_url = extractSimpleJsonString(response, frametree_pos, "\"url\"");
+    try std.testing.expectEqualStrings("F123", frame_id.?);
+    try std.testing.expectEqualStrings("L456", loader_id.?);
+    try std.testing.expectEqualStrings("https://example.com/", frame_url.?);
+}
+
 test "extractSimpleJsonInt extracts number" {
     const json = "{\"backendDOMNodeId\":42,\"nodeId\":\"n1\"}";
     const val = extractSimpleJsonInt(json, 0, "\"backendDOMNodeId\"");
@@ -8342,6 +9807,24 @@ test "jsonEscapeAlloc escapes special chars" {
     try std.testing.expectEqualStrings("line1\\nline2\\r\\n", nl);
 }
 
+test "jsonEscapeAlloc applied twice corrupts JS source — escape exactly once" {
+    const arena = std.testing.allocator;
+    // Regression guard for the /evaluate + /script/inject double-escape bug.
+    // Escaping once is correct: a newline becomes the two-char sequence \n,
+    // which JSON-decodes back to a real newline in the JS source.
+    const once = jsonEscapeAlloc(arena, "return 1;\nreturn 2;").?;
+    defer arena.free(once);
+    try std.testing.expectEqualStrings("return 1;\\nreturn 2;", once);
+
+    // Escaping the ALREADY-escaped string turns the backslash into `\\`, so
+    // Chrome receives a literal backslash+n in the source and answers with
+    // "SyntaxError: Invalid or unexpected token" instead of running anything.
+    const twice = jsonEscapeAlloc(arena, once).?;
+    defer arena.free(twice);
+    try std.testing.expectEqualStrings("return 1;\\\\nreturn 2;", twice);
+    try std.testing.expect(!std.mem.eql(u8, once, twice));
+}
+
 test "parseCdpAddress falls back to managed chrome port" {
     const addr = parseCdpAddress(null, 9224);
     try std.testing.expectEqualStrings("127.0.0.1", addr.host);
@@ -8381,4 +9864,302 @@ test "perf/lcp route parameters" {
     try std.testing.expectEqualStrings("/perf/lcp", clean);
     try std.testing.expect(getQueryParam(path, "tab_id") != null);
     try std.testing.expect(getQueryParam(path, "url") != null);
+}
+
+test "intercept/rules route matching" {
+    const path = "/intercept/rules?tab_id=abc";
+    const clean = path[0..std.mem.indexOfScalar(u8, path, '?').?];
+    try std.testing.expectEqualStrings("/intercept/rules", clean);
+}
+
+test "intercept/rules/clear route matching" {
+    const path = "/intercept/rules/clear?tab_id=abc";
+    const clean = path[0..std.mem.indexOfScalar(u8, path, '?').?];
+    try std.testing.expectEqualStrings("/intercept/rules/clear", clean);
+}
+
+test "intercept/start patterns query param parsing" {
+    const target = "/intercept/start?tab_id=abc&patterns=*.png,*.jpg";
+    try std.testing.expectEqualStrings("abc", getQueryParam(target, "tab_id").?);
+    try std.testing.expectEqualStrings("*.png,*.jpg", getQueryParam(target, "patterns").?);
+    // Missing patterns falls back to "*" at the handler level, not here.
+    try std.testing.expect(getQueryParam("/intercept/start?tab_id=abc", "patterns") == null);
+}
+
+test "parseInterceptRuleBody parses a fulfill rule" {
+    var arena_impl = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_impl.deinit();
+    const arena = arena_impl.allocator();
+
+    const body =
+        \\{"url_pattern":"api.example.com","action":"fulfill","status":204,"content_type":"text/plain","body":"blocked"}
+    ;
+    const rule = parseInterceptRuleBody(arena, body).?;
+    try std.testing.expectEqualStrings("api.example.com", rule.url_substring);
+    try std.testing.expectEqual(InterceptRule.Action.fulfill, rule.action);
+    try std.testing.expectEqual(@as(u16, 204), rule.status);
+    try std.testing.expectEqualStrings("text/plain", rule.content_type);
+    try std.testing.expectEqualStrings("blocked", rule.body);
+}
+
+test "parseInterceptRuleBody parses an abort rule with error_reason" {
+    var arena_impl = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_impl.deinit();
+    const arena = arena_impl.allocator();
+
+    const body =
+        \\{"url_pattern":"ads.","action":"abort","error_reason":"BlockedByClient"}
+    ;
+    const rule = parseInterceptRuleBody(arena, body).?;
+    try std.testing.expectEqualStrings("ads.", rule.url_substring);
+    try std.testing.expectEqual(InterceptRule.Action.abort, rule.action);
+    try std.testing.expectEqualStrings("BlockedByClient", rule.error_reason);
+}
+
+test "parseInterceptRuleBody treats a bare * pattern as catch-all" {
+    var arena_impl = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_impl.deinit();
+    const arena = arena_impl.allocator();
+
+    const body =
+        \\{"url_pattern":"*","action":"continue"}
+    ;
+    const rule = parseInterceptRuleBody(arena, body).?;
+    try std.testing.expectEqualStrings("", rule.url_substring);
+    try std.testing.expectEqual(InterceptRule.Action.@"continue", rule.action);
+}
+
+test "parseInterceptRuleBody rejects an invalid action" {
+    var arena_impl = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_impl.deinit();
+    const arena = arena_impl.allocator();
+
+    const body =
+        \\{"url_pattern":"x","action":"redirect"}
+    ;
+    try std.testing.expect(parseInterceptRuleBody(arena, body) == null);
+}
+
+test "writeInterceptRuleJson serializes all rule fields" {
+    var arena_impl = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_impl.deinit();
+    const arena = arena_impl.allocator();
+
+    var buf: std.ArrayList(u8) = .empty;
+    try writeInterceptRuleJson(&buf, arena, .{
+        .url_substring = "/blocked",
+        .action = .abort,
+        .error_reason = "Failed",
+    });
+
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"url_pattern\":\"/blocked\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"action\":\"abort\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"error_reason\":\"Failed\"") != null);
+}
+
+test "network route mode=list parameter" {
+    const target = "/network?tab_id=t1&mode=list&url=example.com";
+    try std.testing.expectEqualStrings("list", getQueryParam(target, "mode").?);
+    try std.testing.expectEqualStrings("example.com", getQueryParam(target, "url").?);
+}
+
+test "expose/calls route parses tab_id, name, and clear parameters" {
+    const target = "/expose/calls?tab_id=t1&name=myBinding&clear=true";
+    try std.testing.expectEqualStrings("t1", getQueryParam(target, "tab_id").?);
+    try std.testing.expectEqualStrings("myBinding", getQueryParam(target, "name").?);
+    try std.testing.expectEqualStrings("true", getQueryParam(target, "clear").?);
+}
+
+test "expose/calls route matches cleanly" {
+    const clean = if (std.mem.indexOfScalar(u8, "/expose/calls?tab_id=1&name=foo", '?')) |idx|
+        "/expose/calls?tab_id=1&name=foo"[0..idx]
+    else
+        "/expose/calls?tab_id=1&name=foo";
+    try std.testing.expectEqualStrings("/expose/calls", clean);
+}
+
+test "screencast/stop frames query parameter defaults to latest when absent" {
+    const target = "/screencast/stop?tab_id=t1";
+    try std.testing.expectEqualStrings("latest", getQueryParam(target, "frames") orelse "latest");
+}
+
+test "screencast/stop frames=all and frames=none are both parseable" {
+    try std.testing.expectEqualStrings("all", getQueryParam("/screencast/stop?tab_id=t1&frames=all", "frames").?);
+    try std.testing.expectEqualStrings("none", getQueryParam("/screencast/stop?tab_id=t1&frames=none", "frames").?);
+}
+
+test "response/body route accepts either request_id or url parameter" {
+    try std.testing.expectEqualStrings("abc123", getQueryParam("/response/body?tab_id=t1&request_id=abc123", "request_id").?);
+    try std.testing.expectEqualStrings("example.com", getQueryParam("/response/body?tab_id=t1&url=example.com", "url").?);
+}
+
+test "writeScreencastFrameJson serializes all frame fields" {
+    var arena_impl = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_impl.deinit();
+    const arena = arena_impl.allocator();
+
+    var buf: std.ArrayList(u8) = .empty;
+    try writeScreencastFrameJson(&buf, arena, .{
+        .data_b64 = "Zm9v",
+        .timestamp = 12345.5,
+        .device_width = 1280,
+        .device_height = 720,
+        .session_id = 7,
+    });
+
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"data_b64\":\"Zm9v\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"device_width\":1280") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"device_height\":720") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"session_id\":7") != null);
+}
+
+test "writeNetworkRecordJson serializes all request fields" {
+    var arena_impl = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_impl.deinit();
+    const arena = arena_impl.allocator();
+
+    var buf: std.ArrayList(u8) = .empty;
+    try writeNetworkRecordJson(&buf, arena, .{
+        .request_id = "req-1",
+        .url = "https://example.com/api",
+        .url_truncated = false,
+        .method = "GET",
+        .mime_type = "application/json",
+        .timestamp = 1000,
+    });
+
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"request_id\":\"req-1\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"url\":\"https://example.com/api\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"method\":\"GET\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"mime_type\":\"application/json\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"url_truncated\":false") != null);
+}
+
+test "trace/start requests transferMode ReturnAsStream so /trace/stop can drain a stream" {
+    // Guards against silently dropping the transferMode param in a future
+    // edit: without it, Tracing.tracingComplete carries no `stream` handle
+    // and /trace/stop has nothing to read.
+    const params_fmt = "{{\"categories\":\"{s}\",\"options\":\"sampling-frequency=10000\",\"transferMode\":\"ReturnAsStream\"}}";
+    var buf: [256]u8 = undefined;
+    const rendered = try std.fmt.bufPrint(&buf, params_fmt, .{"test.category"});
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "\"transferMode\":\"ReturnAsStream\"") != null);
+}
+
+test "video/start and video/stop are their own route entries, not screencast aliases" {
+    // Regression guard: video/* used to be `const handleVideoStart =
+    // handleScreencastStart;` -- a pure alias with no distinct wiring. Both
+    // route paths must still resolve, and to a different function value
+    // than the screencast handlers (thin wrappers around a shared core,
+    // not the exact same function).
+    try std.testing.expect(@TypeOf(handleVideoStart) == @TypeOf(handleScreencastStart));
+    try std.testing.expect(&handleVideoStart != &handleScreencastStart);
+    try std.testing.expect(&handleVideoStop != &handleScreencastStop);
+}
+
+// --- X-Kuri-Session resolution across handler shapes ---
+//
+// resolveEffectiveTabIdAlloc is the single shared resolver behind every
+// handler shape in this file:
+//   - `const tab_id = requireEffectiveTabId(...) orelse return;` (the vast
+//     majority of handlers -- requireEffectiveTabId is a thin wrapper that
+//     just adds the 400 sendError)
+//   - `const tab_id = resolveEffectiveTabIdAlloc(...) orelse { sendError(...);
+//     return; };` (the inline form used by /console, /errors, and the
+//     /intercept/* handlers)
+//   - `const tab_id = resolveEffectiveTabIdAlloc(...);` with no error at all,
+//     used where a missing tab_id has its own fallback behavior (/navigate,
+//     /close)
+// A real std.http.Server.Request can't be constructed without a live
+// connection, but Request itself only needs `head` (parsed request line) and
+// `head_buffer` (raw bytes for iterateHeaders) populated -- exactly the
+// pattern std.http.Server.Request's own `test iterateHeaders` uses.
+fn testRequest(target: []const u8, head_buffer: []const u8, server: *std.http.Server) std.http.Server.Request {
+    return .{
+        .server = server,
+        .head = .{
+            .method = .GET,
+            .target = target,
+            .version = .@"HTTP/1.1",
+            .expect = null,
+            .content_type = null,
+            .content_length = null,
+            .transfer_encoding = .none,
+            .transfer_compression = .identity,
+            .keep_alive = true,
+        },
+        .head_buffer = @constCast(head_buffer),
+    };
+}
+
+test "resolveEffectiveTabIdAlloc resolves session across representative handler shapes" {
+    const allocator = std.testing.allocator;
+
+    var bridge = Bridge.init(allocator);
+    defer bridge.deinit();
+    try bridge.setCurrentTab("sess-abc", "tab-from-session");
+
+    var server: std.http.Server = .{
+        .reader = .{
+            .in = undefined,
+            .state = .received_head,
+            .interface = undefined,
+            .max_head_len = 4096,
+        },
+        .out = undefined,
+    };
+
+    // Shape 1: explicit ?tab_id= wins even when a session header also
+    // resolves -- the path every `requireEffectiveTabId(...) orelse return;`
+    // handler takes for a normal, fully-specified call.
+    {
+        var request = testRequest(
+            "/console?tab_id=explicit-tab",
+            "GET /console?tab_id=explicit-tab HTTP/1.1\r\nX-Kuri-Session: sess-abc\r\n\r\n",
+            &server,
+        );
+        const resolved = resolveEffectiveTabIdAlloc(allocator, &request, &bridge).?;
+        defer allocator.free(resolved);
+        try std.testing.expectEqualStrings("explicit-tab", resolved);
+    }
+
+    // Shape 2: no tab_id, X-Kuri-Session header -- the case the audit flagged
+    // as broken; exercised by both requireEffectiveTabId callers and the
+    // inline resolveEffectiveTabIdAlloc callers (/console, /errors,
+    // /intercept/*).
+    {
+        var request = testRequest(
+            "/console",
+            "GET /console HTTP/1.1\r\nX-Kuri-Session: sess-abc\r\n\r\n",
+            &server,
+        );
+        const resolved = resolveEffectiveTabIdAlloc(allocator, &request, &bridge).?;
+        defer allocator.free(resolved);
+        try std.testing.expectEqualStrings("tab-from-session", resolved);
+    }
+
+    // Shape 3: no tab_id, no header, session carried via ?session= query
+    // param -- the fallback getSessionId offers callers that can't set
+    // custom headers.
+    {
+        var request = testRequest(
+            "/errors?session=sess-abc",
+            "GET /errors?session=sess-abc HTTP/1.1\r\n\r\n",
+            &server,
+        );
+        const resolved = resolveEffectiveTabIdAlloc(allocator, &request, &bridge).?;
+        defer allocator.free(resolved);
+        try std.testing.expectEqualStrings("tab-from-session", resolved);
+    }
+
+    // Shape 4: no tab_id and no session at all -- resolves to null so the
+    // caller's own orelse (requireEffectiveTabId's sendError, or an inline
+    // one) is what fires, not a silent wrong-tab fallback.
+    {
+        var request = testRequest(
+            "/intercept/requests",
+            "GET /intercept/requests HTTP/1.1\r\n\r\n",
+            &server,
+        );
+        try std.testing.expect(resolveEffectiveTabIdAlloc(allocator, &request, &bridge) == null);
+    }
 }

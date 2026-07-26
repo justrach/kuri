@@ -7,6 +7,21 @@ const validator = @import("crawler/validator.zig");
 const bridge_mod = @import("bridge/bridge.zig");
 const middleware = @import("server/middleware.zig");
 const cdp_client = @import("cdp/client.zig");
+const router = @import("server/router.zig");
+
+/// Comptime string repeat. This Zig dev snapshot's tokenizer no longer emits
+/// a combined `**` token for the array/string repeat operator (`**` lexes as
+/// two separate `*` tokens, tripping the "ambiguous binary operator
+/// whitespace" check no matter how it's spaced) -- pre-existing breakage in
+/// this file, unrelated to router/CDP work, fixed here only so `zig build
+/// bench` runs at all.
+fn repeatStr(comptime s: []const u8, comptime n: usize) []const u8 {
+    comptime {
+        var result: []const u8 = "";
+        for (0..n) |_| result = result ++ s;
+        return result;
+    }
+}
 
 // ── Benchmark harness ──────────────────────────────────────────────────
 
@@ -62,7 +77,8 @@ const Bench = struct {
 };
 
 fn fmtDuration(ns: u64) [12]u8 {
-    var buf: [12]u8 = .{' '} ** 12;
+    var buf: [12]u8 = undefined;
+    @memset(&buf, ' ');
     if (ns < 1_000) {
         _ = std.fmt.bufPrint(&buf, "{d:>7}ns   ", .{ns}) catch {};
     } else if (ns < 1_000_000) {
@@ -78,10 +94,10 @@ fn fmtDuration(ns: u64) [12]u8 {
 // ── Benchmark data ─────────────────────────────────────────────────────
 
 const sample_html_small = "<html><head><title>Test</title></head><body><h1>Hello</h1><p>World</p></body></html>";
-const sample_html_medium = "<html><body>" ++ "<div class=\"item\"><h2>Title</h2><p>Lorem ipsum dolor sit amet, consectetur adipiscing elit.</p><a href=\"https://example.com\">Link</a></div>" ** 50 ++ "</body></html>";
+const sample_html_medium = "<html><body>" ++ repeatStr("<div class=\"item\"><h2>Title</h2><p>Lorem ipsum dolor sit amet, consectetur adipiscing elit.</p><a href=\"https://example.com\">Link</a></div>", 50) ++ "</body></html>";
 
 fn makeLargeHtml() []const u8 {
-    return "<html><body>" ++ "<div class=\"item\"><h2>Title</h2><p>Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.</p><ul><li>Item 1</li><li>Item 2</li><li>Item 3</li></ul><a href=\"https://example.com\">Link</a></div>" ** 200 ++ "</body></html>";
+    return "<html><body>" ++ comptime repeatStr("<div class=\"item\"><h2>Title</h2><p>Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.</p><ul><li>Item 1</li><li>Item 2</li><li>Item 3</li></ul><a href=\"https://example.com\">Link</a></div>", 200) ++ "</body></html>";
 }
 
 fn makeA11yNodes() [200]a11y.A11yNode {
@@ -289,6 +305,60 @@ fn benchArenaAllocReset() void {
     }
 }
 
+// ── Route dispatch: the production `router.route_table`
+// (StaticStringMap(Route) + exhaustive switch in `route()`). Permanent
+// regression-guard benchmark -- if route dispatch ever regresses back to a
+// linear if/else-if chain, "all 148 routes/call" here will jump from
+// ~1µs back toward ~12µs (measured before/after during the StaticStringMap
+// migration; see the optimization task report for the full comparison
+// against the old chain).
+const bench_route_paths = [_][]const u8{
+    "/health",               "/tabs",                  "/page/info",             "/discover",          "/navigate",
+    "/snapshot",             "/action",                "/text",                  "/screenshot",        "/evaluate",
+    "/browdie",              "/har/start",             "/har/stop",              "/har/status",        "/har/replay",
+    "/close",                "/cookies",               "/cookies/clear",         "/cookies/set",       "/storage/local",
+    "/storage/session",      "/storage/local/clear",   "/storage/session/clear", "/get",               "/back",
+    "/forward",              "/reload",                "/diff/snapshot",         "/emulate",           "/geolocation",
+    "/upload",               "/session/save",          "/session/load",          "/auth/profile/save", "/auth/profile/load",
+    "/auth/profile/list",    "/auth/profile/delete",   "/auth/extract",          "/debug/enable",      "/debug/disable",
+    "/screenshot/annotated", "/screenshot/diff",       "/screencast/start",      "/screencast/stop",   "/video/start",
+    "/video/stop",           "/console",               "/intercept/start",       "/intercept/stop",    "/intercept/requests",
+    "/intercept/rules",      "/intercept/rules/clear", "/markdown",              "/links",             "/pdf",
+    "/dom/query",            "/dom/html",              "/cookies/delete",        "/headers",           "/script/inject",
+    "/stop",                 "/scrollintoview",        "/drag",                  "/keyboard/type",     "/keyboard/inserttext",
+    "/keydown",              "/keyup",                 "/wait",                  "/tab/current",       "/tab/new",
+    "/tab/close",            "/highlight",             "/errors",                "/set/offline",       "/set/media",
+    "/set/credentials",      "/find",                  "/trace/start",           "/trace/stop",        "/profiler/start",
+    "/profiler/stop",        "/inspect",               "/window/new",            "/session/list",      "/set/viewport",
+    "/set/useragent",        "/dom/attributes",        "/frames",                "/network",           "/perf/lcp",
+    "/ws/start",             "/ws/stop",               "/batch",                 "/element/state",     "/find-element",
+    "/dialog/auto",          "/dialog/accept",         "/dialog/dismiss",        "/mouse/move",        "/mouse/down",
+    "/mouse/up",             "/mouse/wheel",           "/page/state",            "/clipboard/read",    "/clipboard/write",
+    "/clear",                "/boundingbox",           "/wait/function",         "/response/body",     "/setcontent",
+    "/selectall",            "/setvalue",              "/timezone",              "/locale",            "/permissions",
+    "/tap",                  "/dispatch",              "/download",              "/addstyle",          "/bringtofront",
+    "/pushstate",            "/expose",                "/expose/calls",          "/multiselect",       "/swipe",
+    "/vitals",               "/frame",                 "/mainframe",             "/getattribute",      "/inputvalue",
+    "/react/tree",           "/react/inspect",         "/react/renders",         "/react/suspense",    "/recording/start",
+    "/recording/stop",       "/request/detail",        "/wait/download",         "/initscript/remove", "/evalhandle",
+    "/diff/url",             "/cache/set",             "/cache/get",             "/cache/clear",       "/cache/list",
+    "/screenshot/som",       "/snapshot/changes",      "/recording/export",
+};
+
+fn benchRouteDispatchNewFirst() void {
+    std.mem.doNotOptimizeAway(router.route_table.get(bench_route_paths[0]));
+}
+fn benchRouteDispatchNewLast() void {
+    std.mem.doNotOptimizeAway(router.route_table.get(bench_route_paths[bench_route_paths.len - 1]));
+}
+fn benchRouteDispatchNewMiss() void {
+    std.mem.doNotOptimizeAway(router.route_table.get("/nonexistent/route/xyz"));
+}
+fn benchRouteDispatchNewAvgAll148() void {
+    for (bench_route_paths) |p| std.mem.doNotOptimizeAway(router.route_table.get(p));
+}
+
+// ── Main ───────────────────────────────────────────────────────────────
 // ── Main ───────────────────────────────────────────────────────────────
 
 pub fn main() !void {
@@ -333,6 +403,12 @@ pub fn main() !void {
     std.debug.print("\n── Server infra ──────────────────────────────────────────────────────\n", .{});
     Bench.run("RequestTimer ×100", iters, benchRequestTimer).print();
     Bench.run("arena alloc+reset ×100", iters, benchArenaAllocReset).print();
+
+    std.debug.print("\n── Route dispatch (StaticStringMap + enum switch) ─────────────────────\n", .{});
+    Bench.run("dispatch: first route (/health)", iters, benchRouteDispatchNewFirst).print();
+    Bench.run("dispatch: last route (/recording/export)", iters, benchRouteDispatchNewLast).print();
+    Bench.run("dispatch: 404 miss", iters, benchRouteDispatchNewMiss).print();
+    Bench.run("dispatch: all 148 routes/call", iters, benchRouteDispatchNewAvgAll148).print();
 
     std.debug.print("\n", .{});
 }
