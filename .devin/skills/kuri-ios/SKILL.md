@@ -10,6 +10,16 @@ Drive iOS Simulators (and, where possible, real iPhones) through the
 `kuri-mobile/src/ios/` and the main `kuri` binary forwards
 `kuri ios …` to the `kuri-mobile` binary.
 
+> ⚠️ **Host cursor & keyboard warning.** On the Simulator, `tap`, `doubletap`,
+> `longpress`, `swipe`/`pan`, and `type` post **real CGEvents into the macOS
+> WindowServer** — they physically move your mouse pointer and seize keyboard
+> focus for the duration of the gesture. Do **not** run them while you are using
+> the machine, or from an unattended/background job; a stray click lands wherever
+> the pointer happens to be. Cursor-free, always-safe commands: `list-devices`,
+> `boot`, `shutdown`, `openurl`, `launch`, `terminate`, `list-apps`,
+> `screenshot`. An isolated input backend that bypasses the host pointer is
+> tracked in issues #180 and #183.
+
 ## When to use this skill
 
 - Boot an iOS Simulator, open Safari to a URL, screenshot the result.

@@ -11,9 +11,11 @@ pub const WebSocketClient = struct {
     fd: std.posix.fd_t,
     connected: bool,
 
-    // Buffers owned by caller (stack or heap)
+    // Buffer owned by caller (stack or heap). `write_buf` used to live here
+    // too, but nothing ever read it -- `writeFrame` builds frames with its
+    // own local stack buffers (`frame_buf`, `chunk`); removed as dead
+    // storage rather than carried along for a "symmetric" API.
     read_buf: []u8,
-    write_buf: []u8,
 
     pub const Error = error{
         ConnectionFailed,
@@ -26,7 +28,7 @@ pub const WebSocketClient = struct {
     };
 
     /// Connect to a loopback WebSocket endpoint. url must be like "ws://host:port/path".
-    pub fn connect(allocator: std.mem.Allocator, url: []const u8, read_buf: []u8, write_buf: []u8) !WebSocketClient {
+    pub fn connect(allocator: std.mem.Allocator, url: []const u8, read_buf: []u8) !WebSocketClient {
         if (@import("builtin").os.tag == .windows) return Error.ConnectionFailed;
         const parsed = try parseWsUrl(url);
 
@@ -58,7 +60,6 @@ pub const WebSocketClient = struct {
             .fd = fd,
             .connected = false,
             .read_buf = read_buf,
-            .write_buf = write_buf,
         };
 
         try ws.doHandshake(parsed.host, parsed.port, parsed.path);

@@ -72,6 +72,7 @@ pub const Methods = struct {
     pub const emulation_set_geolocation = "Emulation.setGeolocationOverride";
     pub const dom_highlight_node = "Overlay.highlightNode";
     pub const dom_hide_highlight = "Overlay.hideHighlight";
+    pub const overlay_enable = "Overlay.enable";
     pub const overlay_highlight_node = "Overlay.highlightNode";
     pub const overlay_hide_highlight = "Overlay.hideHighlight";
     pub const page_start_screencast = "Page.startScreencast";
@@ -81,12 +82,14 @@ pub const Methods = struct {
     // Runtime domain
     pub const runtime_console_api_called = "Runtime.consoleAPICalled";
     pub const runtime_enable = "Runtime.enable";
+    pub const runtime_add_binding = "Runtime.addBinding";
 
     // Fetch domain (network interception)
     pub const fetch_enable = "Fetch.enable";
     pub const fetch_disable = "Fetch.disable";
     pub const fetch_continue_request = "Fetch.continueRequest";
     pub const fetch_fulfill_request = "Fetch.fulfillRequest";
+    pub const fetch_fail_request = "Fetch.failRequest";
 
     // Network domain (cookies, headers)
     pub const network_get_cookies = "Network.getCookies";
@@ -95,6 +98,7 @@ pub const Methods = struct {
     pub const network_set_extra_http_headers = "Network.setExtraHTTPHeaders";
     pub const network_enable = "Network.enable";
     pub const network_disable = "Network.disable";
+    pub const network_get_response_body = "Network.getResponseBody";
 
     // Page domain (PDF, stop, script injection)
     pub const page_print_to_pdf = "Page.printToPDF";
@@ -144,6 +148,12 @@ pub const Methods = struct {
     // Page domain (frame/dialog)
     pub const page_get_frame_tree = "Page.getFrameTree";
     pub const page_enable = "Page.enable";
+
+    // IO domain (stream draining -- Tracing.start with transferMode:
+    // ReturnAsStream hands back a stream handle read via IO.read/closed
+    // via IO.close)
+    pub const io_read = "IO.read";
+    pub const io_close = "IO.close";
 };
 
 test "methods are valid strings" {
@@ -166,6 +176,14 @@ test "lightpanda parity CDP methods" {
     try std.testing.expectEqualStrings("DOM.getOuterHTML", Methods.dom_get_outer_html);
 }
 
+test "Fetch domain methods" {
+    try std.testing.expectEqualStrings("Fetch.enable", Methods.fetch_enable);
+    try std.testing.expectEqualStrings("Fetch.disable", Methods.fetch_disable);
+    try std.testing.expectEqualStrings("Fetch.continueRequest", Methods.fetch_continue_request);
+    try std.testing.expectEqualStrings("Fetch.fulfillRequest", Methods.fetch_fulfill_request);
+    try std.testing.expectEqualStrings("Fetch.failRequest", Methods.fetch_fail_request);
+}
+
 test "tier 1 parity CDP methods" {
     try std.testing.expectEqualStrings("Input.dispatchKeyEvent", Methods.input_dispatch_key_event);
     try std.testing.expectEqualStrings("Input.insertText", Methods.input_insert_text);
@@ -173,4 +191,15 @@ test "tier 1 parity CDP methods" {
     try std.testing.expectEqualStrings("DOM.scrollIntoViewIfNeeded", Methods.dom_scroll_into_view);
     try std.testing.expectEqualStrings("Emulation.setEmulatedMedia", Methods.emulation_set_emulated_media);
     try std.testing.expectEqualStrings("Network.emulateNetworkConditions", Methods.network_emulate_conditions);
+}
+
+test "collector endpoint CDP methods (screencast/binding/network/tracing/IO)" {
+    try std.testing.expectEqualStrings("Page.startScreencast", Methods.page_start_screencast);
+    try std.testing.expectEqualStrings("Page.stopScreencast", Methods.page_stop_screencast);
+    try std.testing.expectEqualStrings("Page.screencastFrameAck", Methods.page_screencast_frame_ack);
+    try std.testing.expectEqualStrings("Runtime.addBinding", Methods.runtime_add_binding);
+    try std.testing.expectEqualStrings("Network.getResponseBody", Methods.network_get_response_body);
+    try std.testing.expectEqualStrings("Inspector.enable", Methods.inspector_enable);
+    try std.testing.expectEqualStrings("IO.read", Methods.io_read);
+    try std.testing.expectEqualStrings("IO.close", Methods.io_close);
 }

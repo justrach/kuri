@@ -1,6 +1,6 @@
 .{
     .name = .kuri,
-    .version = "0.4.12",
+    .version = "0.4.13",
     .dependencies = .{
         .quickjs = .{
             .url = "https://github.com/mitchellh/zig-quickjs-ng/archive/main.tar.gz",

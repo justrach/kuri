@@ -11,6 +11,12 @@ Inspired by [`mobile-device-mcp`](https://github.com/srmorete/mobile-device-mcp)
 reimplemented in Zig with no Bun, Node, Gradle, or Xcode in the
 build path.
 
+> ⚠️ **iOS Simulator input seizes the host cursor.** `kuri ios tap/swipe/type`
+> (plus doubletap/longpress) post real CGEvents into the macOS WindowServer, so
+> they move your physical mouse and grab keyboard focus. Don't run them while
+> you're working or from a background job. `kuri android` input runs on-device
+> via adb and does **not** touch the host cursor. Tracked: #180, #183.
+
 **Use the platform-specific skills** for actual work:
 
 - **`kuri-ios`** — iOS Simulator (boot, openurl, launch, terminate,

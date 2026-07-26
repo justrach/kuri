@@ -2,6 +2,39 @@
 
 All notable changes to kuri are documented here.
 
+## [0.4.13] — 2026-07-26
+
+Seven HTTP routes answered with results they never obtained from the browser. Each returned `200` with a well-formed body, so no caller could distinguish "Chrome reported nothing" from "kuri never asked Chrome" — the failure mode that costs the most, because it looks exactly like success.
+
+### Fixes — routes that fabricated their answers
+
+- **`/react/tree` reported `{"react":false}` on every React page.** React double-buffers fibers, and the `__reactContainer$…` property is stamped on the host node at mount and keeps pointing at whichever fiber existed *then*. After the first commit that is the off-screen side of the pair, whose `.child` is `null` — so detection concluded there was no React at all. It now follows whichever side actually rendered, via `.alternate`. Confirmed against React 19.2.5, where the mount-time fiber has `hasChild:false` while its alternate has children; the route now returns a real tree with `FunctionComponent`, `Context.Consumer` and `HostComponent` nodes at their true depths
+- **`/trace/stop` returned an empty acknowledgement.** `Tracing.start` never asked for `transferMode: ReturnAsStream`, so Chrome kept the trace to itself and there was no stream handle to drain — the route reported success and wrote nothing, every time. `IO.read`/`IO.close` now drain the stream; a routine page load yields ~400 KB of real trace on disk
+- **`/network` returned a canned `{"status":"ok"}`.** No request was ever recorded. Now a bounded ring of real requests carrying url, method and MIME type
+- **`/mainframe` returned the same hard-coded string to every caller**, regardless of tab or page. Now the actual `frameId`, `loaderId` and `url` from `Page.getFrameTree`
+- **`/expose` bindings fired into the void.** The binding was registered with Chrome but its invocations were never captured, so `/expose/calls` stayed empty no matter how many times the page called it. Payloads are now recorded with the call
+- **`/screencast/stop` returned a canned ok** without ever reporting what it had captured. Now reports the real `frame_count`
+- **`/console` and `/errors` had regressed to returning empty** on any page, having lost their collector
+
+### Fixes — script injection
+
+- **`/evaluate` and `/evalhandle` JSON-escaped the expression twice.** The expression arrives already escaped; escaping it again turned a newline into `\n` and then `\\n`, which decodes back to a literal backslash-n *in the JavaScript source*. Chrome answered every multi-line or quote-containing expression with `SyntaxError: Invalid or unexpected token` — the two routes whose entire purpose is running arbitrary JS could not run any non-trivial JS. Escaped exactly once now
+- **`stealth.js` polluted every page's error stream.** The file was a top-level script containing `const originalQuery`, but it is injected twice by design — once via `Page.addScriptToEvaluateOnNewDocument`, once evaluated into the already-loaded page. Re-running it in the same global, which happens whenever tab discovery re-runs against a live tab, re-declared the const. The resulting `SyntaxError` aborted the whole re-injection *at parse time*, so none of the stealth measures after it applied, and it surfaced in the page's own error stream, meaning `/errors` reported a kuri-internal failure as if it were the page's. Now an IIFE behind an idempotence guard, which also stops the permissions wrapper being wrapped around itself. `/errors` on a clean page is `[]`
+
+### Fixes — memory safety
+
+- **The event rings handed out pointers into storage they were about to overwrite.** A snapshot borrowed the ring's own buffers, so the next event that wrapped the ring rewrote memory the caller was still reading — a use-after-free reachable from ordinary traffic. Every ring (`RequestRing`, `ScreencastRing`, `BindingCallRing`, `NetworkRing`) now dupes into a caller-supplied per-request arena, and the contract is stated once and referenced from each
+- **`extractObject`/`extractField` were blind to JSON escaping.** They scanned for the closing brace or quote without honouring `\"`, so a string value containing an escaped quote was truncated there, and a value with unbalanced literal braces — a GraphQL query sent over GET, for instance — ended the object early. Both now respect escapes, with regression tests for each case
+
+### Performance
+
+- **Route dispatch is ~13× faster.** `route()` was a linear chain of 148 `std.mem.eql` comparisons, so a route's cost depended on where it sat in the chain and every unknown path paid all 148. It is now a comptime `StaticStringMap` (bucketed by length) feeding an exhaustive switch: ~81ns → ~6ns on average, and ~150ns → ~15ns worst case. `zig build bench` now carries a permanent regression guard that dispatches all 148 routes, so a relapse to a linear chain shows up as a benchmark regression rather than a slow surprise
+- **`CdpClient` is 62 KiB per tab, down from 520 KiB — 88% smaller.** `ws_read_buf` was a 512 KiB inline array that only ever held the one-shot HTTP upgrade response and RFC 6455 control-frame scratch — message bodies go through `receiveMessageAlloc`, which allocates its own buffer and never touches it — so ~97% of it was headroom nothing in the codebase could reach; it is now 16 KiB. `ws_write_buf` had no readers anywhere and is gone, along with `WebSocketClient.write_buf`, since `writeFrame` builds frames in its own stack buffers
+
+### Tests
+
+378 unit tests in the main suite (plus 76 for `kuri-fetch` and 22 for `kuri-browse`), including a regression test for each fix above. Verified live against Chrome: intercept, dialogs, storage and clipboard routes show no regression from the dispatch rewrite.
+
 ## [0.4.12] — 2026-07-25
 
 A hotfix for two problems that made the *installed* product diverge from the built one.

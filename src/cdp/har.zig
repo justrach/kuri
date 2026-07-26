@@ -1,6 +1,7 @@
 const std = @import("std");
 const CdpClient = @import("client.zig").CdpClient;
 const compat = @import("../compat.zig");
+const jsonscan = @import("jsonscan.zig");
 
 /// HAR (HTTP Archive) recorder using CDP Network domain events.
 /// Captures request/response pairs with timing, headers, and status.
@@ -182,12 +183,12 @@ pub const HarRecorder = struct {
 
         if (std.mem.indexOf(u8, event_json, "\"Network.requestWillBeSent\"") != null) {
             // CDP shape: {"method":"Network.requestWillBeSent","params":{"requestId":"X","request":{"url":"...","method":"GET",...},...}}
-            const request_id = extractField(event_json, "requestId") orelse return;
+            const request_id = jsonscan.extractField(event_json, "requestId") orelse return;
             // url and method are inside the nested "request" object — search after "\"request\":{" to skip the top-level "method" field
             const request_obj_pos = std.mem.indexOf(u8, event_json, "\"request\":{") orelse return;
             const request_obj = event_json[request_obj_pos..];
-            const url = extractField(request_obj, "url") orelse return;
-            const method = extractField(request_obj, "method") orelse "GET";
+            const url = jsonscan.extractField(request_obj, "url") orelse return;
+            const method = jsonscan.extractField(request_obj, "method") orelse "GET";
 
             const owned_id = self.allocator.dupe(u8, request_id) catch return;
             const owned_url = self.allocator.dupe(u8, url) catch {
@@ -200,10 +201,10 @@ pub const HarRecorder = struct {
                 return;
             };
             // Capture request headers JSON blob
-            const headers_json = extractHeadersObject(request_obj) orelse "";
+            const headers_json = jsonscan.extractObject(request_obj, "headers") orelse "";
             const owned_headers = if (headers_json.len > 0) self.allocator.dupe(u8, headers_json) catch "" else "";
             // Capture POST body if present
-            const post_data = extractField(request_obj, "postData") orelse "";
+            const post_data = jsonscan.extractField(request_obj, "postData") orelse "";
             const owned_post = if (post_data.len > 0) self.allocator.dupe(u8, post_data) catch "" else "";
             const pending = PendingRequest{
                 .url = owned_url,
@@ -220,7 +221,7 @@ pub const HarRecorder = struct {
                 if (owned_post.len > 0) self.allocator.free(owned_post);
             };
         } else if (std.mem.indexOf(u8, event_json, "\"Network.responseReceived\"") != null) {
-            const request_id = extractField(event_json, "requestId") orelse return;
+            const request_id = jsonscan.extractField(event_json, "requestId") orelse return;
             const pending_kv = self.pending_requests.fetchRemove(request_id) orelse return;
             const pending = pending_kv.value;
             defer {
@@ -234,13 +235,13 @@ pub const HarRecorder = struct {
             // Extract status and mimeType from the nested "response" object
             const response_obj_pos = std.mem.indexOf(u8, event_json, "\"response\":{");
             const search_json = if (response_obj_pos) |pos| event_json[pos..] else event_json;
-            const status_str = extractField(search_json, "status");
+            const status_str = jsonscan.extractField(search_json, "status");
             const status: u16 = if (status_str) |s|
                 std.fmt.parseInt(u16, s, 10) catch 200
             else
                 200;
-            const mime = extractField(search_json, "mimeType") orelse "application/octet-stream";
-            const status_text = extractField(search_json, "statusText") orelse if (status >= 200 and status < 300) "OK" else if (status >= 300 and status < 400) "Redirect" else if (status >= 400) "Error" else "Unknown";
+            const mime = jsonscan.extractField(search_json, "mimeType") orelse "application/octet-stream";
+            const status_text = jsonscan.extractField(search_json, "statusText") orelse if (status >= 200 and status < 300) "OK" else if (status >= 300 and status < 400) "Redirect" else if (status >= 400) "Error" else "Unknown";
 
             self.addEntry(.{
                 .url = pending.url,
@@ -256,53 +257,6 @@ pub const HarRecorder = struct {
                 .post_data = pending.post_data,
             }) catch return;
         }
-    }
-
-    /// Extract the "headers":{...} object as a raw JSON string from a CDP request object.
-    fn extractHeadersObject(json: []const u8) ?[]const u8 {
-        const key = "\"headers\":{";
-        const key_pos = std.mem.indexOf(u8, json, key) orelse return null;
-        const obj_start = key_pos + key.len - 1; // include the {
-        var depth: usize = 0;
-        var i = obj_start;
-        while (i < json.len) : (i += 1) {
-            if (json[i] == '{') depth += 1 else if (json[i] == '}') {
-                depth -= 1;
-                if (depth == 0) return json[obj_start .. i + 1];
-            }
-        }
-        return null;
-    }
-
-    /// Extract a simple string or scalar field value from JSON.
-    fn extractField(json: []const u8, field: []const u8) ?[]const u8 {
-        var search_buf: [256]u8 = undefined;
-        const prefix = std.fmt.bufPrint(&search_buf, "\"{s}\"", .{field}) catch return null;
-
-        const field_pos = std.mem.indexOf(u8, json, prefix) orelse return null;
-        const after_field = field_pos + prefix.len;
-
-        // Skip colon and whitespace
-        var i = after_field;
-        while (i < json.len and (json[i] == ':' or json[i] == ' ' or json[i] == '\t')) : (i += 1) {}
-        if (i >= json.len) return null;
-
-        if (json[i] == '"') {
-            const val_start = i + 1;
-            const val_end = std.mem.indexOfScalarPos(u8, json, val_start, '"') orelse return null;
-            return json[val_start..val_end];
-        }
-
-        const val_start = i;
-        var val_end = i;
-        while (val_end < json.len) : (val_end += 1) {
-            switch (json[val_end]) {
-                ',', '}', ']', ' ', '\t', '\r', '\n' => break,
-                else => {},
-            }
-        }
-        if (val_end == val_start) return null;
-        return json[val_start..val_end];
     }
 
     pub fn deinit(self: *HarRecorder) void {
@@ -462,28 +416,34 @@ test "HarRecorder start clears stale pending requests before enabling network" {
     try std.testing.expectEqual(@as(usize, 0), rec.pending_requests.count());
 }
 
-test "HarRecorder extractField helper" {
+test "HarRecorder event parsing relies on jsonscan.extractField" {
+    // har.zig used to hand-roll its own extractField/extractHeadersObject
+    // (not escape-aware, not string-aware brace counting -- see jsonscan.zig's
+    // doc comment for the failure modes that motivated it). Both were deleted
+    // in favor of the shared, already-tested `jsonscan` module; these two
+    // tests now exercise that module directly through the same call shape
+    // `handleCdpEvent` uses.
     const json = "{\"method\":\"Network.requestWillBeSent\",\"requestId\":\"abc123\",\"url\":\"https://test.com\"}";
-    const rid = HarRecorder.extractField(json, "requestId");
+    const rid = jsonscan.extractField(json, "requestId");
     try std.testing.expect(rid != null);
     try std.testing.expectEqualStrings("abc123", rid.?);
 
-    const url = HarRecorder.extractField(json, "url");
+    const url = jsonscan.extractField(json, "url");
     try std.testing.expect(url != null);
     try std.testing.expectEqualStrings("https://test.com", url.?);
 
-    const missing = HarRecorder.extractField(json, "nonexistent");
+    const missing = jsonscan.extractField(json, "nonexistent");
     try std.testing.expect(missing == null);
 }
 
-test "HarRecorder extractField parses numeric values" {
+test "HarRecorder event parsing parses numeric field values via jsonscan.extractField" {
     const json = "{\"status\":304,\"encodedDataLength\":512}";
 
-    const status = HarRecorder.extractField(json, "status");
+    const status = jsonscan.extractField(json, "status");
     try std.testing.expect(status != null);
     try std.testing.expectEqualStrings("304", status.?);
 
-    const length = HarRecorder.extractField(json, "encodedDataLength");
+    const length = jsonscan.extractField(json, "encodedDataLength");
     try std.testing.expect(length != null);
     try std.testing.expectEqualStrings("512", length.?);
 }
