@@ -215,6 +215,32 @@ pub const Driver = struct {
         return try self.shell(gpa, "wm size; wm density");
     }
 
+    /// Raw notification service dump. `--noredact` keeps the message bodies,
+    /// which are otherwise elided.
+    pub fn notificationDump(self: *Driver, gpa: std.mem.Allocator) ![]u8 {
+        return try self.shell(gpa, "dumpsys notification --noredact");
+    }
+
+    /// Pull the notification shade down. Reading the dump is usually the
+    /// better move; this is for when the goal is to tap something in the shade.
+    pub fn expandNotifications(self: *Driver, gpa: std.mem.Allocator) !void {
+        gpa.free(try self.shell(gpa, "cmd statusbar expand-notifications"));
+    }
+
+    /// Delete `chars` characters from the focused field. `input text` appends,
+    /// so replacing a value means removing what is there first. Android has no
+    /// select-all keyevent that holds across versions, hence counting; but
+    /// `input keyevent` accepts a list of keycodes, so it is still one round
+    /// trip however long the field.
+    pub fn clearText(self: *Driver, gpa: std.mem.Allocator, chars: usize) !void {
+        var cmd: std.ArrayList(u8) = .empty;
+        defer cmd.deinit(gpa);
+        try cmd.appendSlice(gpa, "input keyevent KEYCODE_MOVE_END");
+        var i: usize = 0;
+        while (i < chars) : (i += 1) try cmd.appendSlice(gpa, " KEYCODE_DEL");
+        gpa.free(try self.shellAlloc(gpa, cmd.items));
+    }
+
     // --- raw input ----------------------------------------------------------
 
     /// Raw keycode, for keys outside the friendly `press` table.
