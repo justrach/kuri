@@ -1,13 +1,15 @@
 # Kuri Release Channel
 
-Self-managed release channel for `justrach/kuri`. GitHub Releases mirror the tagged assets, but the installer and stable manifest are still served from this branch.
+Self-managed release channel for `justrach/kuri`. Tagged GitHub releases mirror
+these assets; the stable installer and manifest are served through the Kuri
+download endpoint.
 
 ## Stable
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/justrach/kuri/release-channel/stable/install.sh | sh
+curl -fsSL https://kuri.trilok.ai/download | sh
 ```
 
 Manifest:
 
-- https://raw.githubusercontent.com/justrach/kuri/release-channel/stable/latest.json
+- https://kuri.trilok.ai/download/latest.json

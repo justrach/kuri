@@ -1,11 +1,17 @@
 #!/usr/bin/env sh
 # kuri installer — https://github.com/justrach/kuri
-# Usage: curl -fsSL https://raw.githubusercontent.com/justrach/kuri/main/install.sh | sh
+# Usage: curl -fsSL https://kuri.trilok.ai/download | sh
 set -e
 
 REPO="justrach/kuri"
 CHANNEL="${KURI_CHANNEL:-stable}"
-BASE_URL="${KURI_RELEASE_BASE:-https://raw.githubusercontent.com/${REPO}/release-channel/${CHANNEL}}"
+if [ -n "${KURI_RELEASE_BASE:-}" ]; then
+  BASE_URL="$KURI_RELEASE_BASE"
+elif [ "$CHANNEL" = "stable" ]; then
+  BASE_URL="https://kuri.trilok.ai/download"
+else
+  BASE_URL="https://raw.githubusercontent.com/${REPO}/release-channel/${CHANNEL}"
+fi
 INSTALL_DIR="${KURI_INSTALL_DIR:-$HOME/.local/bin}"
 
 # ── Detect platform ───────────────────────────────────────────────────────────
@@ -76,11 +82,7 @@ tar -xzf "$TMP/kuri.tar.gz" -C "$TMP"
 # ── Install binaries ──────────────────────────────────────────────────────────
 mkdir -p "$INSTALL_DIR"
 
-# kuri-mobile must be here: `kuri android`/`kuri ios` exec it as a *sibling*
-# binary, so omitting it leaves those subcommands failing with "failed to exec"
-# on an otherwise successful install. It shipped in the tarball from v0.4.6 but
-# was missing from this list until v0.4.12.
-BINS="kuri kuri-agent kuri-fetch kuri-browse kuri-mobile"
+BINS="kuri kuri-agent kuri-fetch kuri-browse"
 INSTALLED=""
 for BIN in $BINS; do
   if [ -f "$TMP/$BIN" ]; then
