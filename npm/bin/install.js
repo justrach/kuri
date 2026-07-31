@@ -11,7 +11,7 @@ const assert = require("assert/strict");
 
 const REPO = "justrach/kuri";
 const VERSION = require("../package.json").version;
-const CHANNEL_BASE = process.env.KURI_RELEASE_BASE || `https://raw.githubusercontent.com/${REPO}/release-channel/stable`;
+const CHANNEL_BASE = process.env.KURI_RELEASE_BASE || "https://kuri.trilok.ai/download";
 const BIN_DIR = path.join(__dirname);
 const BIN_PATH = path.join(BIN_DIR, "kuri-agent-bin");
 const SUPPORTED_ARCHES = {

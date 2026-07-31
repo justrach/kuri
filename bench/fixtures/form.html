@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Checkout</title></head>
+<body>
+<header><nav aria-label="Main"><a href="/">Store</a> <a href="/cart">Cart (3)</a></nav></header>
+<main>
+<h1>Checkout</h1>
+<form aria-label="Checkout form">
+ <fieldset><legend>Contact</legend>
+  <label>Email <input type="email" name="email" required placeholder="you@example.com"></label>
+  <label>Phone <input type="tel" name="phone" placeholder="+1 555 555 5555"></label>
+ </fieldset>
+ <fieldset><legend>Shipping address</legend>
+  <label>Full name <input type="text" name="name" required></label>
+  <label>Street <input type="text" name="street" required></label>
+  <label>City <input type="text" name="city" required></label>
+  <label>State <select name="state"><option>CA</option><option>NY</option><option>TX</option><option>WA</option></select></label>
+  <label>ZIP <input type="text" name="zip" required></label>
+  <label>Country <select name="country"><option>United States</option><option>Canada</option></select></label>
+ </fieldset>
+ <fieldset><legend>Payment</legend>
+  <label>Card number <input type="text" name="card" required autocomplete="cc-number"></label>
+  <label>Expiry <input type="text" name="exp" placeholder="MM/YY"></label>
+  <label>CVC <input type="text" name="cvc"></label>
+  <label><input type="checkbox" name="save"> Save this card</label>
+  <label><input type="checkbox" name="terms" required> I agree to the terms</label>
+ </fieldset>
+ <fieldset><legend>Delivery</legend>
+  <label><input type="radio" name="ship" value="standard" checked> Standard (free)</label>
+  <label><input type="radio" name="ship" value="express"> Express ($12)</label>
+  <label><input type="radio" name="ship" value="overnight"> Overnight ($30)</label>
+ </fieldset>
+ <button type="submit">Place order</button>
+ <button type="button">Cancel</button>
+</form>
+</main>
+</body></html>

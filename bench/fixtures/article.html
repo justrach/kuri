@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>The token economics of browser agents</title></head>
+<body>
+<header><nav aria-label="Main"><a href="/">Home</a> <a href="/blog">Blog</a> <a href="/docs">Docs</a></nav></header>
+<main>
+<article>
+<h1>The token economics of browser agents</h1>
+<p>An accessibility snapshot is the interface an agent uses to see a page. Its size, in tokens, is paid on every single step of a trajectory. This post walks through where those tokens go and how a diff-based loop changes the arithmetic.</p>
+<h2>Where the tokens go</h2>
+<p>A naive serialization of the DOM is enormous. The accessibility tree is smaller, but a full a11y snapshot of a content-heavy page still runs into the thousands of tokens. Most of that is stable structure that does not change between steps.</p>
+<p>Consider a twenty-step task. If each step re-sends the full snapshot, the agent pays for the navigation chrome, the footer, and the sidebar twenty times over. Only a handful of nodes actually change after a click.</p>
+<h2>The diff loop</h2>
+<p>A diff loop sends the full snapshot once, then sends only added, removed, and changed nodes after each action. The steady-state cost per step drops from the size of the page to the size of the change.</p>
+<h2>Compiled replay</h2>
+<p>Once a trajectory succeeds, its actions can be recorded and replayed deterministically. A replay run pays zero model tokens unless it diverges, at which point a recovery agent inspects the diff and repairs the script.</p>
+<h2>Conclusion</h2>
+<p>Format matters, but loop economics matter more. The cheapest snapshot is the one you do not have to send twice.</p>
+</article>
+<aside aria-label="Related"><h2>Related</h2><ul><li><a href="/a/1">Why raw CDP beats Playwright for latency</a></li><li><a href="/a/2">Structured output for agent tools</a></li><li><a href="/a/3">The accessibility tree as an API</a></li></ul></aside>
+</main>
+<footer><a href="/about">About</a> <a href="/rss">RSS</a></footer>
+</body></html>

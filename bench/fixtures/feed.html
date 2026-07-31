@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Feed — 50 stories</title></head>
+<body>
+<header><nav aria-label="Main">
+  <a href="/">Home</a> <a href="/new">New</a> <a href="/top">Top</a>
+  <a href="/ask">Ask</a> <a href="/jobs">Jobs</a>
+  <form role="search"><label>Search <input type="search" name="q" placeholder="Search stories"></label>
+  <button type="submit">Go</button></form>
+</nav></header>
+<main>
+<h1>Top stories</h1>
+<ol id="feed"></ol>
+</main>
+<footer><a href="/about">About</a> <a href="/privacy">Privacy</a></footer>
+<script>
+const titles = [
+ "Show HN: I built a Zig browser automation engine","Ask HN: How do you manage LLM context?",
+ "The hidden cost of full-page snapshots","Why diffs beat re-rendering the DOM",
+ "A static binary that drives Chrome","Tokenizers are the new bottleneck",
+ "Playwright vs raw CDP: a latency study","Compiling agent workflows to scripts",
+ "The accessibility tree as an API","Reducing agent loops by 5x",
+ "SQLite is all you need","Rewriting our scraper in Zig",
+ "The end of Selenium","Headless Chrome tips and tricks",
+ "How we cut our token bill in half","Structured output changed everything",
+ "A11y refs vs XPath selectors","The case against screenshots for agents",
+ "Caching snapshots server-side","Subtree scoping for cheap re-reads"];
+const feed = document.getElementById('feed');
+for (let i=0;i<50;i++){
+ const t = titles[i % titles.length];
+ const li = document.createElement('li');
+ li.innerHTML = `<article>
+   <a class="storylink" href="/item/${i}">${t}</a>
+   <div class="meta"><span>${120-i*2} points</span> by <a href="/user/u${i}">user${i}</a>
+   <a href="/item/${i}#comments">${90-i} comments</a>
+   <button class="upvote" aria-label="Upvote ${t}">▲</button>
+   <button class="hide" aria-label="Hide">hide</button></div>
+ </article>`;
+ feed.appendChild(li);
+}
+</script>
+</body></html>

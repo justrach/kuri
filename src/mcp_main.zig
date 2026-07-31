@@ -77,7 +77,7 @@ fn handleMessage(arena: std.mem.Allocator, line: []const u8) void {
             if (strField(p.object, "protocolVersion")) |rv| requested = rv;
         };
         const ver = negotiateProtocolVersion(requested);
-        const result = std.fmt.allocPrint(arena, "{{\"protocolVersion\":\"{s}\",\"capabilities\":{{\"tools\":{{}}}},\"serverInfo\":{{\"name\":\"kuri\",\"version\":\"0.5.0\"}}}}", .{ver}) catch return;
+        const result = std.fmt.allocPrint(arena, "{{\"protocolVersion\":\"{s}\",\"capabilities\":{{\"tools\":{{}}}},\"serverInfo\":{{\"name\":\"kuri\",\"version\":\"{s}\"}}}}", .{ ver, @import("build_options").version }) catch return;
         respondRaw(arena, id_val, result);
     } else if (std.mem.eql(u8, method, "tools/list")) {
         if (id_val != null) respondRaw(arena, id_val, tools_list_json);
@@ -104,7 +104,26 @@ fn callTool(arena: std.mem.Allocator, obj: std.json.ObjectMap, id_val: ?std.json
         const url = argStr(args, "url") orelse return toolError(arena, id_val, "missing 'url'");
         forward(arena, id_val, "/navigate", &.{.{ "url", url }}, true);
     } else if (std.mem.eql(u8, name, "take_snapshot")) {
-        forward(arena, id_val, "/snapshot", &.{.{ "format", "compact" }}, true);
+        var buf: [3]Param = undefined;
+        buf[0] = .{ "format", "compact" };
+        var n: usize = 1;
+        if (argStr(args, "uid")) |uid| {
+            buf[n] = .{ "scope", uid };
+            n += 1;
+        }
+        if (argNumStr(arena, args, "limit")) |lim| {
+            buf[n] = .{ "limit", lim };
+            n += 1;
+        }
+        forward(arena, id_val, "/snapshot", buf[0..n], true);
+    } else if (std.mem.eql(u8, name, "take_snapshot_diff")) {
+        if (argNumStr(arena, args, "limit")) |lim| {
+            forward(arena, id_val, "/diff/snapshot", &.{.{ "limit", lim }}, true);
+        } else {
+            forward(arena, id_val, "/diff/snapshot", &.{}, true);
+        }
+    } else if (std.mem.eql(u8, name, "get_page_state")) {
+        forward(arena, id_val, "/page/state", &.{}, true);
     } else if (std.mem.eql(u8, name, "click")) {
         const uid = argStr(args, "uid") orelse return toolError(arena, id_val, "missing 'uid'");
         forward(arena, id_val, "/action", &.{ .{ "action", "click" }, .{ "ref", uid } }, true);
@@ -122,14 +141,14 @@ fn callTool(arena: std.mem.Allocator, obj: std.json.ObjectMap, id_val: ?std.json
         const expr = argStr(args, "expression") orelse argStr(args, "function") orelse return toolError(arena, id_val, "missing 'expression'");
         forward(arena, id_val, "/evaluate", &.{.{ "expression", expr }}, true);
     } else if (std.mem.eql(u8, name, "take_screenshot")) {
-        forward(arena, id_val, "/screenshot", &.{}, true);
+        forward(arena, id_val, "/screenshot", &.{.{ "save", "true" }}, true);
     } else if (std.mem.eql(u8, name, "list_pages")) {
         forward(arena, id_val, "/tabs", &.{}, false);
     } else if (std.mem.eql(u8, name, "new_page")) {
         const url = argStr(args, "url") orelse "about:blank";
         forward(arena, id_val, "/tab/new", &.{.{ "url", url }}, false);
     } else if (std.mem.eql(u8, name, "list_network_requests")) {
-        forward(arena, id_val, "/network", &.{}, true);
+        forward(arena, id_val, "/har/replay", &.{}, true);
     } else if (std.mem.eql(u8, name, "wait_for")) {
         const text = argStr(args, "text") orelse return toolError(arena, id_val, "missing 'text'");
         forward(arena, id_val, "/find", &.{.{ "text", text }}, true);
@@ -213,16 +232,18 @@ fn kuriGet(arena: std.mem.Allocator, url: []const u8) ![]const u8 {
 
 const tools_list_json = "{\"tools\":[" ++
     "{\"name\":\"navigate_page\",\"description\":\"Navigate the current page to a URL.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"url\":{\"type\":\"string\"}},\"required\":[\"url\"]}}," ++
-    "{\"name\":\"take_snapshot\",\"description\":\"Compact accessibility-tree snapshot of the page with @uid refs (token-efficient).\",\"inputSchema\":{\"type\":\"object\",\"properties\":{}}}," ++
+    "{\"name\":\"take_snapshot\",\"description\":\"Compact accessibility-tree snapshot of the page with @uid refs (token-efficient). Optional: uid re-snapshots only that element's subtree; limit collapses runs of same-role siblings to the first N plus a '… +K more' line. On list-heavy pages call with limit (e.g. 5), then a scoped uid snapshot to expand just the part you need.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"uid\":{\"type\":\"string\",\"description\":\"Scope to the subtree under this @uid from a previous snapshot\"},\"limit\":{\"type\":\"integer\",\"description\":\"Max same-role siblings per parent before truncation\"}}}}," ++
+    "{\"name\":\"take_snapshot_diff\",\"description\":\"Only what changed since the last diff call for this tab: compact lines prefixed + (added), ~ (changed), - (removed). First call returns the whole page as additions. Prefer over take_snapshot inside an action loop — typically 3-9x fewer tokens. Optional limit: when a mass change (navigation) makes the diff fall back to a full snapshot, truncate that fallback to N items per sibling run.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"limit\":{\"type\":\"integer\",\"description\":\"Truncation for the page-replaced fallback view\"}}}}," ++
+    "{\"name\":\"get_page_state\",\"description\":\"Ultra-light page observation (~48 tokens): url, title, scroll position, viewport, form/link/input counts. Use to orient before paying for a snapshot.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{}}}," ++
     "{\"name\":\"click\",\"description\":\"Click the element with the given uid.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"uid\":{\"type\":\"string\"}},\"required\":[\"uid\"]}}," ++
     "{\"name\":\"fill\",\"description\":\"Type text into the input/select with the given uid.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"uid\":{\"type\":\"string\"},\"value\":{\"type\":\"string\"}},\"required\":[\"uid\",\"value\"]}}," ++
     "{\"name\":\"hover\",\"description\":\"Hover the element with the given uid.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"uid\":{\"type\":\"string\"}},\"required\":[\"uid\"]}}," ++
     "{\"name\":\"type_text\",\"description\":\"Type text into the focused element.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\"}},\"required\":[\"text\"]}}," ++
     "{\"name\":\"evaluate_script\",\"description\":\"Evaluate JavaScript on the page.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"expression\":{\"type\":\"string\"}},\"required\":[\"expression\"]}}," ++
-    "{\"name\":\"take_screenshot\",\"description\":\"Capture a screenshot of the page.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{}}}," ++
+    "{\"name\":\"take_screenshot\",\"description\":\"Capture a screenshot to disk and return the file path — image bytes never enter context.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{}}}," ++
     "{\"name\":\"list_pages\",\"description\":\"List open pages/tabs.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{}}}," ++
     "{\"name\":\"new_page\",\"description\":\"Open a new page at a URL.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"url\":{\"type\":\"string\"}}}}," ++
-    "{\"name\":\"list_network_requests\",\"description\":\"List captured network requests.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{}}}," ++
+    "{\"name\":\"list_network_requests\",\"description\":\"List captured API-shaped network requests (JSON/XML/GraphQL responses and POST/PUT/PATCH/DELETE calls) with ready-to-use curl/fetch/python snippets. Requires /har/start to have been called first. Full response bodies are not included here -- call /har/stop for a jsonl_path with previews and gzip sidecars for large bodies.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{}}}," ++
     "{\"name\":\"wait_for\",\"description\":\"Wait for text to appear on the page.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\"}},\"required\":[\"text\"]}}" ++
     "]}";
 
@@ -263,6 +284,18 @@ fn idToString(arena: std.mem.Allocator, id: std.json.Value) []const u8 {
 fn strField(obj: std.json.ObjectMap, key: []const u8) ?[]const u8 {
     const v = obj.get(key) orelse return null;
     return switch (v) {
+        .string => |s| s,
+        else => null,
+    };
+}
+
+/// Integer-or-string argument rendered as decimal text (MCP clients send JSON
+/// numbers for integer-typed params; accept both).
+fn argNumStr(arena: std.mem.Allocator, args: ?std.json.ObjectMap, key: []const u8) ?[]const u8 {
+    const obj = args orelse return null;
+    const v = obj.get(key) orelse return null;
+    return switch (v) {
+        .integer => |i| std.fmt.allocPrint(arena, "{d}", .{i}) catch null,
         .string => |s| s,
         else => null,
     };

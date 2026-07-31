@@ -4,11 +4,18 @@ All notable changes to kuri are documented here.
 
 ## [Unreleased]
 
+## [0.5.1] — 2026-07-31
+
 ### Features
-- **Anonymous usage telemetry (opt-out)** — kuri now records aggregate, non-identifying usage signal (route name, method, status, latency, response byte count, platform, version, and a random per-install id) and ships it as an OpenTelemetry-aligned `kuri.telemetry.v1` payload. On by default; disable with `KURI_NO_TELEMETRY=1` or `--no-telemetry`. Override the endpoint with `KURI_TELEMETRY_URL`. **Never** collects URLs, page content, cookies, selectors, or anything that identifies a user — the query string is stripped before telemetry sees a request. See [docs/telemetry.md](docs/telemetry.md).
+- **Diff-first agent observations** — `/diff/snapshot` and MCP `take_snapshot_diff` return only page changes after the first observation, with a full-snapshot fallback when navigation replaces the page.
+- **Richer snapshot targeting** — stable refs, scoped re-capture, optional hierarchy output, and list truncation are available through the HTTP and MCP snapshot surfaces; `get_page_state` provides a compact orientation payload.
+- **HAR capture and interaction replay** — API-shaped response capture, CDP action dispatch, and accessibility-signature replay are available through `/har/*`, `/dispatch`, and `/replay`.
+- **Anonymous usage telemetry (opt-out)** — kuri records aggregate, non-identifying usage signal (route name, method, status, latency, response byte count, platform, version, and a random per-install id) and ships it as an OpenTelemetry-aligned `kuri.telemetry.v1` payload. On by default; disable with `KURI_NO_TELEMETRY=1` or `--no-telemetry`. Override the endpoint with `KURI_TELEMETRY_URL`. **Never** collects URLs, page content, cookies, selectors, or anything that identifies a user — the query string is stripped before telemetry sees a request. See [docs/telemetry.md](docs/telemetry.md).
 
 ### Fixes
-- **Version single-sourced from `build.zig.zon`** — `kuri`, `kuri-fetch`, and `kuri-browse` now read their version from a `build_options` module fed by `build.zig.zon`, instead of hardcoded strings that drifted out of sync (the binary reported `0.4.1` at the `0.4.5` release). Bump the version in one place now (#170)
+- **Single-sourced versions** — `kuri`, `kuri-fetch`, `kuri-browse`, and `kuri-mcp` now read their version from `build.zig.zon` through `build_options`.
+- **Background-safe iOS input** — tap, swipe, and type operations now require explicit `--host-input`/`--allow-host-input` consent (or `KURI_ALLOW_HOST_INPUT=1`) and simulator window geometry failures report actionable diagnostics.
+- **Resilient Chrome/CDP launch** — failed DevTools startup retries with a fresh port and stale-lock cleanup, and connection failures surface actionable errors instead of terminating the server abruptly.
 
 ## [0.4.5] — 2026-05-27
 

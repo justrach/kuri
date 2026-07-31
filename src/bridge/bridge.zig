@@ -24,11 +24,17 @@ const PersistedTab = struct {
 pub const RefCache = struct {
     refs: std.StringHashMap(u32),
     node_count: usize,
+    /// Bumped once per detected navigation (see router.zig's
+    /// bumpGenerationLocked). NOT reset by clear() — clear() runs on every
+    /// snapshot, generation must survive across it and only move forward
+    /// when the underlying document actually changes.
+    generation: u32 = 0,
 
     pub fn init(allocator: std.mem.Allocator) RefCache {
         return .{
             .refs = std.StringHashMap(u32).init(allocator),
             .node_count = 0,
+            .generation = 0,
         };
     }
 
@@ -120,9 +126,10 @@ pub const Bridge = struct {
         }
         self.prev_snapshots.deinit();
 
-        var snap_it = self.snapshots.valueIterator();
-        while (snap_it.next()) |cache| {
-            cache.deinit();
+        var snap_it = self.snapshots.iterator();
+        while (snap_it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+            entry.value_ptr.deinit();
         }
         self.snapshots.deinit();
 
