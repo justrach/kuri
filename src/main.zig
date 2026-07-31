@@ -276,10 +276,12 @@ test {
     _ = @import("cdp/client.zig");
     _ = @import("cdp/websocket.zig");
     _ = @import("cdp/actions.zig");
+    _ = @import("cdp/dispatch.zig");
     _ = @import("cdp/stealth.zig");
     _ = @import("cdp/har.zig");
     _ = @import("snapshot/a11y.zig");
     _ = @import("snapshot/diff.zig");
+    _ = @import("snapshot/replay.zig");
     _ = @import("snapshot/ref_cache.zig");
     _ = @import("crawler/validator.zig");
     _ = @import("crawler/markdown.zig");

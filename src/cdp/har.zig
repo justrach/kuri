@@ -2,6 +2,37 @@ const std = @import("std");
 const CdpClient = @import("client.zig").CdpClient;
 const compat = @import("../compat.zig");
 
+/// Content likely to be a queryable API call rather than a static asset —
+/// same classification `handleHarReplay` uses to decide what to show an
+/// agent. Shared so the "what's worth showing/fetching a body for" definition
+/// stays in one place.
+pub fn isApiShaped(mime_type: []const u8, method: []const u8) bool {
+    return std.mem.indexOf(u8, mime_type, "json") != null or
+        std.mem.indexOf(u8, mime_type, "xml") != null or
+        std.mem.indexOf(u8, mime_type, "graphql") != null or
+        std.mem.eql(u8, method, "POST") or
+        std.mem.eql(u8, method, "PUT") or
+        std.mem.eql(u8, method, "PATCH") or
+        std.mem.eql(u8, method, "DELETE");
+}
+
+/// Gzip-compresses `bytes` in memory (RFC 1952 container). Pure and
+/// filesystem-free so it's independently testable via a round trip through
+/// std.compress.flate.Decompress. Note: the *output* writer just needs a
+/// small scratch buffer (`initCapacity` — NOT `.init`, which starts with a
+/// zero-length buffer that `Compress.init` would immediately assert on);
+/// the separate `window_buf` below is the unrelated LZ77 history window
+/// `Compress.init` requires to be at least `flate.max_window_len`.
+pub fn gzipBytes(allocator: std.mem.Allocator, bytes: []const u8) ![]const u8 {
+    var allocating = try std.Io.Writer.Allocating.initCapacity(allocator, 4096);
+    defer allocating.deinit();
+    var window_buf: [std.compress.flate.max_window_len]u8 = undefined;
+    var compressor = try std.compress.flate.Compress.init(&allocating.writer, &window_buf, .gzip, .default);
+    try compressor.writer.writeAll(bytes);
+    try compressor.finish();
+    return try allocating.toOwnedSlice();
+}
+
 /// HAR (HTTP Archive) recorder using CDP Network domain events.
 /// Captures request/response pairs with timing, headers, and status.
 ///
@@ -38,6 +69,7 @@ pub const HarRecorder = struct {
         response_size: usize,
         request_headers: []const u8,
         post_data: []const u8,
+        request_id: []const u8 = "",
     };
 
     pub fn init(allocator: std.mem.Allocator) HarRecorder {
@@ -60,6 +92,7 @@ pub const HarRecorder = struct {
             self.allocator.free(entry.mime_type);
             if (entry.request_headers.len > 0) self.allocator.free(entry.request_headers);
             if (entry.post_data.len > 0) self.allocator.free(entry.post_data);
+            if (entry.request_id.len > 0) self.allocator.free(entry.request_id);
         }
         self.entries.clearRetainingCapacity();
 
@@ -107,6 +140,8 @@ pub const HarRecorder = struct {
         errdefer if (owned_headers.len > 0) self.allocator.free(owned_headers);
         const owned_post = if (entry.post_data.len > 0) try self.allocator.dupe(u8, entry.post_data) else "";
         errdefer if (owned_post.len > 0) self.allocator.free(owned_post);
+        const owned_request_id = if (entry.request_id.len > 0) try self.allocator.dupe(u8, entry.request_id) else "";
+        errdefer if (owned_request_id.len > 0) self.allocator.free(owned_request_id);
         const owned = HarEntry{
             .url = owned_url,
             .method = owned_method,
@@ -119,6 +154,7 @@ pub const HarRecorder = struct {
             .response_size = entry.response_size,
             .request_headers = owned_headers,
             .post_data = owned_post,
+            .request_id = owned_request_id,
         };
         try self.entries.append(self.allocator, owned);
     }
@@ -254,6 +290,7 @@ pub const HarRecorder = struct {
                 .response_size = 0,
                 .request_headers = pending.headers_json,
                 .post_data = pending.post_data,
+                .request_id = request_id,
             }) catch return;
         }
     }
@@ -305,6 +342,184 @@ pub const HarRecorder = struct {
         return json[val_start..val_end];
     }
 
+    /// Like extractField, but correctly un-escapes the string value (\", \\,
+    /// \n, \r, \t, \uXXXX) instead of stopping at the first literal quote
+    /// byte. Needed specifically for "body": response bodies are very often
+    /// JSON themselves, so they reliably contain escaped quotes that
+    /// extractField's naive scan would truncate on -- silently corrupting
+    /// exactly the payloads this feature exists to capture.
+    fn extractJsonStringUnescaped(allocator: std.mem.Allocator, json: []const u8, field: []const u8) ?[]const u8 {
+        var search_buf: [256]u8 = undefined;
+        const prefix = std.fmt.bufPrint(&search_buf, "\"{s}\"", .{field}) catch return null;
+        const field_pos = std.mem.indexOf(u8, json, prefix) orelse return null;
+        var i = field_pos + prefix.len;
+        while (i < json.len and (json[i] == ':' or json[i] == ' ' or json[i] == '\t')) : (i += 1) {}
+        if (i >= json.len or json[i] != '"') return null;
+        i += 1;
+
+        var out: std.ArrayList(u8) = .empty;
+        while (i < json.len) {
+            const c = json[i];
+            if (c == '"') return out.items;
+            if (c != '\\' or i + 1 >= json.len) {
+                out.append(allocator, c) catch return null;
+                i += 1;
+                continue;
+            }
+            const next = json[i + 1];
+            switch (next) {
+                '"', '\\', '/' => {
+                    out.append(allocator, next) catch return null;
+                    i += 2;
+                },
+                'n' => {
+                    out.append(allocator, '\n') catch return null;
+                    i += 2;
+                },
+                'r' => {
+                    out.append(allocator, '\r') catch return null;
+                    i += 2;
+                },
+                't' => {
+                    out.append(allocator, '\t') catch return null;
+                    i += 2;
+                },
+                'b' => {
+                    out.append(allocator, 0x08) catch return null;
+                    i += 2;
+                },
+                'f' => {
+                    out.append(allocator, 0x0C) catch return null;
+                    i += 2;
+                },
+                'u' => {
+                    if (i + 6 <= json.len) {
+                        const code = std.fmt.parseInt(u21, json[i + 2 .. i + 6], 16) catch {
+                            out.append(allocator, c) catch return null;
+                            i += 1;
+                            continue;
+                        };
+                        var buf: [4]u8 = undefined;
+                        const len = std.unicode.utf8Encode(code, &buf) catch {
+                            out.append(allocator, c) catch return null;
+                            i += 1;
+                            continue;
+                        };
+                        out.appendSlice(allocator, buf[0..len]) catch return null;
+                        i += 6;
+                    } else {
+                        out.append(allocator, c) catch return null;
+                        i += 1;
+                    }
+                },
+                else => {
+                    out.append(allocator, c) catch return null;
+                    i += 1;
+                },
+            }
+        }
+        return null;
+    }
+
+    /// Best-effort CDP round trip: fetches and decodes (base64 if needed) the
+    /// full response body for one request. Failure just means "no body for
+    /// this entry" to the caller -- bodies are legitimately unavailable for
+    /// many reasons (evicted, cross-origin, streaming not finished).
+    fn fetchResponseBody(allocator: std.mem.Allocator, client: *CdpClient, request_id: []const u8) ![]const u8 {
+        const params = try std.fmt.allocPrint(allocator, "{{\"requestId\":\"{s}\"}}", .{request_id});
+        const response = try client.send(allocator, "Network.getResponseBody", params);
+        const raw_body = extractJsonStringUnescaped(allocator, response, "body") orelse return error.NoBody;
+        const is_base64 = extractField(response, "base64Encoded") orelse "false";
+        if (!std.mem.eql(u8, is_base64, "true")) return raw_body;
+
+        const decoder = std.base64.standard.Decoder;
+        const decoded_len = try decoder.calcSizeForSlice(raw_body);
+        const decoded = try allocator.alloc(u8, decoded_len);
+        try decoder.decode(decoded, raw_body);
+        return decoded;
+    }
+
+    const max_body_preview_bytes: usize = 4096;
+
+    /// Writes one JSONL line per captured entry to
+    /// `{dir_path}/network/{tab_id}.jsonl` (0 tokens until an agent chooses
+    /// to read it) and returns that path. For API-shaped entries with a
+    /// fetchable body: `body_preview` is always the first
+    /// `max_body_preview_bytes` of the body; if the full body exceeds that,
+    /// it is ALSO gzipped in full to a `.body.gz` sidecar (both fields
+    /// coexist -- a plain `jq '.body_preview'` never needs to gunzip
+    /// anything). A body-fetch, gzip, or sidecar-write failure for one entry
+    /// only skips that entry's preview/sidecar; it never aborts the write.
+    pub fn writeJsonl(self: *HarRecorder, allocator: std.mem.Allocator, client: *CdpClient, dir_path: []const u8, tab_id: []const u8) ![]const u8 {
+        const json_util = @import("../util/json.zig");
+        const network_dir = try std.fmt.allocPrint(allocator, "{s}/network", .{dir_path});
+        try compat.cwdMakePath(network_dir);
+
+        var lines: std.ArrayList(u8) = .empty;
+        for (self.entries.items) |entry| {
+            var body_preview: []const u8 = "";
+            var body_sidecar: []const u8 = "";
+
+            const worth_fetching = entry.request_id.len > 0 and
+                isApiShaped(entry.mime_type, entry.method) and
+                entry.status != 204 and entry.status != 304;
+
+            if (worth_fetching) {
+                if (fetchResponseBody(allocator, client, entry.request_id)) |body| {
+                    if (body.len > 0) {
+                        body_preview = body[0..@min(body.len, max_body_preview_bytes)];
+                        if (body.len > max_body_preview_bytes) {
+                            if (gzipBytes(allocator, body)) |gz| {
+                                const sidecar_path = std.fmt.allocPrint(allocator, "{s}/{s}.{s}.body.gz", .{ network_dir, tab_id, entry.request_id }) catch "";
+                                if (sidecar_path.len > 0) {
+                                    if (compat.cwdCreateFile(sidecar_path)) |fd| {
+                                        defer compat.fdClose(fd);
+                                        compat.fdWriteAll(fd, gz) catch {};
+                                        body_sidecar = sidecar_path;
+                                    } else |_| {}
+                                }
+                            } else |_| {}
+                        }
+                    }
+                } else |_| {}
+            }
+
+            const escaped_url = json_util.jsonEscape(entry.url, allocator) catch entry.url;
+            const escaped_method = json_util.jsonEscape(entry.method, allocator) catch entry.method;
+            const escaped_mime = json_util.jsonEscape(entry.mime_type, allocator) catch entry.mime_type;
+            const escaped_headers = json_util.jsonEscape(entry.request_headers, allocator) catch entry.request_headers;
+            const escaped_post = json_util.jsonEscape(entry.post_data, allocator) catch entry.post_data;
+
+            const preview_json = if (body_preview.len > 0)
+                std.fmt.allocPrint(allocator, "\"{s}\"", .{json_util.jsonEscape(body_preview, allocator) catch body_preview}) catch "null"
+            else
+                "null";
+            const sidecar_json = if (body_sidecar.len > 0)
+                std.fmt.allocPrint(allocator, "\"{s}\"", .{json_util.jsonEscape(body_sidecar, allocator) catch body_sidecar}) catch "null"
+            else
+                "null";
+
+            lines.print(allocator, "{{\"url\":\"{s}\",\"method\":\"{s}\",\"status\":{d},\"mime_type\":\"{s}\",\"timestamp\":{d},\"duration_ms\":{d},\"request_headers\":\"{s}\",\"post_data\":\"{s}\",\"body_preview\":{s},\"body_sidecar\":{s}}}\n", .{
+                escaped_url,
+                escaped_method,
+                entry.status,
+                escaped_mime,
+                entry.timestamp,
+                entry.duration_ms,
+                escaped_headers,
+                escaped_post,
+                preview_json,
+                sidecar_json,
+            }) catch {};
+        }
+
+        const jsonl_path = try std.fmt.allocPrint(allocator, "{s}/{s}.jsonl", .{ network_dir, tab_id });
+        const fd = try compat.cwdCreateFile(jsonl_path);
+        defer compat.fdClose(fd);
+        try compat.fdWriteAll(fd, lines.items);
+        return jsonl_path;
+    }
+
     pub fn deinit(self: *HarRecorder) void {
         for (self.entries.items) |entry| {
             self.allocator.free(entry.url);
@@ -313,6 +528,7 @@ pub const HarRecorder = struct {
             self.allocator.free(entry.mime_type);
             if (entry.request_headers.len > 0) self.allocator.free(entry.request_headers);
             if (entry.post_data.len > 0) self.allocator.free(entry.post_data);
+            if (entry.request_id.len > 0) self.allocator.free(entry.request_id);
         }
         self.entries.deinit(self.allocator);
 
@@ -321,6 +537,8 @@ pub const HarRecorder = struct {
             self.allocator.free(kv.key_ptr.*);
             self.allocator.free(kv.value_ptr.url);
             self.allocator.free(kv.value_ptr.method);
+            if (kv.value_ptr.headers_json.len > 0) self.allocator.free(kv.value_ptr.headers_json);
+            if (kv.value_ptr.post_data.len > 0) self.allocator.free(kv.value_ptr.post_data);
         }
         self.pending_requests.deinit();
     }
@@ -530,4 +748,107 @@ test "HarRecorder records non-200 status and millisecond duration" {
     try std.testing.expectEqual(@as(u16, 304), entry.status);
     try std.testing.expectEqualStrings("Not Modified", entry.status_text);
     try std.testing.expect(entry.duration_ms >= 50);
+}
+
+test "isApiShaped classifies by mime type" {
+    try std.testing.expect(isApiShaped("application/json", "GET"));
+    try std.testing.expect(isApiShaped("application/json; charset=utf-8", "GET"));
+    try std.testing.expect(isApiShaped("application/xml", "GET"));
+    try std.testing.expect(isApiShaped("application/graphql-response+json", "GET"));
+    try std.testing.expect(!isApiShaped("image/png", "GET"));
+    try std.testing.expect(!isApiShaped("font/woff2", "GET"));
+}
+
+test "isApiShaped classifies by mutating method regardless of mime" {
+    try std.testing.expect(isApiShaped("text/html", "POST"));
+    try std.testing.expect(isApiShaped("text/html", "PUT"));
+    try std.testing.expect(isApiShaped("text/html", "PATCH"));
+    try std.testing.expect(isApiShaped("text/html", "DELETE"));
+    try std.testing.expect(!isApiShaped("text/html", "GET"));
+}
+
+test "gzipBytes round-trips through flate.Decompress" {
+    const allocator = std.testing.allocator;
+    const original = "{\"hello\":\"world\",\"nested\":{\"a\":1,\"b\":[1,2,3]},\"note\":\"repeat this line many times to exercise real compression \"}";
+
+    var repeated: std.ArrayList(u8) = .empty;
+    defer repeated.deinit(allocator);
+    for (0..200) |_| try repeated.appendSlice(allocator, original);
+
+    const compressed = try gzipBytes(allocator, repeated.items);
+    defer allocator.free(compressed);
+    try std.testing.expect(compressed.len < repeated.items.len);
+
+    var reader: std.Io.Reader = .fixed(compressed);
+    var window_buf: [std.compress.flate.max_window_len]u8 = undefined;
+    var decompressor = std.compress.flate.Decompress.init(&reader, .gzip, &window_buf);
+
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(allocator);
+    try decompressor.reader.appendRemainingUnlimited(allocator, &out);
+
+    try std.testing.expectEqualStrings(repeated.items, out.items);
+}
+
+test "gzipBytes round-trips a short body" {
+    const allocator = std.testing.allocator;
+    const original = "tiny";
+    const compressed = try gzipBytes(allocator, original);
+    defer allocator.free(compressed);
+
+    var reader: std.Io.Reader = .fixed(compressed);
+    var window_buf: [std.compress.flate.max_window_len]u8 = undefined;
+    var decompressor = std.compress.flate.Decompress.init(&reader, .gzip, &window_buf);
+
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(allocator);
+    try decompressor.reader.appendRemainingUnlimited(allocator, &out);
+
+    try std.testing.expectEqualStrings(original, out.items);
+}
+
+test "writeJsonl writes escaped JSONL to disk without touching CDP for empty request_id entries" {
+    const allocator = std.testing.allocator;
+    var rec = HarRecorder.init(allocator);
+    defer rec.deinit();
+
+    try rec.addEntry(.{
+        .url = "https://api.example.com/users?q=\"quoted\"",
+        .method = "GET",
+        .status = 200,
+        .status_text = "OK",
+        .mime_type = "application/json",
+        .timestamp = 1000,
+        .duration_ms = 42,
+        .request_size = 0,
+        .response_size = 0,
+        .request_headers = "{\"Authorization\":\"Bearer abc\"}",
+        .post_data = "",
+        .request_id = "", // empty -- writeJsonl must skip the CDP fetch entirely
+    });
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const arena_alloc = arena.allocator();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir_path = try std.fmt.allocPrint(arena_alloc, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+
+    // client is never dereferenced: the only entry has request_id="", so
+    // writeJsonl's CDP-fetch branch is provably never entered.
+    const fake_client: *CdpClient = undefined;
+    const jsonl_path = try rec.writeJsonl(arena_alloc, fake_client, dir_path, "tab123");
+
+    try std.testing.expect(std.mem.endsWith(u8, jsonl_path, "tab123.jsonl"));
+
+    const contents = try compat.cwdReadFile(arena_alloc, jsonl_path, 1 << 20);
+
+    try std.testing.expect(std.mem.indexOf(u8, contents, "\\\"quoted\\\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, contents, "\"body_preview\":null") != null);
+    try std.testing.expect(std.mem.indexOf(u8, contents, "\"body_sidecar\":null") != null);
+    try std.testing.expect(std.mem.indexOf(u8, contents, "\"status\":200") != null);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, arena_alloc, contents, .{});
+    try std.testing.expect(parsed.value == .object);
 }

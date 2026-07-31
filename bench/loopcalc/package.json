@@ -1,0 +1,16 @@
+{
+  "name": "loopcalc",
+  "version": "0.1.0",
+  "description": "Agent-loop cost calculator — measures token/$ economics of browser-agent loops using kuri (observations) + codegraff (real token/cost ground truth).",
+  "type": "module",
+  "bin": { "loopcalc": "./src/cli.ts" },
+  "scripts": {
+    "estimate": "bun run src/cli.ts estimate",
+    "live": "bun run src/cli.ts live"
+  },
+  "dependencies": {
+    "@codegraff/sdk": "^0.3.1",
+    "js-tiktoken": "^1.0.12"
+  },
+  "engines": { "node": ">=18" }
+}

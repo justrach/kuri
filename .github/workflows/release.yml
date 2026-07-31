@@ -18,6 +18,23 @@ jobs:
         target: [x86_64-linux, aarch64-linux]
     steps:
       - uses: actions/checkout@v4
+      - name: Verify private nanostore access
+        env:
+          NANOSTORE_PAT: ${{ secrets.NANOSTORE_PAT }}
+        run: |
+          test -n "$NANOSTORE_PAT" || {
+            echo "::error::Set the NANOSTORE_PAT repository secret to build kuri. nanostore is a private dependency."
+            exit 1
+          }
+      - name: Checkout private nanostore dependency
+        uses: actions/checkout@v4
+        with:
+          repository: justrach/nanostore
+          ref: e242f7f8cf75ca6c636c15482a83f7833291b53b
+          token: ${{ secrets.NANOSTORE_PAT }}
+          path: nanostore
+      - name: Link nanostore at the path expected by build.zig.zon
+        run: ln -s "$GITHUB_WORKSPACE/nanostore" "$GITHUB_WORKSPACE/../nanostore"
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
@@ -44,6 +61,23 @@ jobs:
       APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
     steps:
       - uses: actions/checkout@v4
+      - name: Verify private nanostore access
+        env:
+          NANOSTORE_PAT: ${{ secrets.NANOSTORE_PAT }}
+        run: |
+          test -n "$NANOSTORE_PAT" || {
+            echo "::error::Set the NANOSTORE_PAT repository secret to build kuri. nanostore is a private dependency."
+            exit 1
+          }
+      - name: Checkout private nanostore dependency
+        uses: actions/checkout@v4
+        with:
+          repository: justrach/nanostore
+          ref: e242f7f8cf75ca6c636c15482a83f7833291b53b
+          token: ${{ secrets.NANOSTORE_PAT }}
+          path: nanostore
+      - name: Link nanostore at the path expected by build.zig.zon
+        run: ln -s "$GITHUB_WORKSPACE/nanostore" "$GITHUB_WORKSPACE/../nanostore"
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
@@ -51,7 +85,6 @@ jobs:
         run: zig build -Dtarget=aarch64-macos -Doptimize=ReleaseFast
 
       - name: Sign & notarize
-        if: ${{ env.APPLE_CERTIFICATE != '' }}
         run: |
           KEYCHAIN="build-$(uuidgen).keychain"
           KEYCHAIN_PASS="$(uuidgen)"
@@ -63,8 +96,10 @@ jobs:
             -T /usr/bin/codesign -T /usr/bin/productsign
           security list-keychain -d user -s "$KEYCHAIN"
           security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASS" "$KEYCHAIN"
+          SIGNING_IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN" | sed -n 's/.*"\(Developer ID Application:.*\)"/\1/p' | head -1)"
+          test -n "$SIGNING_IDENTITY" || { echo "No Developer ID Application identity found in the temporary keychain"; exit 1; }
           for BIN in zig-out/bin/*; do
-            codesign --sign "Developer ID Application: $APPLE_TEAM_ID" \
+            codesign --sign "$SIGNING_IDENTITY" \
               --options runtime --timestamp --force "$BIN"
           done
           zip -j /tmp/kuri-macos-arm.zip zig-out/bin/*
@@ -88,7 +123,7 @@ jobs:
 
   # ── macOS x86_64: build + sign + notarize ───────────────────────────────────
   build-macos-x86:
-    runs-on: macos-13
+    runs-on: macos-15-intel
     env:
       APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
       APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -97,14 +132,37 @@ jobs:
       APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
     steps:
       - uses: actions/checkout@v4
+      - name: Verify private nanostore access
+        env:
+          NANOSTORE_PAT: ${{ secrets.NANOSTORE_PAT }}
+        run: |
+          test -n "$NANOSTORE_PAT" || {
+            echo "::error::Set the NANOSTORE_PAT repository secret to build kuri. nanostore is a private dependency."
+            exit 1
+          }
+      - name: Checkout private nanostore dependency
+        uses: actions/checkout@v4
+        with:
+          repository: justrach/nanostore
+          ref: e242f7f8cf75ca6c636c15482a83f7833291b53b
+          token: ${{ secrets.NANOSTORE_PAT }}
+          path: nanostore
+      - name: Link nanostore at the path expected by build.zig.zon
+        run: ln -s "$GITHUB_WORKSPACE/nanostore" "$GITHUB_WORKSPACE/../nanostore"
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
+      - name: Verify Apple signing and notarization credentials
+        run: |
+          test -n "$APPLE_CERTIFICATE" || { echo "::error::APPLE_CERTIFICATE is required for a release"; exit 1; }
+          test -n "$APPLE_CERTIFICATE_PASSWORD" || { echo "::error::APPLE_CERTIFICATE_PASSWORD is required for a release"; exit 1; }
+          test -n "$APPLE_TEAM_ID" || { echo "::error::APPLE_TEAM_ID is required for a release"; exit 1; }
+          test -n "$APPLE_ID" || { echo "::error::APPLE_ID is required for a release"; exit 1; }
+          test -n "$APPLE_APP_PASSWORD" || { echo "::error::APPLE_APP_PASSWORD is required for a release"; exit 1; }
       - name: Build
         run: zig build -Dtarget=x86_64-macos -Doptimize=ReleaseFast
 
       - name: Sign & notarize
-        if: ${{ env.APPLE_CERTIFICATE != '' }}
         run: |
           KEYCHAIN="build-$(uuidgen).keychain"
           KEYCHAIN_PASS="$(uuidgen)"
@@ -116,8 +174,10 @@ jobs:
             -T /usr/bin/codesign -T /usr/bin/productsign
           security list-keychain -d user -s "$KEYCHAIN"
           security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASS" "$KEYCHAIN"
+          SIGNING_IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN" | sed -n 's/.*"\(Developer ID Application:.*\)"/\1/p' | head -1)"
+          test -n "$SIGNING_IDENTITY" || { echo "No Developer ID Application identity found in the temporary keychain"; exit 1; }
           for BIN in zig-out/bin/*; do
-            codesign --sign "Developer ID Application: $APPLE_TEAM_ID" \
+            codesign --sign "$SIGNING_IDENTITY" \
               --options runtime --timestamp --force "$BIN"
           done
           zip -j /tmp/kuri-macos-x86.zip zig-out/bin/*
@@ -144,6 +204,9 @@ jobs:
     needs: [build-linux, build-macos-arm, build-macos-x86]
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+        with:
+          path: source
       - uses: actions/checkout@v4
         with:
           ref: release-channel
@@ -237,7 +300,7 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="${GITHUB_REF_NAME}"
-          SHA_FILE="dist/kuri-${VERSION}-sha256sums.txt"
+          export SHA_FILE="dist/kuri-${VERSION}-sha256sums.txt"
 
           python3 - <<'PY'
           from pathlib import Path
@@ -262,8 +325,6 @@ jobs:
               for path in sorted(Path("dist").glob("kuri-*.tar.gz")):
                   out.write(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}\\n")
           PY
-        env:
-          SHA_FILE: dist/kuri-${{ github.ref_name }}-sha256sums.txt
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}

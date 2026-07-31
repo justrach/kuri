@@ -47,7 +47,7 @@ so the token advantage holds when kuri is consumed *as an MCP server*: **4,137 t
 | Emulation: emulate, resize | ✅ exceeds (split into `/emulate`, `/set/offline`, `/geolocation`, `/set/media`, `/set/viewport`, `/set/useragent`, `/timezone`, `/locale`) |
 | Network: list/get request | ✅ (`/network`, `/har/*`, `/request/detail`, `/response/body`, `/intercept/*`) |
 | Debugging: evaluate, console, screenshot, snapshot, screencast | ✅ all |
-| MCP server transport | ✅ now via `kuri-mcp` (12 tools) |
+| MCP server transport | ✅ now via `kuri-mcp` (14 tools, incl. `take_snapshot_diff` + `get_page_state`) |
 | **lighthouse_audit** | ❌ none (kuri `/audit` is *security*, not Lighthouse) |
 | **performance_analyze_insight** | ◑ raw `/trace/*`, `/vitals`, `/perf/lcp` — no Insights/CrUX analysis |
 | **Memory heap snapshot (+4 analysis tools)** | ❌ none (kuri has CPU `/profiler/*`, not heap) |
