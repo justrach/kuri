@@ -822,7 +822,10 @@ fn cmdViewport(arena: std.mem.Allocator, client: *CdpClient, args: []const []con
 
 fn cmdEval(arena: std.mem.Allocator, client: *CdpClient, expr: []const u8) !void {
     const escaped = try escapeForJson(arena, expr);
-    const params = try std.fmt.allocPrint(arena, "{{\"expression\":\"{s}\",\"returnByValue\":true}}", .{escaped});
+    // #177: without awaitPromise an async expression returns the pending
+    // Promise object (value lost); with it, CDP resolves first — same flag the
+    // HTTP /evaluate route and cmdHeaders/cmdAudit already pass.
+    const params = try std.fmt.allocPrint(arena, "{{\"expression\":\"{s}\",\"returnByValue\":true,\"awaitPromise\":true}}", .{escaped});
     const response = client.send(arena, protocol.Methods.runtime_evaluate, params) catch |err| {
         jsonError("eval failed: {s}", .{@errorName(err)});
         std.process.exit(1);
