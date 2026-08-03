@@ -14,11 +14,11 @@ import path from "node:path";
  *   - Session-based agent loops via X-Kuri-Session
  *
  * Configuration (set via env or pi config):
- *   KURI_BASE_URL   default: http://127.0.0.1:8080
+ *   KURI_BASE_URL   default: http://127.0.0.1:9223
  *   KURI_SESSION    default: pi-kuri-session
  */
 
-const PI_KURI_EXTENSION_VERSION = "2026-05-20";
+const PI_KURI_EXTENSION_VERSION = "2026-08-03";
 
 // ── Help text ─────────────────────────────────────────────────────────────
 
@@ -47,9 +47,16 @@ const MENU_CHOICES = [
   "kuri-cookies - list cookies with security flags",
   "kuri-headers - check security response headers",
   "kuri-audit - run full security audit",
+  "kuri-tabs - list session tabs",
   "kuri-back - browser back",
   "kuri-forward - browser forward",
   "kuri-reload - reload the page",
+  "kuri-close-tab - close the current tab",
+  "kuri-headers - check security response headers",
+  "kuri-errors - native console errors",
+  "kuri-har-start - start HAR recording",
+  "kuri-har-stop - stop HAR and export",
+  "kuri-har-status - HAR recording status",
   "kuri-session <id> - set the active Kuri session",
   "kuri-base <url> - set the Kuri server base URL",
   "kuri-token [token] - show or set the Kuri API auth token",
@@ -58,7 +65,7 @@ const MENU_CHOICES = [
 // ── Configuration helpers ─────────────────────────────────────────────────
 
 function kuriBaseUrl(): string {
-  return process.env.KURI_BASE_URL || "http://127.0.0.1:8080";
+  return process.env.KURI_BASE_URL || "http://127.0.0.1:9223";
 }
 
 function kuriSession(): string {
@@ -142,12 +149,25 @@ async function kuriFetch(path: string, query: Record<string, string> = {}): Prom
 }
 
 async function kuriFetchText(path: string, query: Record<string, string> = {}): Promise<string> {
-  const resp = await kuriFetch(path, query);
-  if (!resp.ok) {
-    const body = await resp.text().catch(() => "");
-    throw new Error(`Kuri ${path}: ${resp.status} ${resp.statusText} — ${body.slice(0, 200)}`);
+  const doFetch = async (): Promise<string> => {
+    const resp = await kuriFetch(path, query);
+    if (!resp.ok) {
+      const body = await resp.text().catch(() => "");
+      throw new Error(`Kuri ${path}: ${resp.status} ${resp.statusText} — ${body.slice(0, 200)}`);
+    }
+    return resp.text();
+  };
+  try {
+    return await doFetch();
+  } catch (err: any) {
+    // Transient CDP 502s are common right after navigation/actions; retry once.
+    const isCdpFailure = err?.message?.includes("502") || err?.message?.includes("CDP");
+    if (isCdpFailure) {
+      await new Promise(r => setTimeout(r, 1000));
+      return await doFetch();
+    }
+    throw err;
   }
-  return resp.text();
 }
 
 /**
@@ -182,6 +202,37 @@ async function resolveSessionTabId(): Promise<string> {
   const info = JSON.parse(infoText);
   if (info.tab_id) return String(info.tab_id);
   throw new Error("Could not resolve current session tab ID");
+}
+
+/**
+ * Resolve the session's current tab, creating one if the session has none.
+ * Returns the tab id and whether a new tab was created.
+ * This removes the "remember to create a tab first" friction: navigation,
+ * headers, HAR, and similar tools can self-provision a tab.
+ */
+async function resolveSessionTabIdOrCreate(): Promise<{ tab_id: string; created: boolean }> {
+  try {
+    const infoText = await kuriFetchTextWithRetry("/tab/current", {});
+    const info = JSON.parse(infoText);
+    if (info.tab_id) return { tab_id: String(info.tab_id), created: false };
+  } catch {
+    // No current tab — fall through to create.
+  }
+  const resp = await kuriFetchText("/tab/new", { url: "about:blank", activate: "true" });
+  try {
+    const tab = JSON.parse(resp);
+    const id = tab.tab_id || tab.id || "";
+    if (id) return { tab_id: String(id), created: true };
+  } catch {
+    // fall through
+  }
+  throw new Error("Could not resolve or create a session tab");
+}
+
+/** Resolve a tab id: explicit param wins; otherwise session current (creating if needed). */
+async function resolveTabId(paramTabId: string | undefined): Promise<{ tab_id: string; created: boolean }> {
+  if (paramTabId) return { tab_id: String(paramTabId), created: false };
+  return resolveSessionTabIdOrCreate();
 }
 
 function singleQuotedJsString(value: string): string {
@@ -254,9 +305,16 @@ const kuriNavigateTool = kuriTool({
   }),
   execute: async (_toolCallId, params, _signal, _onUpdate) => {
     const query: Record<string, string> = { url: String(params.url) };
-    if (params.tab_id) query.tab_id = String(params.tab_id);
+    let note = "";
+    if (params.tab_id) {
+      query.tab_id = String(params.tab_id);
+    } else {
+      const { tab_id, created } = await resolveSessionTabIdOrCreate();
+      query.tab_id = tab_id;
+      note = created ? `\n(created new tab ${tab_id} — session had none)` : `\n(used session tab ${tab_id})`;
+    }
     const text = await kuriFetchText("/navigate", query);
-    return { content: [{ type: "text" as const, text }] };
+    return { content: [{ type: "text" as const, text: text + note }] };
   },
 });
 
@@ -642,6 +700,179 @@ const kuriScrollDownTool = kuriTool({
     const query: Record<string, string> = { action: "scroll", direction: "down" };
     if (params.tab_id) query.tab_id = String(params.tab_id);
     const text = await kuriFetchText("/action", query);
+    return { content: [{ type: "text" as const, text }] };
+  },
+});
+
+const kuriTabsTool = kuriTool({
+  name: "kuri_tabs",
+  label: "List Browser Tabs",
+  description: "List all browser tabs in the active session with IDs, URLs, titles, and current flag.",
+  promptSnippet: "List browser tabs",
+  promptGuidelines: [
+    "Use kuri_tabs to see what tabs exist before picking a tab_id for other tools.",
+    "The 'current' flag shows the session's active tab.",
+  ],
+  parameters: Type.Object({}),
+  execute: async (_toolCallId, _params, _signal, _onUpdate) => {
+    const text = await kuriFetchTextWithRetry("/tabs", {});
+    return { content: [{ type: "text" as const, text }] };
+  },
+});
+
+const kuriBackTool = kuriTool({
+  name: "kuri_back",
+  label: "Browser Back",
+  description: "Navigate the browser tab back in history.",
+  promptSnippet: "Go back in browser history",
+  parameters: Type.Object({
+    tab_id: Type.Optional(Type.String({ description: "Optional explicit tab ID." })),
+  }),
+  execute: async (_toolCallId, params, _signal, _onUpdate) => {
+    const query: Record<string, string> = {};
+    if (params.tab_id) query.tab_id = String(params.tab_id);
+    const text = await kuriFetchText("/back", query);
+    return { content: [{ type: "text" as const, text }] };
+  },
+});
+
+const kuriForwardTool = kuriTool({
+  name: "kuri_forward",
+  label: "Browser Forward",
+  description: "Navigate the browser tab forward in history.",
+  promptSnippet: "Go forward in browser history",
+  parameters: Type.Object({
+    tab_id: Type.Optional(Type.String({ description: "Optional explicit tab ID." })),
+  }),
+  execute: async (_toolCallId, params, _signal, _onUpdate) => {
+    const query: Record<string, string> = {};
+    if (params.tab_id) query.tab_id = String(params.tab_id);
+    const text = await kuriFetchText("/forward", query);
+    return { content: [{ type: "text" as const, text }] };
+  },
+});
+
+const kuriReloadTool = kuriTool({
+  name: "kuri_reload",
+  label: "Reload Browser Page",
+  description: "Reload the current page in the browser tab.",
+  promptSnippet: "Reload browser page",
+  parameters: Type.Object({
+    tab_id: Type.Optional(Type.String({ description: "Optional explicit tab ID." })),
+  }),
+  execute: async (_toolCallId, params, _signal, _onUpdate) => {
+    const query: Record<string, string> = {};
+    if (params.tab_id) query.tab_id = String(params.tab_id);
+    const text = await kuriFetchText("/reload", query);
+    return { content: [{ type: "text" as const, text }] };
+  },
+});
+
+const kuriCloseTabTool = kuriTool({
+  name: "kuri_close_tab",
+  label: "Close Browser Tab",
+  description: "Close a browser tab. Defaults to the session's current tab.",
+  promptSnippet: "Close browser tab",
+  parameters: Type.Object({
+    tab_id: Type.Optional(Type.String({ description: "Optional explicit tab ID. Defaults to session current tab." })),
+  }),
+  execute: async (_toolCallId, params, _signal, _onUpdate) => {
+    const query: Record<string, string> = {};
+    if (params.tab_id) {
+      query.tab_id = String(params.tab_id);
+    } else {
+      const { tab_id } = await resolveSessionTabIdOrCreate();
+      query.tab_id = tab_id;
+    }
+    const text = await kuriFetchText("/close", query);
+    return { content: [{ type: "text" as const, text }] };
+  },
+});
+
+const kuriHeadersTool = kuriTool({
+  name: "kuri_headers",
+  label: "Security Response Headers",
+  description: "Check the page's security response headers (HSTS, CSP, X-Frame-Options, etc.).",
+  promptSnippet: "Check security response headers",
+  parameters: Type.Object({
+    tab_id: Type.Optional(Type.String({ description: "Optional explicit tab ID. Auto-resolves if omitted." })),
+  }),
+  execute: async (_toolCallId, params, _signal, _onUpdate) => {
+    const query: Record<string, string> = {};
+    const { tab_id } = await resolveTabId(params.tab_id);
+    query.tab_id = tab_id;
+    const text = await kuriFetchTextWithRetry("/headers", query);
+    return { content: [{ type: "text" as const, text }] };
+  },
+});
+
+const kuriErrorsTool = kuriTool({
+  name: "kuri_errors",
+  label: "Browser Console Errors (native)",
+  description: "Get console errors captured natively by the Kuri/CDP server for the page. Preferred over kuri_console_errors (JS interceptor).",
+  promptSnippet: "Get native browser console errors",
+  promptGuidelines: [
+    "Use when a page loaded but seems broken or empty — checks real CDP console output.",
+  ],
+  parameters: Type.Object({
+    tab_id: Type.Optional(Type.String({ description: "Optional explicit tab ID. Auto-resolves if omitted." })),
+  }),
+  execute: async (_toolCallId, params, _signal, _onUpdate) => {
+    const query: Record<string, string> = {};
+    const { tab_id } = await resolveTabId(params.tab_id);
+    query.tab_id = tab_id;
+    const text = await kuriFetchTextWithRetry("/errors", query);
+    return { content: [{ type: "text" as const, text }] };
+  },
+});
+
+const kuriHarStartTool = kuriTool({
+  name: "kuri_har_start",
+  label: "Start HAR Recording",
+  description: "Start recording an HTTP archive (HAR) for the page — useful for API discovery or debugging network traffic.",
+  promptSnippet: "Start HAR recording",
+  parameters: Type.Object({
+    tab_id: Type.Optional(Type.String({ description: "Optional explicit tab ID. Auto-resolves if omitted." })),
+  }),
+  execute: async (_toolCallId, params, _signal, _onUpdate) => {
+    const query: Record<string, string> = {};
+    const { tab_id } = await resolveTabId(params.tab_id);
+    query.tab_id = tab_id;
+    const text = await kuriFetchText("/har/start", query);
+    return { content: [{ type: "text" as const, text }] };
+  },
+});
+
+const kuriHarStopTool = kuriTool({
+  name: "kuri_har_stop",
+  label: "Stop HAR Recording",
+  description: "Stop HAR recording and return the HTTP archive log.",
+  promptSnippet: "Stop HAR recording and get the archive",
+  parameters: Type.Object({
+    tab_id: Type.Optional(Type.String({ description: "Optional explicit tab ID. Auto-resolves if omitted." })),
+  }),
+  execute: async (_toolCallId, params, _signal, _onUpdate) => {
+    const query: Record<string, string> = {};
+    const { tab_id } = await resolveTabId(params.tab_id);
+    query.tab_id = tab_id;
+    const text = await kuriFetchText("/har/stop", query);
+    return { content: [{ type: "text" as const, text }] };
+  },
+});
+
+const kuriHarStatusTool = kuriTool({
+  name: "kuri_har_status",
+  label: "HAR Recording Status",
+  description: "Check whether HAR recording is active for the page.",
+  promptSnippet: "Check HAR recording status",
+  parameters: Type.Object({
+    tab_id: Type.Optional(Type.String({ description: "Optional explicit tab ID. Auto-resolves if omitted." })),
+  }),
+  execute: async (_toolCallId, params, _signal, _onUpdate) => {
+    const query: Record<string, string> = {};
+    const { tab_id } = await resolveTabId(params.tab_id);
+    query.tab_id = tab_id;
+    const text = await kuriFetchText("/har/status", query);
     return { content: [{ type: "text" as const, text }] };
   },
 });
@@ -1046,6 +1277,16 @@ const allTools = [
   kuriScrollTool,
   kuriScrollUpTool,
   kuriScrollDownTool,
+  kuriTabsTool,
+  kuriBackTool,
+  kuriForwardTool,
+  kuriReloadTool,
+  kuriCloseTabTool,
+  kuriHeadersTool,
+  kuriErrorsTool,
+  kuriHarStartTool,
+  kuriHarStopTool,
+  kuriHarStatusTool,
   kuriScreenshotSiteTool,
 ];
 
@@ -1061,7 +1302,7 @@ async function cmdKuriStart(_args: string, ctx: ExtensionCommandContext): Promis
     ctx.ui.notify("Kuri server is already running.");
     return;
   }
-  ctx.ui.notify("Kuri is not running. Start it manually:\n  kuri\n\nOr with options:\n  PORT=8080 kuri");
+  ctx.ui.notify("Kuri is not running. Start it manually:\n  kuri\n\nOr with options:\n  PORT=9223 kuri");
 }
 
 async function cmdKuriHealth(_args: string, ctx: ExtensionCommandContext): Promise<void> {
@@ -1194,8 +1435,12 @@ export default function kuriCommands(pi: ExtensionAPI): void {
       "",
       "Only use these when kuri_screenshot_site cannot reach the right page or state.",
       "",
-      "**Open a tab:**",
-      "  kuri_new_tab(url?)",
+      "**Tabs (auto-managed):**",
+      "  kuri_navigate auto-creates a tab when the session has none — no need to call kuri_new_tab first.",
+      "  kuri_tabs — list session tabs (id, url, title, current flag)",
+      "  kuri_new_tab(url?) — explicit new tab when you want a separate one",
+      "  kuri_close_tab — close a tab (defaults to current)",
+      "  kuri_back / kuri_forward / kuri_reload — history navigation",
       "",
       "**Check what's on the page:**",
       "  kuri_page_info              — URL, title, ready state",
@@ -1214,7 +1459,10 @@ export default function kuriCommands(pi: ExtensionAPI): void {
       "  kuri_links                  — all links (auto-resolves tab)",
       "  kuri_text                   — plain text (falls back to aria-labels on SPAs)",
       "  kuri_evaluate(expression)   — run JavaScript",
-      "  kuri_console_errors         — diagnose JS errors when page is empty/broken",
+      "  kuri_errors                  — native CDP console errors (preferred)",
+      "  kuri_console_errors         — JS-interceptor console errors (fallback)",
+      "  kuri_headers                — security response headers",
+      "  kuri_har_start/stop/status  — HAR recording for API discovery",
       "",
       "**Tips:**",
       "  - CDP-fragile endpoints auto-retry (up to 3 attempts) on transient failures.",
@@ -1287,7 +1535,8 @@ export default function kuriCommands(pi: ExtensionAPI): void {
   // Register convenience forwarders for common commands
   for (const action of ["page-info", "click", "type", "fill", "select", "screenshot",
     "markdown", "links", "text", "evaluate", "cookies", "audit",
-    "back", "forward", "reload"]) {
+    "tabs", "back", "forward", "reload", "close-tab", "headers", "errors",
+    "har-start", "har-stop", "har-status"]) {
     const cmdName = `kuri-${action}`;
     const handler = async (_args: string, ctx: ExtensionCommandContext) => {
       await cmdGenericKuri(action.replace("-", "_"), _args, ctx);

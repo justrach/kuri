@@ -47,7 +47,7 @@ If you built from source:
 ```bash
 # From the kuri repo root
 zig build
-./zig-out/bin/kuri
+KURI_ALLOW_PRIVATE=1 ./zig-out/bin/kuri
 ```
 
 If you installed via the install script:
@@ -56,8 +56,10 @@ If you installed via the install script:
 kuri
 ```
 
+(The installed binary reads `KURI_ALLOW_PRIVATE=1` from the launchd start script.)
+
 Kuri starts a Chrome instance (managing it automatically) and listens on
-`http://127.0.0.1:8080` by default. Customize with `HOST`, `PORT`, `CDP_URL`
+`http://127.0.0.1:9223` by default (the pi extension also defaults to 9223). Customize with `HOST`, `PORT`, `CDP_URL`
 (see the configuration table in the README).
 
 ### List available tabs

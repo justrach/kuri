@@ -24,7 +24,10 @@ skills/pi-kuri-plugin/
 ├── scripts/
 │   └── kuri.js           # CLI binary — kuri-skill command
 ├── references/
-│   └── ADVANCED.md  →    # Symlink → ../../pi-kuri-advanced.md (canonical source)
+│   └── ADVANCED.md      # REAL file (copied from ../../pi-kuri-advanced.md) — npm does not
+│                          #   ship symlink targets outside the package, so a symlink broke the
+│                          #   advanced reference for npm installs. Keep it in sync manually or
+│                          #   switch to a prepublish copy step.
 └── .npmignore            # Excludes package-lock.json, node_modules
 ```
 
@@ -143,9 +146,11 @@ The two-tier skill documentation lives at two levels:
 | `skills/pi-kuri-plugin/SKILL.md` | Plugin skill entrypoint — references both tiers |
 | `skills/pi-kuri-plugin/references/ADVANCED.md` | **Symlink** → `../../pi-kuri-advanced.md` — always in sync |
 
-The symlink at `references/ADVANCED.md` ensures the npm package always ships
-the same advanced reference as the repo-level canonical file. **Do not replace
-it with a copy** — that's how drift happens.
+`references/ADVANCED.md` is a **real file** (not a symlink): npm packages do not
+ship symlink targets that live outside the package, so the historical symlink to
+`../../pi-kuri-advanced.md` made the advanced reference unreadable for npm
+installs. Keep the two files in sync when editing, or convert to a prepublish
+copy step (`.npmignore`/`prepublishOnly`) if you prefer a single canonical file.
 
 ### Updating the Pi extension
 

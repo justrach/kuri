@@ -125,12 +125,12 @@ Or read `references/ADVANCED.md` directly for the full API reference covering
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `KURI_BASE_URL` | `http://127.0.0.1:8080` | Kuri server URL |
+| `KURI_BASE_URL` | `http://127.0.0.1:9223` | Kuri server URL (extension default) |
 | `KURI_SESSION` | `pi-kuri-skill` | Active session ID |
 | `KURI_API_TOKEN` | (from `~/.kuri/api.token`) | API auth token |
 | `KURI_TAB_ID` | (empty) | Default tab ID override |
 | `KURI_OUTPUT` | `/tmp/kuri-*.png` | Screenshot output path |
-| `KURI_PORT` | `8080` | Server port |
+| `KURI_PORT` | `9223` | Server port |
 
 ## Structure
 
