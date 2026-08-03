@@ -5,7 +5,7 @@
 <h1 align="center">Kuri 🌰</h1>
 
 <p align="center">
-  <a href="https://raw.githubusercontent.com/justrach/kuri/release-channel/stable/latest.json"><img src="https://img.shields.io/badge/stable-v0.4.3-brightgreen?style=flat-square" alt="Stable release"></a>
+  <a href="https://kuri.trilok.ai/download/latest.json"><img src="https://img.shields.io/badge/stable-v0.5.1-brightgreen?style=flat-square" alt="Stable release"></a>
   <a href="https://github.com/justrach/kuri/blob/main/LICENSE"><img src="https://img.shields.io/github/license/justrach/kuri?style=flat-square" alt="License"></a>
   <img src="https://img.shields.io/badge/zig-0.16.0-f7a41d?style=flat-square" alt="Zig">
   <img src="https://img.shields.io/badge/node__modules-0_files-brightgreen?style=flat-square" alt="node_modules">
@@ -15,12 +15,12 @@
 ## Install
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/justrach/kuri/main/install.sh | sh
+curl -fsSL https://kuri.trilok.ai/download | sh
 ```
 
 macOS arm64/x86_64 and Linux x86_64/arm64. Single binary, no runtime deps.
 
-Direct downloads: [macOS arm64](https://github.com/justrach/kuri/releases/download/v0.4.3/kuri-v0.4.3-aarch64-macos.tar.gz) · [macOS x86_64](https://github.com/justrach/kuri/releases/download/v0.4.3/kuri-v0.4.3-x86_64-macos.tar.gz) · [Linux x86_64](https://github.com/justrach/kuri/releases/download/v0.4.3/kuri-v0.4.3-x86_64-linux.tar.gz) · [Linux arm64](https://github.com/justrach/kuri/releases/download/v0.4.3/kuri-v0.4.3-aarch64-linux.tar.gz)
+Direct downloads: [macOS arm64](https://kuri.trilok.ai/download/v0.5.1/kuri-v0.5.1-aarch64-macos.tar.gz) · [macOS x86_64](https://kuri.trilok.ai/download/v0.5.1/kuri-v0.5.1-x86_64-macos.tar.gz) · [Linux x86_64](https://kuri.trilok.ai/download/v0.5.1/kuri-v0.5.1-x86_64-linux.tar.gz) · [Linux arm64](https://kuri.trilok.ai/download/v0.5.1/kuri-v0.5.1-aarch64-linux.tar.gz)
 
 ---
 
@@ -75,6 +75,22 @@ The savings come from kuri's compact format:
 | **kuri-agent** | **~3,400** |
 | With `/page/state` instead of second snap | **~1,700** |
 | With `POST /batch` (all in one call) | **~1,700** (same tokens, 1 HTTP call instead of 5) |
+
+### kuri vs libretto
+
+[libretto](https://github.com/saffron-health/libretto) (Playwright + Node) is the closest competitor on per-step token cost. Measured head-to-head on 2026-07-04 — same Chrome, same tab, real `tiktoken` `o200k_base` counts (full methodology and reproduction: **[benchmarks/libretto_comparison.md](benchmarks/libretto_comparison.md)**). The honest split:
+
+| Axis | Winner | Detail |
+|---|---|---|
+| Latency per call | **kuri** | 4–117 ms vs 1,344–1,500 ms (**13–376× faster** — persistent server vs Node-per-command) |
+| Snapshot tokens, typical page | **kuri** | simple 61 vs 151 (2.5×), article 265 vs 363 (1.37×) — tighter grammar |
+| Snapshot tokens, large list | split | kuri default 4,424 vs 813 — kuri emits all 259 refs, libretto truncates by default. With `limit=5` kuri renders 555 tokens (**1.46× under libretto**), 34 refs + `… +45 more` markers |
+| Trajectory (feed, 9 clicks) | **kuri**, barely | 898 vs 939 tokens (`limit=5` base + diff loop vs exec loop) — parity-to-slight-edge; the morning's 5.1× loss was the untruncated base |
+| Repeat runs | **libretto** | compiles trajectories to a Playwright script → 0-token replays; kuri re-pays the loop every run |
+
+**What kuri gained from studying libretto** (all shipped this release): a diff-first loop (`take_snapshot_diff`, ~38 tokens/step); an adaptive diff that falls back to a full snapshot with a `! page replaced` header on navigation; identity-only removal lines; screenshots written to disk (path returned, bytes never enter context); `get_page_state` over MCP; and — after rewriting `parseA11yNodes` as a real DFS tree walk — **opt-in list truncation** (`/snapshot?limit=N`, one `… +K more` line per capped run), **scoped re-capture** (`scope=@ref`), and **hierarchy indentation**, also exposed as `uid`/`limit` on MCP `take_snapshot`. The 9-click feed trajectory that cost 44,285 tokens with naive full re-snapshots costs **898** with a truncated base + diffs — 49× cheaper, and past libretto's 939.
+
+> The older tables above use a `chars/4` token approximation; the libretto comparison uses real `tiktoken` counts. Rerun cross-tool numbers in your own environment before quoting a percentage.
 
 ### Binary size and memory
 
@@ -289,7 +305,7 @@ All endpoints return JSON. Optional auth via `KURI_SECRET` env var. **135 endpoi
 | `GET /window/new` | `url`, `activate`, `wait` | Create a new window/tab target |
 | `GET /snapshot` | `tab_id`, `filter`, `format` | A11y tree snapshot with `eN` refs. Use `filter=interactive&format=compact` for low-token agent loops. |
 | `GET /text` | `tab_id` | Extract page text |
-| `GET /screenshot` | `tab_id`, `format`, `quality` | Capture screenshot (base64) |
+| `GET /screenshot` | `tab_id`, `format`, `quality`, `save` | Capture screenshot (base64); `save=true` writes the PNG to `STATE_DIR/screenshots` and returns `{path,bytes}` instead |
 | `GET /screenshot/annotated` | `tab_id` | Screenshot with numbered element labels |
 | `GET /screenshot/diff` | `tab_id`, `baseline` | Visual diff between current and baseline screenshots |
 | `GET /action` | `tab_id`, `ref`, `action`, `value` | Click/type/fill/select/scroll/hover/dblclick/check/uncheck/blur by ref |
@@ -471,7 +487,7 @@ On macOS, auth profile secrets are stored in the user Keychain.
 | `GET /frames` | List page frames |
 | `GET /frame` | Switch to iframe context by name or URL |
 | `GET /mainframe` | Switch back to main frame |
-| `GET /diff/snapshot` | Diff accessibility tree snapshots |
+| `GET /diff/snapshot` | Compact `+`/`~`/`-` diff vs the previous call for this tab — the token-efficient action loop (aliased by `/snapshot/changes`). Falls back to a full snapshot with a `! page replaced` header on mass change. |
 | `GET /diff/url` | Compare two URLs side by side (navigate, snapshot, diff) |
 
 ### Streaming
@@ -540,7 +556,7 @@ zig build run -- screenshot https://example.com --out example.jpg --compress --k
 
 | Path | Description |
 |------|-------------|
-| `GET /diff/snapshot` | Delta diff between snapshots |
+| `GET /diff/snapshot` | Compact `+`/`~`/`-` delta vs the previous snapshot (agent action loop) |
 | `GET /emulate` | Device emulation |
 | `GET /geolocation` | Set geolocation |
 | `POST /upload` | File upload |

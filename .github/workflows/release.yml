@@ -19,6 +19,23 @@ jobs:
         target: [x86_64-linux, aarch64-linux]
     steps:
       - uses: actions/checkout@v4
+      - name: Verify private nanostore access
+        env:
+          NANOSTORE_PAT: ${{ secrets.NANOSTORE_PAT }}
+        run: |
+          test -n "$NANOSTORE_PAT" || {
+            echo "::error::Set the NANOSTORE_PAT repository secret to build kuri. nanostore is a private dependency."
+            exit 1
+          }
+      - name: Checkout private nanostore dependency
+        uses: actions/checkout@v4
+        with:
+          repository: justrach/nanostore
+          ref: e242f7f8cf75ca6c636c15482a83f7833291b53b
+          token: ${{ secrets.NANOSTORE_PAT }}
+          path: nanostore
+      - name: Link nanostore at the path expected by build.zig.zon
+        run: ln -s "$GITHUB_WORKSPACE/nanostore" "$GITHUB_WORKSPACE/../nanostore"
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.17.0-dev.813+2153f8143
@@ -59,6 +76,23 @@ jobs:
       APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
     steps:
       - uses: actions/checkout@v4
+      - name: Verify private nanostore access
+        env:
+          NANOSTORE_PAT: ${{ secrets.NANOSTORE_PAT }}
+        run: |
+          test -n "$NANOSTORE_PAT" || {
+            echo "::error::Set the NANOSTORE_PAT repository secret to build kuri. nanostore is a private dependency."
+            exit 1
+          }
+      - name: Checkout private nanostore dependency
+        uses: actions/checkout@v4
+        with:
+          repository: justrach/nanostore
+          ref: e242f7f8cf75ca6c636c15482a83f7833291b53b
+          token: ${{ secrets.NANOSTORE_PAT }}
+          path: nanostore
+      - name: Link nanostore at the path expected by build.zig.zon
+        run: ln -s "$GITHUB_WORKSPACE/nanostore" "$GITHUB_WORKSPACE/../nanostore"
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.17.0-dev.813+2153f8143
@@ -124,6 +158,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
+      - uses: actions/checkout@v4
+        with:
+          path: source
       - uses: actions/checkout@v4
         with:
           ref: release-channel

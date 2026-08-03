@@ -1,6 +1,6 @@
 # Benchmarks
 
-Reproducible browser-output comparisons for `kuri-agent`, `agent-browser`, and `lightpanda`.
+Reproducible browser-output comparisons for `kuri-agent`, `agent-browser`, `lightpanda`, and an optional Webwright-style Playwright observation baseline.
 The useful comparison is same page, same tokenizer, and saved raw outputs.
 
 ## Runner
@@ -28,6 +28,42 @@ The normalized view strips tool-specific action acknowledgement noise.
 - `./zig-out/bin/kuri-agent`
 - `/usr/bin/python3` with `tiktoken`
 - optional: `agent-browser` on `$PATH`, `lightpanda` at `/tmp/lightpanda` or `$LIGHTPANDA_BIN`
+- optional: Webwright/Playwright observation capture via `WEBWRIGHT_PYTHON_BIN`
+  with `playwright` installed. Installing `webwright` is a convenient way to
+  get the same dependency family, but the runner only captures a Playwright
+  `body.aria_snapshot()` observation; it does not run Webwright's LLM agent
+  loop.
+
+Example local install for the Webwright observation baseline:
+
+```bash
+python3 -m pip install "git+https://github.com/microsoft/Webwright.git@1236f4d31186610d23badd997917f86712fe8bed"
+WEBWRIGHT_REF=1236f4d31186610d23badd997917f86712fe8bed \
+  WEBWRIGHT_PYTHON_BIN=python3 \
+  ./benchmarks/run_token_matrix.sh https://example.com
+```
+
+If Playwright has not downloaded its bundled Chromium, either run
+`python3 -m playwright install chromium` or set `CHROME_BIN` to an existing
+Chrome/Chromium executable.
+
+## Webwright Showcase Task Compare
+
+To run one Webwright showcase task as a deterministic browser-substrate
+comparison, use:
+
+```bash
+python3 -m venv .benchmarks/tmp-webwright-task-venv
+.benchmarks/tmp-webwright-task-venv/bin/python -m pip install tiktoken "git+https://github.com/microsoft/Webwright.git@1236f4d31186610d23badd997917f86712fe8bed"
+CHROME_BIN="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+  WEBWRIGHT_REF=1236f4d31186610d23badd997917f86712fe8bed \
+  .benchmarks/tmp-webwright-task-venv/bin/python \
+  benchmarks/run_webwright_showcase_task_compare.py driving_weather
+```
+
+Supported showcase tasks are `driving_weather`, `slickdeals`, and
+`pokemon_tcg`. This compares Kuri/CDP against a Webwright-style Playwright
+script on live task pages. It does not run Webwright's LLM agent loop.
 
 ## Docker
 
@@ -59,6 +95,11 @@ CPUS=1.5 MEMORY=3g SHM_SIZE=1g ./benchmarks/docker-run.sh https://vercel.com
 
 - `agent-browser` uses the shared Chrome CDP session on `9222`.
 - `lightpanda` is measured via standalone `fetch --dump ...`, so it is not using Chrome.
+- `Webwright/Playwright aria_snapshot` is an observation-payload baseline only.
+  It launches a fresh local Playwright Chromium context and prints the same kind
+  of ARIA snapshot Webwright-style scripts inspect. It is not a Webwright
+  task-success benchmark and must not be compared to Webwright's published
+  Online-Mind2Web or Odysseys scores.
 - On interactive pages, the normalized page-state section is the better apples-to-apples comparison.
 
 ## Runner Size

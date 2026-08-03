@@ -13,6 +13,9 @@ pub const Config = struct {
     extensions: ?[]const u8,
     headless: bool,
     proxy: ?[]const u8,
+    /// Passphrase for the `connect` feature's encrypted nanostore vault. Null =>
+    /// passwordless mode (DEK protected by 0600 file perms). From KURI_VAULT_PASSPHRASE.
+    vault_passphrase: ?[]const u8 = null,
 };
 
 pub fn load() Config {
@@ -28,6 +31,7 @@ pub fn load() Config {
         .extensions = getenvAny(&.{ "KURI_EXTENSIONS", "BROWDIE_EXTENSIONS" }),
         .headless = parseBool("HEADLESS") orelse true,
         .proxy = getenvAny(&.{ "KURI_PROXY", "BROWDIE_PROXY" }),
+        .vault_passphrase = compat.getenv("KURI_VAULT_PASSPHRASE"),
     };
 }
 

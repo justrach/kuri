@@ -7,8 +7,9 @@ const launcher = @import("chrome/launcher.zig");
 const api_token = @import("server/api_token.zig");
 const lifecycle = @import("lifecycle.zig");
 const updater = @import("update.zig");
+const telemetry = @import("telemetry.zig");
 
-const version = "0.4.14";
+const version = @import("build_options").version;
 
 const CliAction = enum {
     run,
@@ -111,7 +112,12 @@ pub fn main(init: std.process.Init.Minimal) !void {
         std.log.info("launching managed Chrome instance", .{});
     }
 
-    const start_result = try chrome.start(cfg);
+    const start_result = chrome.start(cfg) catch |err| {
+        std.log.err("could not start managed Chrome or reach its DevTools endpoint: {s}", .{@errorName(err)});
+        std.log.err("another Chrome or kuri may be holding the profile lock or the CDP port.", .{});
+        std.log.err("try: pkill -f -- --remote-debugging-port ; rm -f \"$HOME\"/.kuri/chrome-profile*/Singleton* ; then re-run kuri", .{});
+        return err;
+    };
     runtime_cfg.cdp_url = start_result.cdp_url;
     std.log.info("CDP endpoint: {s}", .{start_result.cdp_url});
     std.log.info("CDP port: {d}", .{start_result.cdp_port});
@@ -125,6 +131,14 @@ pub fn main(init: std.process.Init.Minimal) !void {
     defer startup_arena_impl.deinit();
     const startup_discovered = try server.discoverTabs(startup_arena_impl.allocator(), &bridge, runtime_cfg, start_result.cdp_port);
     std.log.info("startup discovery registered {d} tabs", .{startup_discovered});
+
+    // Anonymous, opt-out usage telemetry (KURI_NO_TELEMETRY / --no-telemetry).
+    // Records route names, latency, status, and byte counts only — never URLs,
+    // page content, or anything that identifies a user. See src/telemetry.zig.
+    telemetry.init(gpa, telemetryDisabled(args));
+    defer telemetry.deinit();
+    telemetry.startSyncThread();
+    telemetry.recordSessionStart();
 
     // Print the Jupyter-style banner *just* before the server loop blocks.
     // Token visibility is redacted when stderr isn't a TTY (see api_token.zig).
@@ -160,7 +174,21 @@ fn parseCliAction(args: []const []const u8) !CliAction {
         return .update;
     }
 
+    // Server-mode flags (e.g. `kuri --no-telemetry`) don't switch the action.
+    if (std.mem.eql(u8, args[1], "--no-telemetry")) {
+        return .run;
+    }
+
     return error.UnknownArgument;
+}
+
+/// Whether to disable usage telemetry: `--no-telemetry` on the command line
+/// (KURI_NO_TELEMETRY is checked inside telemetry.init).
+fn telemetryDisabled(args: []const []const u8) bool {
+    for (args[1..]) |a| {
+        if (std.mem.eql(u8, a, "--no-telemetry")) return true;
+    }
+    return false;
 }
 
 /// Locate `kuri-mobile` next to this binary (or in PATH) and execvp it.
@@ -215,6 +243,7 @@ fn printUsage() void {
         \\    kuri ios <cmd>           Drive iOS sims/devices (delegates to kuri-mobile)
         \\    kuri token               Print the API token (creates one if missing)
         \\    kuri update              Update to the current release (--check to only report)
+        \\    kuri --no-telemetry      Start the server with usage telemetry disabled
         \\    kuri -h, --help          Show this help
         \\    kuri -V, --version       Print version and exit
         \\
@@ -228,6 +257,8 @@ fn printUsage() void {
         \\    KURI_SECRET              Legacy alias of KURI_API_TOKEN (also: BROWDIE_SECRET)
         \\    KURI_EXTENSIONS          Comma-separated Chrome extensions
         \\    KURI_PROXY               Proxy URL for managed Chrome
+        \\    KURI_NO_TELEMETRY        Disable anonymous usage telemetry (or use --no-telemetry)
+        \\    KURI_TELEMETRY_URL       Override the telemetry ingest endpoint (OTLP/HTTP logs)
         \\    STALE_TAB_INTERVAL_S     Tab staleness interval (default: 30)
         \\    REQUEST_TIMEOUT_MS       Default request timeout (default: 30000)
         \\    NAVIGATE_TIMEOUT_MS      Default navigate timeout (default: 30000)
@@ -276,10 +307,12 @@ test {
     _ = @import("cdp/client.zig");
     _ = @import("cdp/websocket.zig");
     _ = @import("cdp/actions.zig");
+    _ = @import("cdp/dispatch.zig");
     _ = @import("cdp/stealth.zig");
     _ = @import("cdp/har.zig");
     _ = @import("snapshot/a11y.zig");
     _ = @import("snapshot/diff.zig");
+    _ = @import("snapshot/replay.zig");
     _ = @import("snapshot/ref_cache.zig");
     _ = @import("crawler/validator.zig");
     _ = @import("crawler/markdown.zig");
@@ -292,6 +325,7 @@ test {
     _ = @import("test/integration.zig");
     _ = @import("storage/local.zig");
     _ = @import("storage/auth_profiles.zig");
+    _ = @import("storage/connect_store.zig");
     _ = @import("util/tls.zig");
     _ = @import("update.zig");
 }

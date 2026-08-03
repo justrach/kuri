@@ -15,6 +15,7 @@ const CdpClient = @import("cdp/client.zig").CdpClient;
 const protocol = @import("cdp/protocol.zig");
 const a11y = @import("snapshot/a11y.zig");
 const util_json = @import("util/json.zig");
+const connect_store = @import("storage/connect_store.zig");
 
 const SESSION_FILE = ".kuri/session.json";
 const DEFAULT_CDP_PORT: u16 = 9222;
@@ -117,6 +118,19 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
+    // `fetch` via the nanostore relay needs no browser tab — handle it here,
+    // before the tab guard, so kuri can make authenticated API calls headlessly.
+    // Session headers (set via `set-header`) may carry sealed nano_sk_ tokens;
+    // the key-holding relay swaps them for real secrets on allowlisted hosts.
+    if (std.mem.eql(u8, cmd, "fetch")) {
+        if (compat.getenv("KURI_RELAY")) |relay| {
+            if (rest.len < 2) fatal("fetch: requires <method> <url> [--data <json>]\n", .{});
+            const fdata = parseFetchData(rest[2..]);
+            try cmdFetchViaRelay(arena, &session, relay, rest[0], rest[1], fdata);
+            return;
+        }
+    }
+
     if (session.cdp_url.len == 0) {
         jsonError("no tab attached. Run `kuri-agent use <ws_url>`", .{});
         std.process.exit(1);
@@ -210,6 +224,8 @@ pub fn main(init: std.process.Init) !void {
         try cmdWaitForTab(arena, port, &session);
     } else if (std.mem.eql(u8, cmd, "stealth")) {
         try cmdStealth(arena, &client);
+    } else if (std.mem.eql(u8, cmd, "connect")) {
+        try cmdConnect(arena, &client, session.cdp_url, rest);
     } else {
         fatal("unknown command '{s}'. Run kuri-agent with no args for help.", .{cmd});
     }
@@ -354,7 +370,6 @@ fn tryAttach(arena: std.mem.Allocator, port: u16, url: ?[]const u8) bool {
     return false;
 }
 
-
 fn cmdStatus(arena: std.mem.Allocator) !void {
     var session = loadSession(arena) catch {
         compat.writeToStdout("{\"ok\":false,\"error\":\"no session\"}\n");
@@ -453,8 +468,7 @@ fn cmdSnap(arena: std.mem.Allocator, client: *CdpClient, session: *Session, flag
 /// Auto-snap: get URL/title + interactive snapshot. Used after actions and navigation.
 fn autoSnap(arena: std.mem.Allocator, client: *CdpClient, session: *Session) void {
     // Get current URL + title
-    const url_resp = client.send(arena, protocol.Methods.runtime_evaluate,
-        "{\"expression\":\"JSON.stringify({url:location.href,title:document.title})\",\"returnByValue\":true}") catch null;
+    const url_resp = client.send(arena, protocol.Methods.runtime_evaluate, "{\"expression\":\"JSON.stringify({url:location.href,title:document.title})\",\"returnByValue\":true}") catch null;
     if (url_resp) |resp| {
         const raw = extractCdpValue(resp);
         const unescaped = util_json.jsonUnescape(arena, raw) catch raw;
@@ -497,8 +511,7 @@ fn cdpClick(arena: std.mem.Allocator, client: *CdpClient, object_id: []const u8,
     else
         "function() { this.scrollIntoViewIfNeeded(); const r = this.getBoundingClientRect(); return (r.x+r.width/2)+','+(r.y+r.height/2); }";
     const escaped_rect = try escapeForJson(arena, rect_js);
-    const rect_params = try std.fmt.allocPrint(arena,
-        "{{\"objectId\":\"{s}\",\"functionDeclaration\":\"{s}\",\"returnByValue\":true}}", .{ object_id, escaped_rect });
+    const rect_params = try std.fmt.allocPrint(arena, "{{\"objectId\":\"{s}\",\"functionDeclaration\":\"{s}\",\"returnByValue\":true}}", .{ object_id, escaped_rect });
     const rect_resp = client.send(arena, protocol.Methods.runtime_call_function_on, rect_params) catch |err| {
         jsonError("getBoundingClientRect failed: {s}", .{@errorName(err)});
         std.process.exit(1);
@@ -527,15 +540,13 @@ fn cdpClick(arena: std.mem.Allocator, client: *CdpClient, object_id: []const u8,
     const x_int: i64 = @intFromFloat(@round(x));
     const y_int: i64 = @intFromFloat(@round(y));
 
-    const down_params = try std.fmt.allocPrint(arena,
-        "{{\"type\":\"mousePressed\",\"x\":{d},\"y\":{d},\"button\":\"left\",\"clickCount\":1}}", .{ x_int, y_int });
+    const down_params = try std.fmt.allocPrint(arena, "{{\"type\":\"mousePressed\",\"x\":{d},\"y\":{d},\"button\":\"left\",\"clickCount\":1}}", .{ x_int, y_int });
     _ = client.send(arena, protocol.Methods.input_dispatch_mouse_event, down_params) catch |err| {
         jsonError("Input.dispatchMouseEvent(mousePressed) failed: {s}", .{@errorName(err)});
         std.process.exit(1);
     };
 
-    const up_params = try std.fmt.allocPrint(arena,
-        "{{\"type\":\"mouseReleased\",\"x\":{d},\"y\":{d},\"button\":\"left\",\"clickCount\":1}}", .{ x_int, y_int });
+    const up_params = try std.fmt.allocPrint(arena, "{{\"type\":\"mouseReleased\",\"x\":{d},\"y\":{d},\"button\":\"left\",\"clickCount\":1}}", .{ x_int, y_int });
     _ = client.send(arena, protocol.Methods.input_dispatch_mouse_event, up_params) catch |err| {
         jsonError("Input.dispatchMouseEvent(mouseReleased) failed: {s}", .{@errorName(err)});
         std.process.exit(1);
@@ -588,8 +599,7 @@ fn cdpType(arena: std.mem.Allocator, client: *CdpClient, object_id: []const u8, 
     ;
 
     const escaped_focus = try escapeForJson(arena, focus_js);
-    const focus_params = try std.fmt.allocPrint(arena,
-        "{{\"objectId\":\"{s}\",\"functionDeclaration\":\"{s}\",\"returnByValue\":true}}", .{ object_id, escaped_focus });
+    const focus_params = try std.fmt.allocPrint(arena, "{{\"objectId\":\"{s}\",\"functionDeclaration\":\"{s}\",\"returnByValue\":true}}", .{ object_id, escaped_focus });
     _ = client.send(arena, protocol.Methods.runtime_call_function_on, focus_params) catch |err| {
         jsonError("focus failed: {s}", .{@errorName(err)});
         std.process.exit(1);
@@ -597,11 +607,9 @@ fn cdpType(arena: std.mem.Allocator, client: *CdpClient, object_id: []const u8, 
 
     for (text) |ch| {
         const char_str = try std.fmt.allocPrint(arena, "{c}", .{ch});
-        const key_params = try std.fmt.allocPrint(arena,
-            "{{\"type\":\"keyDown\",\"text\":\"{s}\",\"key\":\"{s}\",\"unmodifiedText\":\"{s}\"}}", .{ char_str, char_str, char_str });
+        const key_params = try std.fmt.allocPrint(arena, "{{\"type\":\"keyDown\",\"text\":\"{s}\",\"key\":\"{s}\",\"unmodifiedText\":\"{s}\"}}", .{ char_str, char_str, char_str });
         _ = client.send(arena, protocol.Methods.input_dispatch_key_event, key_params) catch continue;
-        const up_params = try std.fmt.allocPrint(arena,
-            "{{\"type\":\"keyUp\",\"key\":\"{s}\"}}", .{char_str});
+        const up_params = try std.fmt.allocPrint(arena, "{{\"type\":\"keyUp\",\"key\":\"{s}\"}}", .{char_str});
         _ = client.send(arena, protocol.Methods.input_dispatch_key_event, up_params) catch continue;
     }
 
@@ -625,14 +633,11 @@ fn cdpType(arena: std.mem.Allocator, client: *CdpClient, object_id: []const u8, 
         \\}
     ;
     const escaped_change = try escapeForJson(arena, change_js);
-    const change_params = try std.fmt.allocPrint(arena,
-        "{{\"objectId\":\"{s}\",\"functionDeclaration\":\"{s}\",\"returnByValue\":true}}", .{ object_id, escaped_change });
+    const change_params = try std.fmt.allocPrint(arena, "{{\"objectId\":\"{s}\",\"functionDeclaration\":\"{s}\",\"returnByValue\":true}}", .{ object_id, escaped_change });
     _ = client.send(arena, protocol.Methods.runtime_call_function_on, change_params) catch {};
 
     compat.writeToStdout("{\"ok\":true,\"action\":\"filled\"}\n");
 }
-
-
 
 fn cmdAction(arena: std.mem.Allocator, client: *CdpClient, session: *Session, action: []const u8, ref: []const u8, value: ?[]const u8) !void {
     // Normalize ref: strip leading '@' if present
@@ -777,13 +782,25 @@ fn cmdViewport(arena: std.mem.Allocator, client: *CdpClient, args: []const []con
     if (args.len > 0) {
         const preset = args[0];
         if (std.mem.eql(u8, preset, "mobile") or std.mem.eql(u8, preset, "m")) {
-            width = 390; height = 844; dpr = 2; mobile = true;
+            width = 390;
+            height = 844;
+            dpr = 2;
+            mobile = true;
         } else if (std.mem.eql(u8, preset, "tablet") or std.mem.eql(u8, preset, "t")) {
-            width = 768; height = 1024; dpr = 2; mobile = true;
+            width = 768;
+            height = 1024;
+            dpr = 2;
+            mobile = true;
         } else if (std.mem.eql(u8, preset, "desktop") or std.mem.eql(u8, preset, "d")) {
-            width = 1280; height = 800; dpr = 1; mobile = false;
+            width = 1280;
+            height = 800;
+            dpr = 1;
+            mobile = false;
         } else if (std.mem.eql(u8, preset, "reset")) {
-            width = 1280; height = 800; dpr = 1; mobile = false;
+            width = 1280;
+            height = 800;
+            dpr = 1;
+            mobile = false;
         } else {
             // numeric width — expect viewport <w> <h> [--dpr N]
             width = std.fmt.parseInt(u32, preset, 10) catch {
@@ -804,9 +821,7 @@ fn cmdViewport(arena: std.mem.Allocator, client: *CdpClient, args: []const []con
         }
     }
 
-    const params = try std.fmt.allocPrint(arena,
-        "{{\"width\":{d},\"height\":{d},\"deviceScaleFactor\":{d},\"mobile\":{s}}}",
-        .{ width, height, dpr, if (mobile) "true" else "false" });
+    const params = try std.fmt.allocPrint(arena, "{{\"width\":{d},\"height\":{d},\"deviceScaleFactor\":{d},\"mobile\":{s}}}", .{ width, height, dpr, if (mobile) "true" else "false" });
 
     const response = client.send(arena, protocol.Methods.emulation_set_device_metrics, params) catch |err| {
         jsonError("viewport failed: {s}", .{@errorName(err)});
@@ -814,9 +829,7 @@ fn cmdViewport(arena: std.mem.Allocator, client: *CdpClient, args: []const []con
     };
     _ = response;
 
-    const out = try std.fmt.allocPrint(arena,
-        "{{\"ok\":true,\"width\":{d},\"height\":{d},\"dpr\":{d},\"mobile\":{s}}}\n",
-        .{ width, height, dpr, if (mobile) "true" else "false" });
+    const out = try std.fmt.allocPrint(arena, "{{\"ok\":true,\"width\":{d},\"height\":{d},\"dpr\":{d},\"mobile\":{s}}}\n", .{ width, height, dpr, if (mobile) "true" else "false" });
     compat.writeToStdout(out);
 }
 
@@ -839,12 +852,12 @@ fn cmdEval(arena: std.mem.Allocator, client: *CdpClient, expr: []const u8) !void
 fn cmdText(arena: std.mem.Allocator, client: *CdpClient, selector: ?[]const u8) !void {
     const expr = if (selector) |sel| blk: {
         const escaped_sel = try escapeForJson(arena, sel);
-        break :blk try std.fmt.allocPrint(arena,
+        break :blk try std.fmt.allocPrint(
+            arena,
             "(() => {{ const el = document.querySelector(\"{s}\"); return el ? (el.innerText ?? '') : ''; }})()",
             .{escaped_sel},
         );
-    } else
-        @as([]const u8, "document.body ? document.body.innerText : ''");
+    } else @as([]const u8, "document.body ? document.body.innerText : ''");
     const escaped_expr = try escapeForJson(arena, expr);
     const params = try std.fmt.allocPrint(arena, "{{\"expression\":\"{s}\",\"returnByValue\":true}}", .{escaped_expr});
 
@@ -938,8 +951,7 @@ fn cmdGrab(arena: std.mem.Allocator, client: *CdpClient, session: *Session, ref:
         \\})()
     ;
     const inject_escaped = try escapeForJson(arena, inject_js);
-    const inject_params = try std.fmt.allocPrint(arena,
-        "{{\"expression\":\"{s}\",\"returnByValue\":true}}", .{inject_escaped});
+    const inject_params = try std.fmt.allocPrint(arena, "{{\"expression\":\"{s}\",\"returnByValue\":true}}", .{inject_escaped});
     _ = client.send(arena, protocol.Methods.runtime_evaluate, inject_params) catch {};
 
     // 2. Click the element
@@ -948,8 +960,7 @@ fn cmdGrab(arena: std.mem.Allocator, client: *CdpClient, session: *Session, ref:
     // 3. Wait for navigation (up to 8s)
     var attempts: u32 = 0;
     const orig_url = blk: {
-        const r = client.send(arena, protocol.Methods.runtime_evaluate,
-            "{\"expression\":\"location.href\",\"returnByValue\":true}") catch break :blk "";
+        const r = client.send(arena, protocol.Methods.runtime_evaluate, "{\"expression\":\"location.href\",\"returnByValue\":true}") catch break :blk "";
         const s = std.mem.indexOf(u8, r, "\"value\":\"") orelse break :blk "";
         const b = s + 9;
         const e = std.mem.indexOfPos(u8, r, b, "\"") orelse break :blk "";
@@ -958,11 +969,9 @@ fn cmdGrab(arena: std.mem.Allocator, client: *CdpClient, session: *Session, ref:
 
     while (attempts < 16) : (attempts += 1) {
         compat.threadSleep(500_000_000);
-        const resp = client.send(arena, protocol.Methods.runtime_evaluate,
-            "{\"expression\":\"location.href\",\"returnByValue\":true}") catch {
+        const resp = client.send(arena, protocol.Methods.runtime_evaluate, "{\"expression\":\"location.href\",\"returnByValue\":true}") catch {
             // Connection lost = page navigated away
-            const out = try std.fmt.allocPrint(arena,
-                "{{\"ok\":true,\"action\":\"navigated\",\"note\":\"page navigated, run snap to see new page\"}}\n", .{});
+            const out = try std.fmt.allocPrint(arena, "{{\"ok\":true,\"action\":\"navigated\",\"note\":\"page navigated, run snap to see new page\"}}\n", .{});
             compat.writeToStdout(out);
             return;
         };
@@ -971,8 +980,7 @@ fn cmdGrab(arena: std.mem.Allocator, client: *CdpClient, session: *Session, ref:
             const e = std.mem.indexOfPos(u8, resp, b, "\"") orelse continue;
             const new_url = resp[b..e];
             if (!std.mem.eql(u8, new_url, orig_url)) {
-                const out = try std.fmt.allocPrint(arena,
-                    "{{\"ok\":true,\"action\":\"navigated\",\"url\":\"{s}\"}}\n", .{new_url});
+                const out = try std.fmt.allocPrint(arena, "{{\"ok\":true,\"action\":\"navigated\",\"url\":\"{s}\"}}\n", .{new_url});
                 compat.writeToStdout(out);
                 return;
             }
@@ -1015,9 +1023,7 @@ fn cmdWaitForTab(arena: std.mem.Allocator, port: u16, session: *Session) !void {
                 const title_val = extractString(json, pos, "\"title\"") orelse "";
                 session.cdp_url = ws_val;
                 try saveSession(arena, session);
-                const out = try std.fmt.allocPrint(arena,
-                    "{{\"ok\":true,\"switched\":true,\"url\":\"{s}\",\"title\":\"{s}\",\"ws\":\"{s}\"}}\n",
-                    .{ url_val, title_val, ws_val });
+                const out = try std.fmt.allocPrint(arena, "{{\"ok\":true,\"switched\":true,\"url\":\"{s}\",\"title\":\"{s}\",\"ws\":\"{s}\"}}\n", .{ url_val, title_val, ws_val });
                 compat.writeToStdout(out);
                 return;
             }
@@ -1048,25 +1054,20 @@ fn applyStealth(arena: std.mem.Allocator, client: *CdpClient) !void {
 
     // Network-level UA override
     _ = client.send(arena, protocol.Methods.network_enable, null) catch {};
-    const net_params = try std.fmt.allocPrint(arena,
-        "{{\"userAgent\":\"{s}\"}}", .{ua_escaped});
+    const net_params = try std.fmt.allocPrint(arena, "{{\"userAgent\":\"{s}\"}}", .{ua_escaped});
     _ = client.send(arena, "Network.setUserAgentOverride", net_params) catch {};
 
     // Combined stealth script: override navigator.userAgent + stealth.js
-    const ua_js = try std.fmt.allocPrint(arena,
-        "Object.defineProperty(navigator,'userAgent',{{get:()=>'{s}',configurable:true}});", .{ua});
-    const combined = try std.fmt.allocPrint(arena,
-        "{s}\n{s}", .{ ua_js, stealth.stealth_script });
+    const ua_js = try std.fmt.allocPrint(arena, "Object.defineProperty(navigator,'userAgent',{{get:()=>'{s}',configurable:true}});", .{ua});
+    const combined = try std.fmt.allocPrint(arena, "{s}\n{s}", .{ ua_js, stealth.stealth_script });
     const escaped = try escapeForJson(arena, combined);
 
     // Inject into current page
-    const eval_params = try std.fmt.allocPrint(arena,
-        "{{\"expression\":\"{s}\",\"returnByValue\":true}}", .{escaped});
+    const eval_params = try std.fmt.allocPrint(arena, "{{\"expression\":\"{s}\",\"returnByValue\":true}}", .{escaped});
     _ = client.send(arena, protocol.Methods.runtime_evaluate, eval_params) catch {};
 
     // Persist across navigations within this session
-    const persist_params = try std.fmt.allocPrint(arena,
-        "{{\"source\":\"{s}\"}}", .{escaped});
+    const persist_params = try std.fmt.allocPrint(arena, "{{\"source\":\"{s}\"}}", .{escaped});
     _ = client.send(arena, "Page.addScriptToEvaluateOnNewDocument", persist_params) catch {};
 }
 
@@ -1082,8 +1083,7 @@ fn cmdStealth(arena: std.mem.Allocator, client: *CdpClient) !void {
     const stealth = @import("cdp/stealth.zig");
     const ua = stealth.randomUserAgent();
     const ua_escaped = try escapeForJson(arena, ua);
-    const out = try std.fmt.allocPrint(arena,
-        "{{\"ok\":true,\"ua\":\"{s}\",\"stealth\":true,\"persisted\":true}}\n", .{ua_escaped});
+    const out = try std.fmt.allocPrint(arena, "{{\"ok\":true,\"ua\":\"{s}\",\"stealth\":true,\"persisted\":true}}\n", .{ua_escaped});
     compat.writeToStdout(out);
 }
 
@@ -1157,8 +1157,7 @@ fn cmdHeaders(arena: std.mem.Allocator, client: *CdpClient) !void {
         \\}catch(e){return JSON.stringify({error:e.message});}})()
     ;
     const escaped = try escapeForJson(arena, js);
-    const params = try std.fmt.allocPrint(arena,
-        "{{\"expression\":\"{s}\",\"returnByValue\":true,\"awaitPromise\":true}}", .{escaped});
+    const params = try std.fmt.allocPrint(arena, "{{\"expression\":\"{s}\",\"returnByValue\":true,\"awaitPromise\":true}}", .{escaped});
     const response = client.send(arena, protocol.Methods.runtime_evaluate, params) catch |err| {
         jsonError("headers eval failed: {s}", .{@errorName(err)});
         std.process.exit(1);
@@ -1192,8 +1191,7 @@ fn cmdAudit(arena: std.mem.Allocator, client: *CdpClient) !void {
         \\})()
     ;
     const escaped = try escapeForJson(arena, js);
-    const params = try std.fmt.allocPrint(arena,
-        "{{\"expression\":\"{s}\",\"returnByValue\":true,\"awaitPromise\":true}}", .{escaped});
+    const params = try std.fmt.allocPrint(arena, "{{\"expression\":\"{s}\",\"returnByValue\":true,\"awaitPromise\":true}}", .{escaped});
     const response = client.send(arena, protocol.Methods.runtime_evaluate, params) catch |err| {
         jsonError("audit eval failed: {s}", .{@errorName(err)});
         std.process.exit(1);
@@ -1232,8 +1230,7 @@ fn cmdStorage(arena: std.mem.Allocator, client: *CdpClient, which: []const u8) !
     js.appendSlice(arena, "return JSON.stringify(r);") catch {};
     js.appendSlice(arena, "})()") catch {};
     const escaped = try escapeForJson(arena, js.items);
-    const params = try std.fmt.allocPrint(arena,
-        "{{\"expression\":\"{s}\",\"returnByValue\":true}}", .{escaped});
+    const params = try std.fmt.allocPrint(arena, "{{\"expression\":\"{s}\",\"returnByValue\":true}}", .{escaped});
     const response = client.send(arena, protocol.Methods.runtime_evaluate, params) catch |err| {
         jsonError("storage eval failed: {s}", .{@errorName(err)});
         std.process.exit(1);
@@ -1257,8 +1254,7 @@ fn cmdJwt(arena: std.mem.Allocator, client: *CdpClient) !void {
         \\})()
     ;
     const escaped = try escapeForJson(arena, js);
-    const params = try std.fmt.allocPrint(arena,
-        "{{\"expression\":\"{s}\",\"returnByValue\":true}}", .{escaped});
+    const params = try std.fmt.allocPrint(arena, "{{\"expression\":\"{s}\",\"returnByValue\":true}}", .{escaped});
     const response = client.send(arena, protocol.Methods.runtime_evaluate, params) catch |err| {
         jsonError("jwt scan failed: {s}", .{@errorName(err)});
         std.process.exit(1);
@@ -1268,6 +1264,62 @@ fn cmdJwt(arena: std.mem.Allocator, client: *CdpClient) !void {
 }
 
 /// Make an authenticated fetch() from browser context (uses current cookies + extra headers).
+/// POST a JSON body to `url` and return the response body.
+fn httpPostJson(arena: std.mem.Allocator, url: []const u8, body: []const u8) ![]const u8 {
+    var client: std.http.Client = .{ .allocator = arena, .io = std.Io.Threaded.global_single_threaded.io() };
+    defer client.deinit();
+    const uri = try std.Uri.parse(url);
+    var req = try client.request(.POST, uri, .{
+        .redirect_behavior = .unhandled,
+        .extra_headers = &.{.{ .name = "content-type", .value = "application/json" }},
+    });
+    defer req.deinit();
+    const mut = try arena.dupe(u8, body);
+    try req.sendBodyComplete(mut);
+    var response = try req.receiveHead(&.{});
+    var rbody: std.ArrayList(u8) = .empty;
+    var tbuf: [16384]u8 = undefined;
+    var dc: std.http.Decompress = undefined;
+    var dbuf: [std.compress.flate.max_window_len]u8 = undefined;
+    const rd = response.readerDecompressing(&tbuf, &dc, &dbuf);
+    try rd.appendRemainingUnlimited(arena, &rbody);
+    return rbody.items;
+}
+
+/// `fetch` via the nanostore relay: build a {url,method,headers,body} spec from
+/// the session's extra headers (which carry sealed tokens) and POST it to the
+/// relay, which swaps sealed->real for allowlisted hosts and makes the real call.
+fn cmdFetchViaRelay(arena: std.mem.Allocator, session: *Session, relay: []const u8, method: []const u8, url: []const u8, data: ?[]const u8) !void {
+    var spec: std.ArrayList(u8) = .empty;
+    try spec.appendSlice(arena, "{\"url\":\"");
+    try spec.appendSlice(arena, try escapeForJson(arena, url));
+    try spec.appendSlice(arena, "\",\"method\":\"");
+    try spec.appendSlice(arena, try escapeForJson(arena, method));
+    try spec.appendSlice(arena, "\",\"headers\":{");
+    var it = session.extra_headers.iterator();
+    var first = true;
+    while (it.next()) |e| {
+        if (!first) try spec.appendSlice(arena, ",");
+        first = false;
+        try spec.print(arena, "\"{s}\":\"{s}\"", .{ try escapeForJson(arena, e.key_ptr.*), try escapeForJson(arena, e.value_ptr.*) });
+    }
+    try spec.appendSlice(arena, "}");
+    if (data) |d| {
+        try spec.appendSlice(arena, ",\"body\":\"");
+        try spec.appendSlice(arena, try escapeForJson(arena, d));
+        try spec.appendSlice(arena, "\"");
+    }
+    try spec.appendSlice(arena, "}");
+
+    const fetch_url = try std.fmt.allocPrint(arena, "http://{s}/fetch", .{relay});
+    const resp = httpPostJson(arena, fetch_url, spec.items) catch |err| {
+        jsonError("relay fetch failed: {s}", .{@errorName(err)});
+        std.process.exit(1);
+    };
+    compat.writeToStdout(resp);
+    compat.writeToStdout("\n");
+}
+
 fn cmdFetch(arena: std.mem.Allocator, client: *CdpClient, method: []const u8, url: []const u8, data: ?[]const u8) !void {
     var js: std.ArrayList(u8) = .empty;
     js.appendSlice(arena, "(async()=>{") catch {};
@@ -1287,8 +1339,7 @@ fn cmdFetch(arena: std.mem.Allocator, client: *CdpClient, method: []const u8, ur
     js.appendSlice(arena, "return JSON.stringify({status:r.status,url:r.url,headers:hdrs,body:body.substring(0,5000)});") catch {};
     js.appendSlice(arena, "})()") catch {};
     const escaped = try escapeForJson(arena, js.items);
-    const params = try std.fmt.allocPrint(arena,
-        "{{\"expression\":\"{s}\",\"returnByValue\":true,\"awaitPromise\":true}}", .{escaped});
+    const params = try std.fmt.allocPrint(arena, "{{\"expression\":\"{s}\",\"returnByValue\":true,\"awaitPromise\":true}}", .{escaped});
     const response = client.send(arena, protocol.Methods.runtime_evaluate, params) catch |err| {
         jsonError("fetch failed: {s}", .{@errorName(err)});
         std.process.exit(1);
@@ -1319,8 +1370,7 @@ fn cmdProbe(arena: std.mem.Allocator, client: *CdpClient, tmpl: []const u8, star
     js.appendSlice(arena, "return JSON.stringify(results);") catch {};
     js.appendSlice(arena, "})()") catch {};
     const escaped = try escapeForJson(arena, js.items);
-    const params = try std.fmt.allocPrint(arena,
-        "{{\"expression\":\"{s}\",\"returnByValue\":true,\"awaitPromise\":true}}", .{escaped});
+    const params = try std.fmt.allocPrint(arena, "{{\"expression\":\"{s}\",\"returnByValue\":true,\"awaitPromise\":true}}", .{escaped});
     const response = client.send(arena, protocol.Methods.runtime_evaluate, params) catch |err| {
         jsonError("probe failed: {s}", .{@errorName(err)});
         std.process.exit(1);
@@ -1328,7 +1378,6 @@ fn cmdProbe(arena: std.mem.Allocator, client: *CdpClient, tmpl: []const u8, star
     compat.writeToStdout(response);
     compat.writeToStdout("\n");
 }
-
 
 // ── Session I/O ───────────────────────────────────────────────────────────────
 
@@ -1497,7 +1546,6 @@ fn fetchChromeTabs(arena: std.mem.Allocator, host: []const u8, port: u16) ![]con
 
 /// Extract a JSON string value for a given field key, starting at `start`.
 /// Returns the content between the quotes after the field's colon.
-
 /// Extract the value from a CDP Runtime.evaluate / callFunctionOn response.
 /// Handles: {"id":N,"result":{"result":{"type":"string","value":"..."}}}
 /// Returns the raw value string, or the full response if not parseable.
@@ -1509,7 +1557,10 @@ fn extractCdpValue(resp: []const u8) []const u8 {
             const start = desc_pos + 15;
             var i = start;
             while (i < resp.len) {
-                if (resp[i] == '\\') { i += 2; continue; }
+                if (resp[i] == '\\') {
+                    i += 2;
+                    continue;
+                }
                 if (resp[i] == '"') return resp[start..i];
                 i += 1;
             }
@@ -1525,7 +1576,10 @@ fn extractCdpValue(resp: []const u8) []const u8 {
     if (resp[after] == '"') {
         var i = after + 1;
         while (i < resp.len) {
-            if (resp[i] == '\\') { i += 2; continue; }
+            if (resp[i] == '\\') {
+                i += 2;
+                continue;
+            }
             if (resp[i] == '"') return resp[after + 1 .. i];
             i += 1;
         }
@@ -1547,6 +1601,211 @@ fn extractString(json: []const u8, start: usize, field: []const u8) ?[]const u8 
     return json[i..end];
 }
 
+// --- connect feature helpers (CDP capture/restore + nanostore storage) ------
+
+/// Build CDP Runtime.evaluate params for `expr` with returnByValue=true.
+fn evalParams(arena: std.mem.Allocator, expr: []const u8) []const u8 {
+    const escaped = escapeForJson(arena, expr) catch expr;
+    return std.fmt.allocPrint(arena, "{{\"expression\":\"{s}\",\"returnByValue\":true}}", .{escaped}) catch "{}";
+}
+
+/// Evaluate `expr` and return its string `value` from the CDP response.
+fn evalStringValue(arena: std.mem.Allocator, client: *CdpClient, expr: []const u8) ?[]const u8 {
+    const resp = client.send(arena, protocol.Methods.runtime_evaluate, evalParams(arena, expr)) catch return null;
+    return extractString(resp, 0, "\"value\"");
+}
+
+/// Return the balanced {…} or […] span immediately after `key` in `s`,
+/// respecting JSON string literals. Used to lift the cookies array / storage
+/// objects out of a CDP response without a full JSON parse.
+fn extractBalancedAfter(s: []const u8, key: []const u8) ?[]const u8 {
+    const kpos = std.mem.indexOf(u8, s, key) orelse return null;
+    var i = kpos + key.len;
+    while (i < s.len and s[i] != '{' and s[i] != '[') : (i += 1) {}
+    if (i >= s.len) return null;
+    const open = s[i];
+    const close: u8 = if (open == '{') '}' else ']';
+    var depth: usize = 0;
+    var in_str = false;
+    var esc = false;
+    var j = i;
+    while (j < s.len) : (j += 1) {
+        const c = s[j];
+        if (in_str) {
+            if (esc) {
+                esc = false;
+            } else if (c == '\\') {
+                esc = true;
+            } else if (c == '"') {
+                in_str = false;
+            }
+        } else if (c == '"') {
+            in_str = true;
+        } else if (c == open) {
+            depth += 1;
+        } else if (c == close) {
+            depth -= 1;
+            if (depth == 0) return s[i .. j + 1];
+        }
+    }
+    return null;
+}
+
+/// Restore a storage area (localStorage/sessionStorage) from a JSON object.
+fn restoreStorageSnapshot(arena: std.mem.Allocator, client: *CdpClient, which: []const u8, obj_json: []const u8) void {
+    const js = std.fmt.allocPrint(
+        arena,
+        "(()=>{{const o={s};Object.keys(o).forEach(k=>{s}.setItem(k,o[k]));}})()",
+        .{ obj_json, which },
+    ) catch return;
+    _ = client.send(arena, protocol.Methods.runtime_evaluate, evalParams(arena, js)) catch {};
+}
+
+/// `connect save|load|list|delete <name>` — persist/replay an encrypted browser
+/// login via nanostore. Shares the same vault (.kuri/connections.ns +
+/// KURI_VAULT_PASSPHRASE) as the server's /connect routes, so the two interoperate.
+/// Issue a GET to the broker and return the response body.
+fn brokerGet(arena: std.mem.Allocator, url: []const u8) ![]const u8 {
+    var client: std.http.Client = .{ .allocator = arena, .io = std.Io.Threaded.global_single_threaded.io() };
+    defer client.deinit();
+    const uri = try std.Uri.parse(url);
+    var req = try client.request(.GET, uri, .{ .redirect_behavior = .unhandled });
+    defer req.deinit();
+    try req.sendBodiless();
+    var response = try req.receiveHead(&.{});
+    var body: std.ArrayList(u8) = .empty;
+    var transfer_buf: [8192]u8 = undefined;
+    var decompress: std.http.Decompress = undefined;
+    var decompress_buf: [std.compress.flate.max_window_len]u8 = undefined;
+    const reader = response.readerDecompressing(&transfer_buf, &decompress, &decompress_buf);
+    try reader.appendRemainingUnlimited(arena, &body);
+    return body.items;
+}
+
+/// Route a `connect` op through the key-holding broker (this process never sees
+/// the passphrase). `cdp_url` is our own tab, which the broker injects into.
+fn connectViaBroker(arena: std.mem.Allocator, addr: []const u8, tok: []const u8, cdp_url: []const u8, sub: []const u8, rest: []const []const u8) !void {
+    var url: []const u8 = undefined;
+    if (std.mem.eql(u8, sub, "list")) {
+        url = try std.fmt.allocPrint(arena, "http://{s}/list?token={s}", .{ addr, tok });
+    } else if (std.mem.eql(u8, sub, "delete")) {
+        if (rest.len < 2) fatal("connect delete: requires <name>\n", .{});
+        url = try std.fmt.allocPrint(arena, "http://{s}/delete?token={s}&service={s}", .{ addr, tok, rest[1] });
+    } else if (std.mem.eql(u8, sub, "save") or std.mem.eql(u8, sub, "load")) {
+        if (rest.len < 2) fatal("connect {s}: requires <name>\n", .{sub});
+        url = try std.fmt.allocPrint(arena, "http://{s}/{s}?token={s}&service={s}&cdp={s}", .{ addr, sub, tok, rest[1], cdp_url });
+    } else {
+        fatal("connect: unknown subcommand '{s}' (use save|load|list|delete)\n", .{sub});
+    }
+    const body = brokerGet(arena, url) catch |err| {
+        jsonError("broker request failed: {s}", .{@errorName(err)});
+        std.process.exit(1);
+    };
+    compat.writeToStdout(body);
+    compat.writeToStdout("\n");
+}
+
+fn cmdConnect(arena: std.mem.Allocator, client: *CdpClient, cdp_url: []const u8, rest: []const []const u8) !void {
+    if (rest.len < 1) fatal("connect: requires <save|load|list|delete> [name]\n", .{});
+    const sub = rest[0];
+
+    // Broker mode: if a key-holding broker is configured, route through it so
+    // this agent process never touches the vault passphrase.
+    if (compat.getenv("KURI_BROKER_ADDR")) |addr| {
+        if (compat.getenv("KURI_BROKER_TOKEN")) |tok| {
+            try connectViaBroker(arena, addr, tok, cdp_url, sub, rest);
+            return;
+        }
+    }
+
+    const state_dir = compat.getenv("STATE_DIR") orelse ".kuri";
+    const passphrase = compat.getenv("KURI_VAULT_PASSPHRASE");
+
+    if (std.mem.eql(u8, sub, "list")) {
+        const names = connect_store.listSessions(arena, state_dir, passphrase) catch |err| {
+            jsonError("connect list failed: {s}", .{@errorName(err)});
+            std.process.exit(1);
+        };
+        var buf: std.ArrayList(u8) = .empty;
+        buf.appendSlice(arena, "{\"connections\":[") catch {};
+        for (names, 0..) |n, i| {
+            if (i > 0) buf.appendSlice(arena, ",") catch {};
+            buf.print(arena, "\"{s}\"", .{n}) catch {};
+        }
+        buf.appendSlice(arena, "]}\n") catch {};
+        compat.writeToStdout(buf.items);
+        return;
+    }
+    if (std.mem.eql(u8, sub, "delete")) {
+        if (rest.len < 2) fatal("connect delete: requires <name>\n", .{});
+        connect_store.deleteSession(arena, state_dir, passphrase, rest[1]) catch |err| {
+            jsonError("connect delete failed: {s}", .{@errorName(err)});
+            std.process.exit(1);
+        };
+        const out = try std.fmt.allocPrint(arena, "{{\"ok\":true,\"deleted\":\"{s}\"}}\n", .{rest[1]});
+        compat.writeToStdout(out);
+        return;
+    }
+    if (rest.len < 2) fatal("connect {s}: requires <name>\n", .{sub});
+    const name = rest[1];
+
+    if (std.mem.eql(u8, sub, "save")) {
+        const origin = evalStringValue(arena, client, "location.origin") orelse "";
+        const cookies_resp = client.send(arena, protocol.Methods.network_get_cookies, null) catch |err| {
+            jsonError("getCookies failed: {s}", .{@errorName(err)});
+            std.process.exit(1);
+        };
+        const cookies = extractBalancedAfter(cookies_resp, "\"cookies\"") orelse "[]";
+        const ls_resp = client.send(arena, protocol.Methods.runtime_evaluate, evalParams(arena, "Object.fromEntries(Object.entries(localStorage))")) catch "";
+        const local_storage = extractBalancedAfter(ls_resp, "\"value\"") orelse "{}";
+        const ss_resp = client.send(arena, protocol.Methods.runtime_evaluate, evalParams(arena, "Object.fromEntries(Object.entries(sessionStorage))")) catch "";
+        const session_storage = extractBalancedAfter(ss_resp, "\"value\"") orelse "{}";
+
+        const esc_name = try escapeForJson(arena, name);
+        const esc_origin = try escapeForJson(arena, origin);
+        const payload = try std.fmt.allocPrint(
+            arena,
+            "{{\"version\":1,\"name\":\"{s}\",\"origin\":\"{s}\",\"saved_at\":{d},\"cookies\":{s},\"local_storage\":{s},\"session_storage\":{s}}}",
+            .{ esc_name, esc_origin, compat.timestampSeconds(), cookies, local_storage, session_storage },
+        );
+        connect_store.saveSession(arena, state_dir, passphrase, name, origin, payload) catch |err| {
+            jsonError("connect save failed: {s}", .{@errorName(err)});
+            std.process.exit(1);
+        };
+        const out = try std.fmt.allocPrint(arena, "{{\"ok\":true,\"saved\":\"{s}\",\"origin\":\"{s}\",\"encrypted\":true}}\n", .{ esc_name, esc_origin });
+        compat.writeToStdout(out);
+        return;
+    }
+
+    if (std.mem.eql(u8, sub, "load")) {
+        const payload = connect_store.loadSession(arena, state_dir, passphrase, name) catch |err| {
+            jsonError("connect load failed: {s}", .{@errorName(err)});
+            std.process.exit(1);
+        };
+        const origin = extractString(payload, 0, "\"origin\"") orelse "";
+        const cookies = extractBalancedAfter(payload, "\"cookies\"") orelse "[]";
+        const local_storage = extractBalancedAfter(payload, "\"local_storage\"") orelse "{}";
+        const session_storage = extractBalancedAfter(payload, "\"session_storage\"") orelse "{}";
+
+        if (origin.len > 0) {
+            const esc = try escapeForJson(arena, origin);
+            const nav = try std.fmt.allocPrint(arena, "{{\"url\":\"{s}\"}}", .{esc});
+            _ = client.send(arena, protocol.Methods.page_navigate, nav) catch {};
+            compat.threadSleep(1_000_000_000);
+        }
+        const set_params = try std.fmt.allocPrint(arena, "{{\"cookies\":{s}}}", .{cookies});
+        _ = client.send(arena, protocol.Methods.network_set_cookies, set_params) catch {};
+        restoreStorageSnapshot(arena, client, "localStorage", local_storage);
+        restoreStorageSnapshot(arena, client, "sessionStorage", session_storage);
+
+        const out = try std.fmt.allocPrint(arena, "{{\"ok\":true,\"loaded\":\"{s}\",\"origin\":\"{s}\"}}\n", .{ name, origin });
+        compat.writeToStdout(out);
+        return;
+    }
+
+    fatal("connect: unknown subcommand '{s}' (use save|load|list|delete)\n", .{sub});
+}
+
 /// Parse CDP a11y tree response into A11yNode slice.
 /// Single-pass parser — scans the JSON once instead of indexOf per field.
 fn parseA11yNodes(arena: std.mem.Allocator, raw_json: []const u8) ![]const a11y.A11yNode {
@@ -1566,8 +1825,14 @@ fn parseA11yNodes(arena: std.mem.Allocator, raw_json: []const u8) ![]const a11y.
         var obj_end = obj_start + 1;
         var in_string = false;
         while (obj_end < raw_json.len and depth > 0) : (obj_end += 1) {
-            if (raw_json[obj_end] == '\\' and in_string) { obj_end += 1; continue; }
-            if (raw_json[obj_end] == '"') { in_string = !in_string; continue; }
+            if (raw_json[obj_end] == '\\' and in_string) {
+                obj_end += 1;
+                continue;
+            }
+            if (raw_json[obj_end] == '"') {
+                in_string = !in_string;
+                continue;
+            }
             if (!in_string) {
                 if (raw_json[obj_end] == '{') depth += 1;
                 if (raw_json[obj_end] == '}') depth -= 1;

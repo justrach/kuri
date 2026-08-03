@@ -40,6 +40,13 @@ pub fn activate(gpa: std.mem.Allocator) !void {
 }
 
 /// Read frontmost Simulator window rect (macOS points, top-left origin).
+///
+/// The System Events read is flaky right after `activate` (the WindowServer
+/// needs a beat to bring the window forward) and fails outright when the
+/// process lacks Accessibility permission or no Simulator window is open — in
+/// those cases osascript exits non-zero and its error text is not a rect, which
+/// surfaced to users as an intermittent `BadRect` (issue #231). Retry a few
+/// times and, on persistent failure, print an actionable diagnostic.
 pub fn frontWindowRect(gpa: std.mem.Allocator) !WindowRect {
     // Returns "x, y, w, h" on a single line.
     const script =
@@ -51,9 +58,34 @@ pub fn frontWindowRect(gpa: std.mem.Allocator) !WindowRect {
         \\  end tell
         \\end tell
     ;
-    const r = try io.runCommand(gpa, &.{ "osascript", "-e", script }, 4096);
-    defer gpa.free(r.stdout);
-    return parseRect(std.mem.trim(u8, r.stdout, " \t\r\n"));
+    const max_attempts: u8 = 5;
+    var attempt: u8 = 0;
+    while (attempt < max_attempts) : (attempt += 1) {
+        const r = try io.runCommand(gpa, &.{ "osascript", "-e", script }, 4096);
+        defer gpa.free(r.stdout);
+        const trimmed = std.mem.trim(u8, r.stdout, " \t\r\n");
+        // r.term is the raw waitpid status; 0 means osascript exited cleanly.
+        if (r.term == 0) {
+            if (parseRect(trimmed)) |rect| {
+                // A degenerate rect means System Events returned stale/zero
+                // geometry; retry rather than tap into empty space.
+                if (rect.w > 0 and rect.h > TITLE_BAR_PTS) return rect;
+            } else |_| {}
+        }
+        if (attempt + 1 == max_attempts) {
+            io.printStderr(gpa,
+                "kuri ios: could not read the Simulator window rect (osascript status {d}).\n" ++
+                    "  Make sure a Simulator window is open and that your terminal/kuri is enabled under\n" ++
+                    "  System Settings > Privacy & Security > Accessibility.\n" ++
+                    "  osascript output: {s}\n",
+                .{ r.term, trimmed });
+            break;
+        }
+        // Brief backoff: activate() -> WindowServer can lag the first read.
+        var ts: std.c.timespec = .{ .sec = 0, .nsec = 150 * std.time.ns_per_ms };
+        _ = std.c.nanosleep(&ts, null);
+    }
+    return error.BadRect;
 }
 
 fn parseRect(s: []const u8) !WindowRect {

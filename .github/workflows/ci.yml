@@ -14,6 +14,26 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Verify private nanostore access
+        env:
+          NANOSTORE_PAT: ${{ secrets.NANOSTORE_PAT }}
+        run: |
+          test -n "$NANOSTORE_PAT" || {
+            echo "::error::Set the NANOSTORE_PAT repository secret to build kuri. nanostore is a private dependency."
+            exit 1
+          }
+
+      - name: Checkout private nanostore dependency
+        uses: actions/checkout@v4
+        with:
+          repository: justrach/nanostore
+          ref: e242f7f8cf75ca6c636c15482a83f7833291b53b
+          token: ${{ secrets.NANOSTORE_PAT }}
+          path: nanostore
+
+      - name: Link nanostore at the path expected by build.zig.zon
+        run: ln -s "$GITHUB_WORKSPACE/nanostore" "$GITHUB_WORKSPACE/../nanostore"
+
       - name: Install Zig 0.16.0
         uses: mlugg/setup-zig@v2
         with:
@@ -172,6 +192,26 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Verify private nanostore access
+        env:
+          NANOSTORE_PAT: ${{ secrets.NANOSTORE_PAT }}
+        run: |
+          test -n "$NANOSTORE_PAT" || {
+            echo "::error::Set the NANOSTORE_PAT repository secret to build kuri. nanostore is a private dependency."
+            exit 1
+          }
+
+      - name: Checkout private nanostore dependency
+        uses: actions/checkout@v4
+        with:
+          repository: justrach/nanostore
+          ref: e242f7f8cf75ca6c636c15482a83f7833291b53b
+          token: ${{ secrets.NANOSTORE_PAT }}
+          path: nanostore
+
+      - name: Link nanostore at the path expected by build.zig.zon
+        run: ln -s "$GITHUB_WORKSPACE/nanostore" "$GITHUB_WORKSPACE/../nanostore"
+
       - name: Install Zig 0.16.0
         uses: mlugg/setup-zig@v2
         with:
@@ -236,6 +276,26 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Verify private nanostore access
+        env:
+          NANOSTORE_PAT: ${{ secrets.NANOSTORE_PAT }}
+        run: |
+          test -n "$NANOSTORE_PAT" || {
+            echo "::error::Set the NANOSTORE_PAT repository secret to build kuri. nanostore is a private dependency."
+            exit 1
+          }
+
+      - name: Checkout private nanostore dependency
+        uses: actions/checkout@v4
+        with:
+          repository: justrach/nanostore
+          ref: e242f7f8cf75ca6c636c15482a83f7833291b53b
+          token: ${{ secrets.NANOSTORE_PAT }}
+          path: nanostore
+
+      - name: Link nanostore at the path expected by build.zig.zon
+        run: ln -s "$GITHUB_WORKSPACE/nanostore" "$GITHUB_WORKSPACE/../nanostore"
 
       - name: Install Zig 0.16.0
         uses: mlugg/setup-zig@v2

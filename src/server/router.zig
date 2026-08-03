@@ -11,6 +11,7 @@ const middleware = @import("middleware.zig");
 const json_util = @import("../util/json.zig");
 const protocol = @import("../cdp/protocol.zig");
 const HarRecorder = @import("../cdp/har.zig").HarRecorder;
+const isApiShaped = @import("../cdp/har.zig").isApiShaped;
 const CdpClient = @import("../cdp/client.zig").CdpClient;
 const InterceptRule = @import("../cdp/client.zig").InterceptRule;
 const ScreencastFrameRecord = @import("../cdp/client.zig").ScreencastFrameRecord;
@@ -18,7 +19,9 @@ const BindingCallRecord = @import("../cdp/client.zig").BindingCallRecord;
 const NetworkRecord = @import("../cdp/client.zig").NetworkRecord;
 const jsonscan = @import("../cdp/jsonscan.zig");
 const auth_profiles = @import("../storage/auth_profiles.zig");
+const connect_store = @import("../storage/connect_store.zig");
 const url_validator = @import("../crawler/validator.zig");
+const telemetry = @import("../telemetry.zig");
 
 pub fn run(gpa: std.mem.Allocator, bridge: *Bridge, cfg: Config, cdp_port: u16) !void {
     const io = std.Io.Threaded.global_single_threaded.io();
@@ -72,7 +75,20 @@ fn handleConnection(gpa: std.mem.Allocator, bridge: *Bridge, cfg: Config, cdp_po
             return;
         }
 
+        // Capture the route name (query stripped — never the navigated URL) and
+        // method for telemetry, then time the dispatch. response.zig records the
+        // status + body size into a thread-local that we read back below.
+        const full_target = request.head.target;
+        const route_name = if (std.mem.indexOfScalar(u8, full_target, '?')) |q| full_target[0..q] else full_target;
+        const method_name = @tagName(request.head.method);
+        telemetry.beginRequest();
+        const t0 = compat.nanoTimestamp();
+
         route(&request, arena, bridge, cfg, cdp_port);
+
+        const elapsed_ns: i64 = @intCast(@min(compat.nanoTimestamp() - t0, std.math.maxInt(i64)));
+        const ri = telemetry.tl_response;
+        telemetry.recordRequest(route_name, method_name, ri.status, elapsed_ns, ri.bytes, ri.status >= 400);
 
         if (!request.head.keep_alive) return;
 
@@ -104,6 +120,11 @@ pub const Route = enum {
     har_stop,
     har_status,
     har_replay,
+    connect_save,
+    connect_load,
+    connect_list,
+    connect_delete,
+    replay,
     close,
     cookies,
     cookies_clear,
@@ -255,6 +276,11 @@ pub const route_table = std.StaticStringMap(Route).initComptime(.{
     .{ "/har/stop", .har_stop },
     .{ "/har/status", .har_status },
     .{ "/har/replay", .har_replay },
+    .{ "/connect/save", .connect_save },
+    .{ "/connect/load", .connect_load },
+    .{ "/connect/list", .connect_list },
+    .{ "/connect/delete", .connect_delete },
+    .{ "/replay", .replay },
     .{ "/close", .close },
     .{ "/cookies", .cookies },
     .{ "/cookies/clear", .cookies_clear },
@@ -415,6 +441,11 @@ fn route(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *B
         .har_stop => handleHarStop(request, arena, bridge),
         .har_status => handleHarStatus(request, arena, bridge),
         .har_replay => handleHarReplay(request, arena, bridge),
+        .connect_save => handleConnectSave(request, arena, bridge, cfg),
+        .connect_load => handleConnectLoad(request, arena, bridge, cfg),
+        .connect_list => handleConnectList(request, arena, cfg),
+        .connect_delete => handleConnectDelete(request, arena, cfg),
+        .replay => handleReplay(request, arena, bridge),
         .close => handleClose(request, arena, bridge),
         .cookies => handleCookies(request, arena, bridge),
         .cookies_clear => handleCookiesClear(request, arena, bridge),
@@ -728,7 +759,7 @@ fn readRequestBody(request: *std.http.Server.Request, arena: std.mem.Allocator) 
 
 fn handleHealth(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
     const tab_count = bridge.tabCount();
-    const body = std.fmt.allocPrint(arena, "{{\"ok\":true,\"tabs\":{d},\"version\":\"0.3.3\",\"name\":\"kuri\"}}", .{tab_count}) catch {
+    const body = std.fmt.allocPrint(arena, "{{\"ok\":true,\"tabs\":{d},\"version\":\"{s}\",\"name\":\"kuri\"}}", .{ tab_count, @import("build_options").version }) catch {
         resp.sendError(request, 500, "Internal Server Error");
         return;
     };
@@ -811,6 +842,7 @@ fn handleNavigate(request: *std.http.Server.Request, arena: std.mem.Allocator, b
             resp.sendError(request, 502, "CDP command failed");
             return;
         };
+        bumpGenerationLocked(bridge, tid);
 
         // Drain network events AFTER navigate — they arrive asynchronously
         // over the next few seconds as the page loads resources.
@@ -1037,6 +1069,81 @@ fn handlePageInfo(request: *std.http.Server.Request, arena: std.mem.Allocator, b
     resp.sendJson(request, json_buf.items);
 }
 
+fn handleSnapshotChanges(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
+    const tab_id = requireEffectiveTabId(arena, request, bridge) orelse return;
+    const client = bridge.getCdpClient(tab_id) orelse {
+        resp.sendError(request, 404, "Tab not found");
+        return;
+    };
+    rememberCurrentTab(request, bridge, tab_id);
+
+    // Step 1: Get previous snapshot text from JS-side storage
+    const prev_text = evalValueString(arena, client, "(function() { return window.__kuri_prev_snapshot || ''; })()") orelse "";
+
+    // Step 2: Take new snapshot via a11y tree
+    const raw_response = client.send(arena, protocol.Methods.accessibility_get_full_tree, null) catch {
+        resp.sendError(request, 502, "CDP command failed");
+        return;
+    };
+    const a11y = @import("../snapshot/a11y.zig");
+    const nodes = parseA11yNodes(arena, raw_response) catch {
+        resp.sendError(request, 500, "Failed to parse a11y tree");
+        return;
+    };
+    const snapshot = a11y.buildSnapshot(nodes, .{ .compact = true }, arena) catch {
+        resp.sendError(request, 500, "Failed to build snapshot");
+        return;
+    };
+    const new_text = a11y.formatCompact(snapshot, arena) catch {
+        resp.sendError(request, 500, "Failed to format snapshot");
+        return;
+    };
+
+    // Step 3: Store new snapshot as previous
+    const store_escaped = jsonEscapeAlloc(arena, new_text) orelse {
+        resp.sendError(request, 500, "Internal Server Error");
+        return;
+    };
+    const store_js = std.fmt.allocPrint(arena,
+        \\(function() {{ window.__kuri_prev_snapshot = "{s}"; return "ok"; }})()
+    , .{store_escaped}) catch {
+        resp.sendError(request, 500, "Internal Server Error");
+        return;
+    };
+    _ = evalValueString(arena, client, store_js);
+
+    // Step 4: Diff line by line using JS to avoid Zig ArrayList API issues
+    // We do a simple JS-based diff since both texts are available
+    const escaped_prev = jsonEscapeAlloc(arena, prev_text) orelse {
+        resp.sendError(request, 500, "Internal Server Error");
+        return;
+    };
+    const escaped_new = jsonEscapeAlloc(arena, new_text) orelse {
+        resp.sendError(request, 500, "Internal Server Error");
+        return;
+    };
+    const diff_js = std.fmt.allocPrint(arena,
+        \\(function() {{
+        \\  var prev = "{s}".split("\n").filter(function(l) {{ return l.length > 0; }});
+        \\  var curr = "{s}".split("\n").filter(function(l) {{ return l.length > 0; }});
+        \\  var prevSet = new Set(prev);
+        \\  var currSet = new Set(curr);
+        \\  var added = curr.filter(function(l) {{ return !prevSet.has(l); }});
+        \\  var removed = prev.filter(function(l) {{ return !currSet.has(l); }});
+        \\  var unchanged = curr.filter(function(l) {{ return prevSet.has(l); }}).length;
+        \\  return JSON.stringify({{added:added,removed:removed,unchanged_count:unchanged}});
+        \\}})()
+    , .{ escaped_prev, escaped_new }) catch {
+        resp.sendError(request, 500, "Internal Server Error");
+        return;
+    };
+    const diff_result = evalValueString(arena, client, diff_js) orelse {
+        resp.sendError(request, 502, "Diff computation failed");
+        return;
+    };
+    resp.sendJson(request, diff_result);
+}
+
 fn handleSnapshot(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
     const target = request.head.target;
     const tab_id = requireEffectiveTabId(arena, request, bridge) orelse return;
@@ -1077,11 +1184,30 @@ fn handleSnapshot(request: *std.http.Server.Request, arena: std.mem.Allocator, b
     const format_text = if (format) |f| std.mem.eql(u8, f, "text") else false;
     const format_compact = if (format) |f| std.mem.eql(u8, f, "compact") else false;
 
+    // Scoped subtree: resolve @ref -> backend node id via this tab's ref cache.
+    // kuri re-captures fresh and scopes the render, so a scoped snapshot is never
+    // stale (unlike serving a cached subtree).
+    var scope_bid: ?u32 = null;
+    if (getQueryParam(target, "scope")) |sref| {
+        bridge.mu.lockShared();
+        const cache = bridge.snapshots.getPtr(tab_id);
+        scope_bid = if (cache) |c| c.refs.get(sref) else null;
+        bridge.mu.unlockShared();
+        if (scope_bid == null) {
+            resp.sendError(request, 400, "Unknown scope ref. Call /snapshot or /diff/snapshot first");
+            return;
+        }
+    }
+
     const opts = a11y.SnapshotOpts{
         .filter_interactive = if (filter) |f| std.mem.eql(u8, f, "interactive") else false,
         .format_text = format_text,
         .compact = format_compact,
         .max_depth = max_depth,
+        .hierarchy = if (getQueryParam(target, "hierarchy")) |h| std.mem.eql(u8, h, "true") else false,
+        .scope_backend_id = scope_bid,
+        .limit = if (getQueryParam(target, "limit")) |lp| std.fmt.parseInt(usize, lp, 10) catch null else null,
+        .ref_generation = currentGeneration(bridge, tab_id),
     };
 
     const snapshot = a11y.buildSnapshot(nodes, opts, arena) catch {
@@ -1089,41 +1215,11 @@ fn handleSnapshot(request: *std.http.Server.Request, arena: std.mem.Allocator, b
         return;
     };
 
-    // Populate the ref cache with backend_node_ids from the snapshot
+    // Populate the ref cache so /action can resolve this snapshot's refs.
     {
         bridge.mu.lock();
         defer bridge.mu.unlock();
-
-        // Get or create ref cache for this tab
-        // Use getPtr first; only dupe key if we need to insert
-        var cache_ptr = bridge.snapshots.getPtr(tab_id);
-        if (cache_ptr == null) {
-            const owned_key = bridge.allocator.dupe(u8, tab_id) catch {
-                sendSnapshotResponse(request, arena, snapshot, opts);
-                return;
-            };
-            bridge.snapshots.put(owned_key, RefCache.init(bridge.allocator)) catch {
-                bridge.allocator.free(owned_key);
-                sendSnapshotResponse(request, arena, snapshot, opts);
-                return;
-            };
-            cache_ptr = bridge.snapshots.getPtr(tab_id);
-        }
-        const ref_cache = cache_ptr orelse {
-            sendSnapshotResponse(request, arena, snapshot, opts);
-            return;
-        };
-
-        // Clear old refs and repopulate
-        ref_cache.clear();
-        for (snapshot) |node| {
-            if (node.ref.len > 0 and node.backend_node_id != null) {
-                const bid = node.backend_node_id.?;
-                const owned_ref = bridge.allocator.dupe(u8, node.ref) catch continue;
-                ref_cache.refs.put(owned_ref, bid) catch continue;
-            }
-        }
-        ref_cache.node_count = snapshot.len;
+        refreshRefCacheLocked(bridge, tab_id, snapshot) catch {};
     }
 
     // Hybrid snapshot: if include_screenshot=true, wrap snapshot text with a screenshot
@@ -1208,83 +1304,59 @@ fn sendSnapshotResponse(request: *std.http.Server.Request, arena: std.mem.Alloca
     resp.sendJson(request, json_buf.items);
 }
 
-fn cdpClickHttp(request: *std.http.Server.Request, arena: std.mem.Allocator, client: *CdpClient, object_id: []const u8, kind: @import("../cdp/actions.zig").ActionKind) void {
-    const rect_js: []const u8 = switch (kind) {
-        .check => "function() { this.scrollIntoViewIfNeeded(); if (this.checked) return 'skip'; const r = this.getBoundingClientRect(); return (r.x+r.width/2)+','+(r.y+r.height/2); }",
-        .uncheck => "function() { this.scrollIntoViewIfNeeded(); if (!this.checked) return 'skip'; const r = this.getBoundingClientRect(); return (r.x+r.width/2)+','+(r.y+r.height/2); }",
-        else => "function() { this.scrollIntoViewIfNeeded(); const r = this.getBoundingClientRect(); return (r.x+r.width/2)+','+(r.y+r.height/2); }",
-    };
-
-    const escaped_rect = jsonEscapeAlloc(arena, rect_js) orelse {
-        resp.sendError(request, 500, "Internal Server Error");
-        return;
-    };
-    const rect_params = std.fmt.allocPrint(arena, "{{\"objectId\":\"{s}\",\"functionDeclaration\":\"{s}\",\"returnByValue\":true}}", .{ object_id, escaped_rect }) catch {
-        resp.sendError(request, 500, "Internal Server Error");
-        return;
-    };
-    const rect_resp = client.send(arena, protocol.Methods.runtime_call_function_on, rect_params) catch {
-        resp.sendError(request, 502, "getBoundingClientRect failed");
-        return;
-    };
-    const coords_str = extractSimpleJsonString(rect_resp, 0, "\"value\"") orelse {
-        resp.sendError(request, 500, "Could not parse element coordinates");
-        return;
-    };
-
-    if (std.mem.eql(u8, coords_str, "skip")) {
-        const label = if (kind == .check) "checked" else "unchecked";
-        const body = std.fmt.allocPrint(arena, "{{\"ok\":true,\"action\":\"{s}\"}}", .{label}) catch {
-            resp.sendError(request, 500, "Internal Server Error");
-            return;
+/// Repopulate `tab_id`'s ref cache from `snapshot` so /action and friends can
+/// resolve the refs this response hands out. Caller must hold bridge.mu
+/// exclusively. Best-effort: callers ignore failures — a stale cache degrades
+/// to "Ref not found", never to unsoundness.
+/// Get-or-create the ref cache entry for a tab. Caller must hold bridge.mu
+/// (exclusive) since this may insert a new map entry.
+fn getOrCreateRefCacheLocked(bridge: *Bridge, tab_id: []const u8) !*RefCache {
+    var cache_ptr = bridge.snapshots.getPtr(tab_id);
+    if (cache_ptr == null) {
+        const owned_key = try bridge.allocator.dupe(u8, tab_id);
+        bridge.snapshots.put(owned_key, RefCache.init(bridge.allocator)) catch |err| {
+            bridge.allocator.free(owned_key);
+            return err;
         };
-        resp.sendJson(request, body);
-        return;
+        cache_ptr = bridge.snapshots.getPtr(tab_id);
     }
+    return cache_ptr orelse error.RefCacheUnreachable;
+}
 
-    const comma = std.mem.indexOfScalar(u8, coords_str, ',') orelse {
-        resp.sendError(request, 500, "Could not parse element coordinates");
-        return;
-    };
-    const x = std.fmt.parseFloat(f64, coords_str[0..comma]) catch {
-        resp.sendError(request, 500, "Could not parse element x coordinate");
-        return;
-    };
-    const y = std.fmt.parseFloat(f64, coords_str[comma + 1 ..]) catch {
-        resp.sendError(request, 500, "Could not parse element y coordinate");
-        return;
-    };
-    const x_int: i64 = @intFromFloat(@round(x));
-    const y_int: i64 = @intFromFloat(@round(y));
+fn refreshRefCacheLocked(bridge: *Bridge, tab_id: []const u8, snapshot: []const @import("../snapshot/a11y.zig").A11yNode) !void {
+    const ref_cache = try getOrCreateRefCacheLocked(bridge, tab_id);
 
-    const down_params = std.fmt.allocPrint(arena, "{{\"type\":\"mousePressed\",\"x\":{d},\"y\":{d},\"button\":\"left\",\"clickCount\":1}}", .{ x_int, y_int }) catch {
-        resp.sendError(request, 500, "Internal Server Error");
-        return;
-    };
-    _ = client.send(arena, protocol.Methods.input_dispatch_mouse_event, down_params) catch {
-        resp.sendError(request, 502, "Input.dispatchMouseEvent(mousePressed) failed");
-        return;
-    };
+    // Clear old refs and repopulate from the new snapshot.
+    ref_cache.clear();
+    for (snapshot) |node| {
+        if (node.ref.len > 0 and node.backend_node_id != null) {
+            const owned_ref = bridge.allocator.dupe(u8, node.ref) catch continue;
+            ref_cache.refs.put(owned_ref, node.backend_node_id.?) catch continue;
+        }
+    }
+    ref_cache.node_count = snapshot.len;
+}
 
-    const up_params = std.fmt.allocPrint(arena, "{{\"type\":\"mouseReleased\",\"x\":{d},\"y\":{d},\"button\":\"left\",\"clickCount\":1}}", .{ x_int, y_int }) catch {
-        resp.sendError(request, 500, "Internal Server Error");
-        return;
-    };
-    _ = client.send(arena, protocol.Methods.input_dispatch_mouse_event, up_params) catch {
-        resp.sendError(request, 502, "Input.dispatchMouseEvent(mouseReleased) failed");
-        return;
-    };
+/// Bump a tab's ref generation after a real navigation (navigate / reload /
+/// history back-forward). Refs minted before the bump embed the old
+/// generation in their string, so once the next snapshot repopulates the
+/// (fully-cleared) ref cache, a pre-bump ref is simply absent — acting on it
+/// cleanly misses instead of silently resolving to an unrelated node that
+/// happens to reuse the same CDP backend node id after the navigation.
+fn bumpGenerationLocked(bridge: *Bridge, tab_id: []const u8) void {
+    bridge.mu.lock();
+    defer bridge.mu.unlock();
+    const ref_cache = getOrCreateRefCacheLocked(bridge, tab_id) catch return;
+    ref_cache.generation +%= 1;
+}
 
-    const label = switch (kind) {
-        .check => "checked",
-        .uncheck => "unchecked",
-        else => "clicked",
-    };
-    const body = std.fmt.allocPrint(arena, "{{\"ok\":true,\"action\":\"{s}\"}}", .{label}) catch {
-        resp.sendError(request, 500, "Internal Server Error");
-        return;
-    };
-    resp.sendJson(request, body);
+/// Read a tab's current ref generation to fold into freshly-minted refs.
+/// 0 for a tab with no ref cache yet (first snapshot, or never navigated).
+fn currentGeneration(bridge: *Bridge, tab_id: []const u8) u32 {
+    bridge.mu.lockShared();
+    defer bridge.mu.unlockShared();
+    if (bridge.snapshots.getPtr(tab_id)) |c| return c.generation;
+    return 0;
 }
 
 fn handleAction(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
@@ -1362,244 +1434,27 @@ fn handleAction(request: *std.http.Server.Request, arena: std.mem.Allocator, bri
         return;
     };
 
-    // Step 1: Resolve the backend node to a JS object via DOM.resolveNode
-    const resolve_params = std.fmt.allocPrint(arena, "{{\"backendNodeId\":{d}}}", .{bid}) catch {
-        resp.sendError(request, 500, "Internal Server Error");
-        return;
-    };
-    const resolve_response = client.send(arena, protocol.Methods.dom_resolve_node, resolve_params) catch {
-        resp.sendError(request, 502, "DOM.resolveNode failed");
-        return;
-    };
-
-    // Extract objectId from response
-    const object_id = extractSimpleJsonString(resolve_response, 0, "\"objectId\"") orelse {
-        resp.sendError(request, 500, "Could not resolve element objectId");
-        return;
-    };
-
-    const value_action_fn =
-        \\function(value, append) {
-        \\  const target = (() => {
-        \\    if (!this) return null;
-        \\    if (this instanceof HTMLLabelElement && this.control) return this.control;
-        \\    if (this instanceof HTMLInputElement || this instanceof HTMLTextAreaElement || this instanceof HTMLSelectElement) return this;
-        \\    if (this.isContentEditable) return this;
-        \\    if (typeof this.querySelector === "function") {
-        \\      const nested = this.querySelector("input,textarea,select,[contenteditable=\"true\"],[contenteditable=\"\"],[role=\"textbox\"]");
-        \\      if (nested) return nested;
-        \\    }
-        \\    return this;
-        \\  })();
-        \\  if (!target) return "missing-target";
-        \\  target.focus?.();
-        \\  if (target.isContentEditable) {
-        \\    const existing = typeof target.textContent === "string" ? target.textContent : "";
-        \\    target.textContent = append ? (existing + value) : value;
-        \\  } else if ("value" in target) {
-        \\    const existing = typeof target.value === "string" ? target.value : "";
-        \\    target.value = append ? (existing + value) : value;
-        \\  }
-        \\  target.dispatchEvent(new Event("input", {bubbles:true}));
-        \\  target.dispatchEvent(new Event("change", {bubbles:true}));
-        \\  return "filled";
-        \\}
-    ;
-    const select_action_fn =
-        \\function(value) {
-        \\  const target = (() => {
-        \\    if (!this) return null;
-        \\    if (this instanceof HTMLLabelElement && this.control) return this.control;
-        \\    if (this instanceof HTMLSelectElement) return this;
-        \\    if (typeof this.querySelector === "function") {
-        \\      const nested = this.querySelector("select");
-        \\      if (nested) return nested;
-        \\    }
-        \\    return this;
-        \\  })();
-        \\  if (!target) return "missing-target";
-        \\  let next = value;
-        \\  if ("options" in target && target.options) {
-        \\    for (const opt of target.options) {
-        \\      const text = (opt.textContent || "").trim();
-        \\      const label = (opt.label || "").trim();
-        \\      if (opt.value === value || text === value || label === value) {
-        \\        next = opt.value;
-        \\        break;
-        \\      }
-        \\    }
-        \\  }
-        \\  if ("value" in target) target.value = next;
-        \\  target.dispatchEvent(new Event("input", {bubbles:true}));
-        \\  target.dispatchEvent(new Event("change", {bubbles:true}));
-        \\  return "selected";
-        \\}
-    ;
-
-    // Step 2: For click/check/uncheck, use CDP Input.dispatchMouseEvent for React/Vue compatibility (#164)
-    if (kind == .click or kind == .check or kind == .uncheck) {
-        cdpClickHttp(request, arena, client, object_id, kind);
-        return;
-    }
-
-    // Build the JS function for non-click actions
-    const js_fn: []const u8 = switch (kind) {
-        .click, .check, .uncheck => unreachable,
-        .focus => "function() { this.focus(); return 'focused'; }",
-        .hover => "function() { this.dispatchEvent(new MouseEvent('mouseover', {bubbles:true})); return 'hovered'; }",
-        .dblclick => "function() { this.scrollIntoViewIfNeeded(); this.dispatchEvent(new MouseEvent('dblclick', {bubbles:true,cancelable:true})); return 'dblclicked'; }",
-        .blur => "function() { this.blur(); return 'blurred'; }",
-        .fill, .type => blk: {
-            const v = value orelse {
-                resp.sendError(request, 400, "Missing value parameter for fill/type");
-                return;
-            };
-            // Default to CDP key events for React/Vue compatibility (#164); opt out with realistic=false
-            const use_realistic = if (realistic) |r| !std.mem.eql(u8, r, "false") else true;
-            if (use_realistic) {
-                // Focus the element first
-                const focus_fn =
-                    \\function() {
-                    \\  const target = (() => {
-                    \\    if (!this) return null;
-                    \\    if (this instanceof HTMLLabelElement && this.control) return this.control;
-                    \\    if (this instanceof HTMLInputElement || this instanceof HTMLTextAreaElement || this.isContentEditable) return this;
-                    \\    if (typeof this.querySelector === "function") {
-                    \\      const nested = this.querySelector("input,textarea,[contenteditable=\"true\"],[contenteditable=\"\"],[role=\"textbox\"]");
-                    \\      if (nested) return nested;
-                    \\    }
-                    \\    return this;
-                    \\  })();
-                    \\  if (!target) return "missing-target";
-                    \\  target.focus?.();
-                    \\  if (target.isContentEditable) {
-                    \\    target.textContent = "";
-                    \\  } else if ("value" in target) {
-                    \\    target.value = "";
-                    \\  }
-                    \\  target.dispatchEvent(new Event("focus", {bubbles:true}));
-                    \\  return "focused";
-                    \\}
-                ;
-                const escaped_focus_fn = jsonEscapeAlloc(arena, focus_fn) orelse {
+    // Resolving backend_node_id -> objectId and dispatching the CDP calls for
+    // `kind` both happen inside the shared helper (also used by /batch's
+    // /action command and by /replay).
+    const dispatch = @import("../cdp/dispatch.zig");
+    const use_realistic = if (realistic) |r| !std.mem.eql(u8, r, "false") else true;
+    const outcome = dispatch.dispatchActionOnBackendNode(arena, client, bid, kind, value, use_realistic);
+    switch (outcome) {
+        .outcome => |o| {
+            if (o.raw_response) |raw| {
+                resp.sendJson(request, raw);
+            } else {
+                const escaped_label = jsonEscapeAlloc(arena, o.label) orelse o.label;
+                const body = std.fmt.allocPrint(arena, "{{\"ok\":true,\"action\":\"{s}\"}}", .{escaped_label}) catch {
                     resp.sendError(request, 500, "Internal Server Error");
                     return;
                 };
-                const focus_params = std.fmt.allocPrint(arena, "{{\"objectId\":\"{s}\",\"functionDeclaration\":\"{s}\",\"returnByValue\":true}}", .{ object_id, escaped_focus_fn }) catch {
-                    resp.sendError(request, 500, "Internal Server Error");
-                    return;
-                };
-                _ = client.send(arena, protocol.Methods.runtime_call_function_on, focus_params) catch {
-                    resp.sendError(request, 502, "Runtime.callFunctionOn failed");
-                    return;
-                };
-                // Type each character via Input.dispatchKeyEvent
-                for (v) |ch| {
-                    const char_str = std.fmt.allocPrint(arena, "{c}", .{ch}) catch continue;
-                    const key_params = std.fmt.allocPrint(arena, "{{\"type\":\"keyDown\",\"text\":\"{s}\",\"key\":\"{s}\",\"unmodifiedText\":\"{s}\"}}", .{ char_str, char_str, char_str }) catch continue;
-                    _ = client.send(arena, protocol.Methods.input_dispatch_key_event, key_params) catch continue;
-                    const up_params = std.fmt.allocPrint(arena, "{{\"type\":\"keyUp\",\"key\":\"{s}\"}}", .{char_str}) catch continue;
-                    _ = client.send(arena, protocol.Methods.input_dispatch_key_event, up_params) catch continue;
-                }
-                // Dispatch change event on blur
-                const change_fn =
-                    \\function() {
-                    \\  const target = (() => {
-                    \\    if (!this) return null;
-                    \\    if (this instanceof HTMLLabelElement && this.control) return this.control;
-                    \\    if (this instanceof HTMLInputElement || this instanceof HTMLTextAreaElement || this.isContentEditable) return this;
-                    \\    if (typeof this.querySelector === "function") {
-                    \\      const nested = this.querySelector("input,textarea,[contenteditable=\"true\"],[contenteditable=\"\"],[role=\"textbox\"]");
-                    \\      if (nested) return nested;
-                    \\    }
-                    \\    return this;
-                    \\  })();
-                    \\  if (!target) return "missing-target";
-                    \\  target.dispatchEvent(new Event("input", {bubbles:true}));
-                    \\  target.dispatchEvent(new Event("change", {bubbles:true}));
-                    \\  target.dispatchEvent(new Event("blur", {bubbles:true}));
-                    \\  return "filled";
-                    \\}
-                ;
-                const escaped_change_fn = jsonEscapeAlloc(arena, change_fn) orelse {
-                    resp.sendError(request, 500, "Internal Server Error");
-                    return;
-                };
-                const change_params = std.fmt.allocPrint(arena, "{{\"objectId\":\"{s}\",\"functionDeclaration\":\"{s}\",\"returnByValue\":true}}", .{ object_id, escaped_change_fn }) catch {
-                    resp.sendError(request, 500, "Internal Server Error");
-                    return;
-                };
-                const change_response = client.send(arena, protocol.Methods.runtime_call_function_on, change_params) catch {
-                    resp.sendError(request, 502, "Runtime.callFunctionOn failed");
-                    return;
-                };
-                resp.sendJson(request, change_response);
-                return;
+                resp.sendJson(request, body);
             }
-            break :blk value_action_fn;
         },
-        .select => blk: {
-            const v = value orelse {
-                resp.sendError(request, 400, "Missing value parameter for select");
-                return;
-            };
-            _ = v;
-            break :blk select_action_fn;
-        },
-        .scroll, .press => unreachable,
-    };
-
-    const escaped_js_fn = jsonEscapeAlloc(arena, js_fn) orelse {
-        resp.sendError(request, 500, "Internal Server Error");
-        return;
-    };
-
-    // Step 3: Call function on the resolved object
-    const call_params = switch (kind) {
-        .fill, .type => blk: {
-            const v = value orelse {
-                resp.sendError(request, 400, "Missing value parameter for fill/type");
-                return;
-            };
-            const escaped_v = jsonEscapeAlloc(arena, v) orelse {
-                resp.sendError(request, 500, "Internal Server Error");
-                return;
-            };
-            break :blk std.fmt.allocPrint(
-                arena,
-                "{{\"objectId\":\"{s}\",\"functionDeclaration\":\"{s}\",\"arguments\":[{{\"value\":\"{s}\"}},{{\"value\":{s}}}],\"returnByValue\":true}}",
-                .{ object_id, escaped_js_fn, escaped_v, if (kind == .type) "true" else "false" },
-            );
-        },
-        .select => blk: {
-            const v = value orelse {
-                resp.sendError(request, 400, "Missing value parameter for select");
-                return;
-            };
-            const escaped_v = jsonEscapeAlloc(arena, v) orelse {
-                resp.sendError(request, 500, "Internal Server Error");
-                return;
-            };
-            break :blk std.fmt.allocPrint(
-                arena,
-                "{{\"objectId\":\"{s}\",\"functionDeclaration\":\"{s}\",\"arguments\":[{{\"value\":\"{s}\"}}],\"returnByValue\":true}}",
-                .{ object_id, escaped_js_fn, escaped_v },
-            );
-        },
-        else => std.fmt.allocPrint(
-            arena,
-            "{{\"objectId\":\"{s}\",\"functionDeclaration\":\"{s}\",\"returnByValue\":true}}",
-            .{ object_id, escaped_js_fn },
-        ),
-    } catch {
-        resp.sendError(request, 500, "Internal Server Error");
-        return;
-    };
-    const call_response = client.send(arena, protocol.Methods.runtime_call_function_on, call_params) catch {
-        resp.sendError(request, 502, "Runtime.callFunctionOn failed");
-        return;
-    };
-    resp.sendJson(request, call_response);
+        .err => |e| resp.sendError(request, e.status, e.message),
+    }
 }
 
 fn handleText(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
@@ -1637,6 +1492,7 @@ fn handleScreenshot(request: *std.http.Server.Request, arena: std.mem.Allocator,
     const format = getQueryParam(target, "format") orelse "png";
     const quality = getQueryParam(target, "quality") orelse "80";
     const full = getQueryParam(target, "full");
+    const save = if (getQueryParam(target, "save")) |s| std.mem.eql(u8, s, "true") else false;
 
     const client = bridge.getCdpClient(tab_id) orelse {
         resp.sendError(request, 404, "Tab not found");
@@ -1661,6 +1517,48 @@ fn handleScreenshot(request: *std.http.Server.Request, arena: std.mem.Allocator,
         resp.sendError(request, 502, "CDP command failed");
         return;
     };
+    if (save) {
+        // Libretto-style artifact discipline: write the PNG to disk and hand
+        // the agent a path — image bytes never enter model context.
+        const b64 = extractSimpleJsonString(response, 0, "\"data\"") orelse {
+            resp.sendError(request, 502, "Screenshot data missing");
+            return;
+        };
+        const decoder = std.base64.standard.Decoder;
+        const decoded_len = decoder.calcSizeForSlice(b64) catch {
+            resp.sendError(request, 500, "Invalid screenshot encoding");
+            return;
+        };
+        const bytes = arena.alloc(u8, decoded_len) catch {
+            resp.sendError(request, 500, "Internal Server Error");
+            return;
+        };
+        decoder.decode(bytes, b64) catch {
+            resp.sendError(request, 500, "Invalid screenshot encoding");
+            return;
+        };
+        const storage_local = @import("../storage/local.zig");
+        // Mirrors bridge/config.zig: STATE_DIR env var, default .kuri
+        const state_dir = compat.getenv("STATE_DIR") orelse ".kuri";
+        const out_dir = std.fmt.allocPrint(arena, "{s}/screenshots", .{state_dir}) catch {
+            resp.sendError(request, 500, "Internal Server Error");
+            return;
+        };
+        const path = storage_local.saveToLocal(bytes, tab_id, format, out_dir, arena) catch {
+            resp.sendError(request, 500, "Failed to save screenshot");
+            return;
+        };
+        const esc_path = jsonEscapeAlloc(arena, path) orelse {
+            resp.sendError(request, 500, "Internal Server Error");
+            return;
+        };
+        const body = std.fmt.allocPrint(arena, "{{\"path\":\"{s}\",\"bytes\":{d}}}", .{ esc_path, bytes.len }) catch {
+            resp.sendError(request, 500, "Internal Server Error");
+            return;
+        };
+        resp.sendJson(request, body);
+        return;
+    }
     resp.sendJson(request, response);
 }
 
@@ -1972,6 +1870,43 @@ fn extractSimpleJsonInt(json: []const u8, start: usize, field: []const u8) ?u32 
     return std.fmt.parseInt(u32, json[i..end], 10) catch null;
 }
 
+/// One raw AX node, retained through the DFS pass. Fields are slices into the
+/// CDP response (which the arena owns); child_ids is the node's ordered children.
+const TmpAxNode = struct {
+    role: []const u8,
+    name: []const u8,
+    value: []const u8,
+    description: []const u8,
+    state: []const u8,
+    backend_id: ?u32,
+    child_ids: [][]const u8,
+    visited: bool = false,
+};
+
+/// Extract a node's ordered `childIds` as slices into the source JSON.
+fn extractChildIds(arena: std.mem.Allocator, node_json: []const u8) ![][]const u8 {
+    var ids: std.ArrayList([]const u8) = .empty;
+    const key = std.mem.indexOf(u8, node_json, "\"childIds\"") orelse return ids.toOwnedSlice(arena);
+    const lb = std.mem.indexOfScalarPos(u8, node_json, key, '[') orelse return ids.toOwnedSlice(arena);
+    const rb = std.mem.indexOfScalarPos(u8, node_json, lb, ']') orelse return ids.toOwnedSlice(arena);
+    var i = lb + 1;
+    while (i < rb) {
+        const q1 = std.mem.indexOfScalarPos(u8, node_json, i, '"') orelse break;
+        if (q1 >= rb) break;
+        const q2 = std.mem.indexOfScalarPos(u8, node_json, q1 + 1, '"') orelse break;
+        try ids.append(arena, node_json[q1 + 1 .. q2]);
+        i = q2 + 1;
+    }
+    return ids.toOwnedSlice(arena);
+}
+
+/// Parse `Accessibility.getFullAXTree` into a flat slice in **pre-order DFS**,
+/// with each node's real tree depth. CDP emits `nodes[]` in an order that is
+/// NOT a tree walk, so we index every node by `nodeId`, then DFS from the root
+/// via `childIds` to recover order + depth. Downstream (buildSnapshot) relies on
+/// this ordering for sibling-run truncation, subtree scoping, and hierarchy
+/// indentation. Role-less wrappers are traversed (so subtrees aren't cut) but
+/// not emitted; role-bearing nodes are emitted with `depth = ancestors in tree`.
 fn parseA11yNodes(arena: std.mem.Allocator, raw_json: []const u8) ![]const @import("../snapshot/a11y.zig").A11yNode {
     const a11y = @import("../snapshot/a11y.zig");
     var nodes: std.ArrayList(a11y.A11yNode) = .empty;
@@ -1979,36 +1914,95 @@ fn parseA11yNodes(arena: std.mem.Allocator, raw_json: []const u8) ![]const @impo
     const nodes_start = std.mem.indexOf(u8, raw_json, "\"nodes\"") orelse return nodes.toOwnedSlice(arena);
     const array_start = std.mem.indexOfScalarPos(u8, raw_json, nodes_start, '[') orelse return nodes.toOwnedSlice(arena);
 
+    // Pass 1: parse every node object; index by nodeId; remember the root.
+    var tmp: std.ArrayList(TmpAxNode) = .empty;
+    defer {
+        for (tmp.items) |t| if (t.child_ids.len > 0) arena.free(t.child_ids);
+        tmp.deinit(arena);
+    }
+    var by_id = std.StringHashMap(usize).init(arena);
+    defer by_id.deinit();
+    var root_idx: ?usize = null;
+
     var pos = array_start + 1;
-    var depth: u16 = 0;
     while (pos < raw_json.len) {
         const node_start = std.mem.indexOfPos(u8, raw_json, pos, "\"nodeId\"") orelse break;
         const object_start = findContainingObjectStart(raw_json, node_start);
         const object_end = findJsonObjectEnd(raw_json, object_start) orelse break;
         const node_json = raw_json[object_start..object_end];
+        pos = object_end;
 
-        const role_val = extractTopLevelA11yValue(node_json, "\"role\"") orelse "";
-        const name_val = extractTopLevelA11yValue(node_json, "\"name\"") orelse "";
-        const value_val = extractTopLevelA11yValue(node_json, "\"value\"") orelse "";
-        const description_val = extractTopLevelA11yValue(node_json, "\"description\"") orelse "";
-        const state_val = buildA11yState(arena, node_json);
-        const backend_id = extractSimpleJsonInt(node_json, 0, "\"backendDOMNodeId\"");
+        const node_id = extractTopLevelA11yValue(node_json, "\"nodeId\"") orelse continue;
+        const parent_id = extractTopLevelA11yValue(node_json, "\"parentId\"");
 
-        if (role_val.len > 0) {
+        const idx = tmp.items.len;
+        try tmp.append(arena, .{
+            .role = extractTopLevelA11yValue(node_json, "\"role\"") orelse "",
+            .name = extractTopLevelA11yValue(node_json, "\"name\"") orelse "",
+            .value = extractTopLevelA11yValue(node_json, "\"value\"") orelse "",
+            .description = extractTopLevelA11yValue(node_json, "\"description\"") orelse "",
+            .state = buildA11yState(arena, node_json),
+            .backend_id = extractSimpleJsonInt(node_json, 0, "\"backendDOMNodeId\""),
+            .child_ids = try extractChildIds(arena, node_json),
+        });
+        try by_id.put(node_id, idx);
+        if (parent_id == null and root_idx == null) root_idx = idx;
+    }
+
+    if (tmp.items.len == 0) return nodes.toOwnedSlice(arena);
+
+    // Pass 2: DFS pre-order from the root via childIds → real depth + order.
+    // Explicit stack (no recursion depth risk); children pushed in reverse so the
+    // first child is processed first. `visited` guards against malformed cycles.
+    const Frame = struct { idx: usize, depth: u16 };
+    var stack: std.ArrayList(Frame) = .empty;
+    defer stack.deinit(arena);
+    try stack.append(arena, .{ .idx = root_idx orelse 0, .depth = 0 });
+    while (stack.items.len > 0) {
+        const fr = stack.items[stack.items.len - 1];
+        stack.items.len -= 1;
+
+        const t = &tmp.items[fr.idx];
+        if (t.visited) continue;
+        t.visited = true;
+
+        if (t.role.len > 0) {
             try nodes.append(arena, .{
                 .ref = "",
-                .role = role_val,
-                .name = name_val,
-                .value = value_val,
-                .description = description_val,
-                .state = state_val,
-                .backend_node_id = backend_id,
-                .depth = depth,
+                .role = t.role,
+                .name = t.name,
+                .value = t.value,
+                .description = t.description,
+                .state = t.state,
+                .backend_node_id = t.backend_id,
+                .depth = fr.depth,
             });
         }
 
-        pos = object_end;
-        depth = 0; // flat for now
+        var k = t.child_ids.len;
+        while (k > 0) {
+            k -= 1;
+            if (by_id.get(t.child_ids[k])) |cidx| {
+                if (!tmp.items[cidx].visited) try stack.append(arena, .{ .idx = cidx, .depth = fr.depth +| 1 });
+            }
+        }
+    }
+
+    // Safety net: emit any role-bearing node unreachable from the root (detached
+    // subtrees) at depth 0, in original order, so we never lose content.
+    for (tmp.items) |t| {
+        if (!t.visited and t.role.len > 0) {
+            try nodes.append(arena, .{
+                .ref = "",
+                .role = t.role,
+                .name = t.name,
+                .value = t.value,
+                .description = t.description,
+                .state = t.state,
+                .backend_node_id = t.backend_id,
+                .depth = 0,
+            });
+        }
     }
 
     return nodes.toOwnedSlice(arena);
@@ -2244,6 +2238,19 @@ fn handleHarStop(request: *std.http.Server.Request, arena: std.mem.Allocator, br
         client.drainWsEvents(arena, 2);
         flushEventsToHar(arena, client, rec);
 
+        // Fetch response bodies and write the JSONL artifact BEFORE
+        // Network.disable: Chromium evicts a request's response-body store
+        // as soon as the domain is disabled, so this has to happen while
+        // it's still live. Best-effort -- a failure here (disk full,
+        // unsupported OS, etc.) must not break the existing /har/stop
+        // response contract.
+        // Mirrors bridge/config.zig: STATE_DIR env var, default .kuri
+        const state_dir = compat.getenv("STATE_DIR") orelse ".kuri";
+        const jsonl_path: ?[]const u8 = rec.writeJsonl(arena, client, state_dir, tab_id) catch |err| blk: {
+            std.log.warn("HAR: writeJsonl failed: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+
         // Third: stop recording (sends Network.disable).
         // handleCdpEvent still processes events after recording=false.
         const har_json = rec.stop(client) catch {
@@ -2261,7 +2268,11 @@ fn handleHarStop(request: *std.http.Server.Request, arena: std.mem.Allocator, br
             return;
         };
         defer rec.allocator.free(final_json);
-        const result = std.fmt.allocPrint(arena, "{{\"status\":\"stopped\",\"entries\":{d},\"har\":{s}}}", .{ rec.entryCount(), final_json }) catch {
+        const jsonl_field = if (jsonl_path) |p| blk: {
+            const escaped = jsonEscapeAlloc(arena, p) orelse p;
+            break :blk std.fmt.allocPrint(arena, "\"{s}\"", .{escaped}) catch "null";
+        } else "null";
+        const result = std.fmt.allocPrint(arena, "{{\"status\":\"stopped\",\"entries\":{d},\"jsonl_path\":{s},\"har\":{s}}}", .{ rec.entryCount(), jsonl_field, final_json }) catch {
             resp.sendError(request, 500, "Internal Server Error");
             return;
         };
@@ -2273,7 +2284,7 @@ fn handleHarStop(request: *std.http.Server.Request, arena: std.mem.Allocator, br
             return;
         };
         defer rec.allocator.free(har_json);
-        const result = std.fmt.allocPrint(arena, "{{\"status\":\"stopped\",\"entries\":{d},\"har\":{s}}}", .{ rec.entryCount(), har_json }) catch {
+        const result = std.fmt.allocPrint(arena, "{{\"status\":\"stopped\",\"entries\":{d},\"jsonl_path\":null,\"har\":{s}}}", .{ rec.entryCount(), har_json }) catch {
             resp.sendError(request, 500, "Internal Server Error");
             return;
         };
@@ -2354,14 +2365,7 @@ fn handleHarReplay(request: *std.http.Server.Request, arena: std.mem.Allocator, 
         const dominated_by_api = std.mem.eql(u8, filter, "api");
         const dominated_by_doc = std.mem.eql(u8, filter, "doc");
         if (dominated_by_api) {
-            const is_api = std.mem.indexOf(u8, entry.mime_type, "json") != null or
-                std.mem.indexOf(u8, entry.mime_type, "xml") != null or
-                std.mem.indexOf(u8, entry.mime_type, "graphql") != null or
-                std.mem.eql(u8, entry.method, "POST") or
-                std.mem.eql(u8, entry.method, "PUT") or
-                std.mem.eql(u8, entry.method, "PATCH") or
-                std.mem.eql(u8, entry.method, "DELETE");
-            if (!is_api) continue;
+            if (!isApiShaped(entry.mime_type, entry.method)) continue;
         }
         if (dominated_by_doc) {
             const is_doc = std.mem.indexOf(u8, entry.mime_type, "html") != null or
@@ -2429,7 +2433,7 @@ fn handleHarReplay(request: *std.http.Server.Request, arena: std.mem.Allocator, 
 
     buf.appendSlice(arena, "],\"total_api_calls\":") catch return;
     buf.print(arena, "{d}", .{api_count}) catch return;
-    buf.appendSlice(arena, ",\"hint\":\"Use these code snippets to interact with the site's API directly. Add cookies/headers from /cookies and /headers endpoints for authenticated requests.\"}") catch return;
+    buf.appendSlice(arena, ",\"hint\":\"Use these code snippets to interact with the site's API directly. Add cookies/headers from /cookies and /headers endpoints for authenticated requests. For full response bodies (previews here are omitted), call /har/stop and read its jsonl_path.\"}") catch return;
 
     const result = buf.toOwnedSlice(arena) catch {
         resp.sendError(request, 500, "Internal Server Error");
@@ -2946,6 +2950,7 @@ fn handleBack(request: *std.http.Server.Request, arena: std.mem.Allocator, bridg
         resp.sendError(request, 502, "CDP command failed");
         return;
     };
+    bumpGenerationLocked(bridge, tab_id);
     resp.sendJson(request, response);
 }
 
@@ -2962,6 +2967,7 @@ fn handleForward(request: *std.http.Server.Request, arena: std.mem.Allocator, br
         resp.sendError(request, 502, "CDP command failed");
         return;
     };
+    bumpGenerationLocked(bridge, tab_id);
     resp.sendJson(request, response);
 }
 
@@ -2977,97 +2983,99 @@ fn handleReload(request: *std.http.Server.Request, arena: std.mem.Allocator, bri
         resp.sendError(request, 502, "CDP command failed");
         return;
     };
+    bumpGenerationLocked(bridge, tab_id);
     resp.sendJson(request, response);
 }
 
 // ── Diff Snapshot Endpoint ──────────────────────────────────────────────
 
+/// Compute a compact-grammar diff for `tab_id` against its stored previous
+/// snapshot, then atomically swap the stored snapshot to the current one.
+/// Returns the diff text (owned by `arena`). On the first call for a tab the
+/// diff is the full page rendered as `+ ` additions.
+///
+/// The diff-then-swap runs under the bridge write lock, and the diff is
+/// rendered to a string (copying every byte) before the old snapshot is freed,
+/// so no node pointer ever outlives the memory it references. This is the fix
+/// for the earlier use-after-free that crashed the whole server whenever a
+/// diff contained a removed node.
+fn computeCompactDiff(arena: std.mem.Allocator, bridge: *Bridge, tab_id: []const u8, client: *CdpClient, limit: ?usize) ![]const u8 {
+    const raw_response = try client.send(arena, protocol.Methods.accessibility_get_full_tree, null);
+    const a11y = @import("../snapshot/a11y.zig");
+    const nodes = try parseA11yNodes(arena, raw_response);
+    const gen = currentGeneration(bridge, tab_id);
+    const current = try a11y.buildSnapshot(nodes, .{ .compact = true, .ref_generation = gen }, arena);
+
+    const diff_mod = @import("../snapshot/diff.zig");
+
+    bridge.mu.lock();
+    defer bridge.mu.unlock();
+
+    const prev = if (bridge.prev_snapshots.get(tab_id)) |p| p else &[_]a11y.A11yNode{};
+    var diff_text = try diff_mod.formatCompactDiff(prev, current, arena);
+
+    // Adaptive: a mass-change diff (navigation, SPA route swap) can cost more
+    // than the page it describes. When that happens send the full compact
+    // snapshot instead, flagged with a `!` header so the agent knows to treat
+    // it as a fresh view rather than a delta. First calls keep `+ ` grammar.
+    // With `limit`, the fallback view is truncated like /snapshot?limit=N —
+    // the stored baseline stays untruncated so later deltas are exact.
+    if (prev.len > 0 and diff_text.len > 0) {
+        const fallback_nodes = if (limit != null)
+            try a11y.buildSnapshot(nodes, .{ .compact = true, .limit = limit, .ref_generation = gen }, arena)
+        else
+            current;
+        const full_text = try a11y.formatCompact(fallback_nodes, arena);
+        if (full_text.len + 64 < diff_text.len) {
+            diff_text = try std.fmt.allocPrint(arena, "! page replaced — full snapshot follows\n{s}", .{full_text});
+        }
+    }
+
+    // Refresh the ref cache so the @refs in this diff are actionable via
+    // /action without an intervening full /snapshot call.
+    refreshRefCacheLocked(bridge, tab_id, current) catch {};
+
+    // Swap the stored snapshot to `current` (cloned into bridge memory). We have
+    // the rendered diff already, so any failure here just skips the swap and
+    // still returns a correct diff for this call.
+    const owned_current = bridge.cloneSnapshot(current) catch return diff_text;
+    const owned_key = bridge.allocator.dupe(u8, tab_id) catch {
+        freeOwnedSnapshot(bridge.allocator, owned_current);
+        return diff_text;
+    };
+    if (bridge.prev_snapshots.fetchRemove(tab_id)) |kv| {
+        freeOwnedSnapshot(bridge.allocator, kv.value);
+        bridge.allocator.free(kv.key);
+    }
+    bridge.prev_snapshots.put(owned_key, owned_current) catch {
+        bridge.allocator.free(owned_key);
+        freeOwnedSnapshot(bridge.allocator, owned_current);
+    };
+    return diff_text;
+}
+
 fn handleDiffSnapshot(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
     const tab_id = requireEffectiveTabId(arena, request, bridge) orelse return;
-
     const client = bridge.getCdpClient(tab_id) orelse {
         resp.sendError(request, 404, "Tab not found");
         return;
     };
+    rememberCurrentTab(request, bridge, tab_id);
+    _ = bridge.touchTab(tab_id);
 
-    // Get current a11y tree
-    const raw_response = client.send(arena, protocol.Methods.accessibility_get_full_tree, null) catch {
-        resp.sendError(request, 502, "CDP command failed");
+    // Optional: truncate the page-replaced fallback (mass-change diffs) the same
+    // way /snapshot?limit=N does, so a truncated-base agent loop stays cheap
+    // across navigations. Normal delta lines are never truncated.
+    const limit: ?usize = if (getQueryParam(request.head.target, "limit")) |lp|
+        std.fmt.parseInt(usize, lp, 10) catch null
+    else
+        null;
+
+    const diff_text = computeCompactDiff(arena, bridge, tab_id, client, limit) catch {
+        resp.sendError(request, 502, "Failed to compute snapshot diff");
         return;
     };
-
-    const a11y = @import("../snapshot/a11y.zig");
-    const nodes = parseA11yNodes(arena, raw_response) catch {
-        resp.sendError(request, 500, "Failed to parse a11y tree");
-        return;
-    };
-
-    const current = a11y.buildSnapshot(nodes, .{}, arena) catch {
-        resp.sendError(request, 500, "Failed to build snapshot");
-        return;
-    };
-
-    // Get previous snapshot from bridge (empty if first call)
-    bridge.mu.lockShared();
-    const prev_nodes = if (bridge.prev_snapshots.get(tab_id)) |prev| prev else &[_]a11y.A11yNode{};
-    bridge.mu.unlockShared();
-
-    // Compute diff
-    const diff_mod = @import("../snapshot/diff.zig");
-    const diff_entries = diff_mod.diffSnapshots(prev_nodes, current, arena) catch {
-        resp.sendError(request, 500, "Failed to compute diff");
-        return;
-    };
-
-    // Store current snapshot as previous for next diff
-    const owned_current = bridge.cloneSnapshot(current) catch {
-        resp.sendError(request, 500, "Failed to persist snapshot");
-        return;
-    };
-    {
-        bridge.mu.lock();
-        defer bridge.mu.unlock();
-
-        if (bridge.prev_snapshots.fetchRemove(tab_id)) |kv| {
-            freeOwnedSnapshot(bridge.allocator, kv.value);
-            bridge.allocator.free(kv.key);
-        }
-
-        const owned_key = bridge.allocator.dupe(u8, tab_id) catch {
-            freeOwnedSnapshot(bridge.allocator, owned_current);
-            resp.sendError(request, 500, "Failed to persist snapshot");
-            return;
-        };
-        bridge.prev_snapshots.put(owned_key, owned_current) catch {
-            bridge.allocator.free(owned_key);
-            freeOwnedSnapshot(bridge.allocator, owned_current);
-            resp.sendError(request, 500, "Failed to persist snapshot");
-            return;
-        };
-    }
-
-    // Serialize diff as JSON
-    var json_buf: std.ArrayList(u8) = .empty;
-    json_buf.appendSlice(arena, "[") catch return;
-    for (diff_entries, 0..) |entry, i| {
-        if (i > 0) json_buf.appendSlice(arena, ",") catch return;
-        const kind_str: []const u8 = switch (entry.kind) {
-            .added => "added",
-            .removed => "removed",
-            .changed => "changed",
-        };
-        json_buf.appendSlice(arena, "{") catch return;
-        writeJsonField(&json_buf, arena, "kind", kind_str) catch return;
-        json_buf.appendSlice(arena, ",") catch return;
-        writeJsonField(&json_buf, arena, "ref", entry.node.ref) catch return;
-        json_buf.appendSlice(arena, ",") catch return;
-        writeJsonField(&json_buf, arena, "role", entry.node.role) catch return;
-        json_buf.appendSlice(arena, ",") catch return;
-        writeJsonField(&json_buf, arena, "name", entry.node.name) catch return;
-        json_buf.appendSlice(arena, "}") catch return;
-    }
-    json_buf.appendSlice(arena, "]") catch return;
-    resp.sendJson(request, json_buf.items);
+    resp.sendJson(request, diff_text);
 }
 
 fn writeJsonField(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, key: []const u8, value: []const u8) !void {
@@ -3378,6 +3386,7 @@ fn handleAuthProfileLoad(
             resp.sendError(request, 502, "Failed to navigate to auth profile origin");
             return;
         };
+        bumpGenerationLocked(bridge, tab_id);
         _ = client.waitForEvent(arena, "Page.loadEventFired", 1_000);
     }
 
@@ -3481,6 +3490,224 @@ fn handleAuthProfileDelete(
     };
     const escaped_name = jsonEscapeAlloc(arena, name) orelse {
         resp.sendError(request, 500, "Failed to escape profile name");
+        return;
+    };
+    const body = std.fmt.allocPrint(arena, "{{\"status\":\"deleted\",\"name\":\"{s}\"}}", .{escaped_name}) catch {
+        resp.sendError(request, 500, "Internal Server Error");
+        return;
+    };
+    resp.sendJson(request, body);
+}
+
+// ---------------------------------------------------------------------------
+// `connect` feature: persisted, encrypted browser logins backed by nanostore.
+// Captures the same cookies + localStorage + sessionStorage snapshot as the
+// auth-profile handlers, but stores it AES-256-GCM-encrypted via connect_store.
+// ---------------------------------------------------------------------------
+
+fn handleConnectSave(
+    request: *std.http.Server.Request,
+    arena: std.mem.Allocator,
+    bridge: *Bridge,
+    cfg: Config,
+) void {
+    const target = request.head.target;
+    const tab_id = getQueryParam(target, "tab_id") orelse {
+        resp.sendError(request, 400, "Missing tab_id parameter");
+        return;
+    };
+    const name = getQueryParam(target, "name") orelse {
+        resp.sendError(request, 400, "Missing name parameter");
+        return;
+    };
+    const client = bridge.getCdpClient(tab_id) orelse {
+        resp.sendError(request, 404, "Tab not found");
+        return;
+    };
+
+    const origin = evalValueString(arena, client, "location.origin") orelse {
+        resp.sendError(request, 502, "Failed to determine page origin");
+        return;
+    };
+    const cookies_response = client.send(arena, protocol.Methods.network_get_cookies, null) catch {
+        resp.sendError(request, 502, "Failed to collect cookies");
+        return;
+    };
+    const cookies_json = extractJsonArrayField(cookies_response, "\"cookies\"") orelse {
+        resp.sendError(request, 502, "Failed to parse cookies");
+        return;
+    };
+    const local_storage = evalValueObject(
+        arena,
+        client,
+        "Object.fromEntries(Object.entries(localStorage))",
+    ) orelse "{}";
+    const session_storage = evalValueObject(
+        arena,
+        client,
+        "Object.fromEntries(Object.entries(sessionStorage))",
+    ) orelse "{}";
+    const escaped_name = jsonEscapeAlloc(arena, name) orelse {
+        resp.sendError(request, 500, "Failed to escape connection name");
+        return;
+    };
+    const escaped_origin = jsonEscapeAlloc(arena, origin) orelse {
+        resp.sendError(request, 500, "Failed to escape connection origin");
+        return;
+    };
+    const payload = std.fmt.allocPrint(
+        arena,
+        "{{\"version\":1,\"name\":\"{s}\",\"origin\":\"{s}\",\"saved_at\":{d},\"cookies\":{s},\"local_storage\":{s},\"session_storage\":{s}}}",
+        .{ escaped_name, escaped_origin, compat.timestampSeconds(), cookies_json, local_storage, session_storage },
+    ) catch {
+        resp.sendError(request, 500, "Failed to build connection payload");
+        return;
+    };
+
+    connect_store.saveSession(arena, cfg.state_dir, cfg.vault_passphrase, name, origin, payload) catch |err| {
+        resp.sendError(request, 500, @errorName(err));
+        return;
+    };
+    const body = std.fmt.allocPrint(
+        arena,
+        "{{\"status\":\"saved\",\"name\":\"{s}\",\"origin\":\"{s}\",\"encrypted\":true}}",
+        .{ escaped_name, escaped_origin },
+    ) catch {
+        resp.sendError(request, 500, "Internal Server Error");
+        return;
+    };
+    resp.sendJson(request, body);
+}
+
+fn handleConnectLoad(
+    request: *std.http.Server.Request,
+    arena: std.mem.Allocator,
+    bridge: *Bridge,
+    cfg: Config,
+) void {
+    const target = request.head.target;
+    const tab_id = getQueryParam(target, "tab_id") orelse {
+        resp.sendError(request, 400, "Missing tab_id parameter");
+        return;
+    };
+    const name = getQueryParam(target, "name") orelse {
+        resp.sendError(request, 400, "Missing name parameter");
+        return;
+    };
+    const client = bridge.getCdpClient(tab_id) orelse {
+        resp.sendError(request, 404, "Tab not found");
+        return;
+    };
+
+    const payload = connect_store.loadSession(arena, cfg.state_dir, cfg.vault_passphrase, name) catch |err| {
+        resp.sendError(request, 404, @errorName(err));
+        return;
+    };
+    const origin = extractSimpleJsonString(payload, 0, "\"origin\"") orelse {
+        resp.sendError(request, 500, "Invalid connection payload");
+        return;
+    };
+    const cookies_json = extractJsonArrayField(payload, "\"cookies\"") orelse "[]";
+    const local_storage = extractJsonObjectField(payload, "\"local_storage\"") orelse "{}";
+    const session_storage = extractJsonObjectField(payload, "\"session_storage\"") orelse "{}";
+
+    const current_origin = evalValueString(arena, client, "location.origin");
+    if (current_origin == null or !std.mem.eql(u8, current_origin.?, origin)) {
+        const nav_params = std.fmt.allocPrint(arena, "{{\"url\":\"{s}\"}}", .{origin}) catch {
+            resp.sendError(request, 500, "Failed to build navigation parameters");
+            return;
+        };
+        _ = client.send(arena, protocol.Methods.page_navigate, nav_params) catch {
+            resp.sendError(request, 502, "Failed to navigate to connection origin");
+            return;
+        };
+        bumpGenerationLocked(bridge, tab_id);
+        _ = client.waitForEvent(arena, "Page.loadEventFired", 1_000);
+    }
+
+    const set_cookies = std.fmt.allocPrint(arena, "{{\"cookies\":{s}}}", .{cookies_json}) catch {
+        resp.sendError(request, 500, "Failed to build cookie restore payload");
+        return;
+    };
+    _ = client.send(arena, protocol.Methods.network_set_cookies, set_cookies) catch {
+        resp.sendError(request, 502, "Failed to restore cookies");
+        return;
+    };
+    if (!applyStorageSnapshot(arena, client, "localStorage", local_storage)) {
+        resp.sendError(request, 502, "Failed to restore localStorage");
+        return;
+    }
+    if (!applyStorageSnapshot(arena, client, "sessionStorage", session_storage)) {
+        resp.sendError(request, 502, "Failed to restore sessionStorage");
+        return;
+    }
+    const escaped_name = jsonEscapeAlloc(arena, name) orelse {
+        resp.sendError(request, 500, "Failed to escape connection name");
+        return;
+    };
+    const escaped_origin = jsonEscapeAlloc(arena, origin) orelse {
+        resp.sendError(request, 500, "Failed to escape connection origin");
+        return;
+    };
+    const body = std.fmt.allocPrint(
+        arena,
+        "{{\"status\":\"loaded\",\"name\":\"{s}\",\"origin\":\"{s}\"}}",
+        .{ escaped_name, escaped_origin },
+    ) catch {
+        resp.sendError(request, 500, "Internal Server Error");
+        return;
+    };
+    resp.sendJson(request, body);
+}
+
+fn handleConnectList(
+    request: *std.http.Server.Request,
+    arena: std.mem.Allocator,
+    cfg: Config,
+) void {
+    const names = connect_store.listSessions(arena, cfg.state_dir, cfg.vault_passphrase) catch |err| {
+        resp.sendError(request, 500, @errorName(err));
+        return;
+    };
+    var json_buf: std.ArrayList(u8) = .empty;
+    json_buf.appendSlice(arena, "{\"connections\":[") catch {
+        resp.sendError(request, 500, "Internal Server Error");
+        return;
+    };
+    for (names, 0..) |n, i| {
+        if (i > 0) json_buf.appendSlice(arena, ",") catch {};
+        const escaped = jsonEscapeAlloc(arena, n) orelse {
+            resp.sendError(request, 500, "Failed to encode connection name");
+            return;
+        };
+        json_buf.print(arena, "\"{s}\"", .{escaped}) catch {
+            resp.sendError(request, 500, "Internal Server Error");
+            return;
+        };
+    }
+    json_buf.appendSlice(arena, "]}") catch {
+        resp.sendError(request, 500, "Internal Server Error");
+        return;
+    };
+    resp.sendJson(request, json_buf.items);
+}
+
+fn handleConnectDelete(
+    request: *std.http.Server.Request,
+    arena: std.mem.Allocator,
+    cfg: Config,
+) void {
+    const target = request.head.target;
+    const name = getQueryParam(target, "name") orelse {
+        resp.sendError(request, 400, "Missing name parameter");
+        return;
+    };
+    connect_store.deleteSession(arena, cfg.state_dir, cfg.vault_passphrase, name) catch |err| {
+        resp.sendError(request, 404, @errorName(err));
+        return;
+    };
+    const escaped_name = jsonEscapeAlloc(arena, name) orelse {
+        resp.sendError(request, 500, "Failed to escape connection name");
         return;
     };
     const body = std.fmt.allocPrint(arena, "{{\"status\":\"deleted\",\"name\":\"{s}\"}}", .{escaped_name}) catch {
@@ -4474,11 +4701,92 @@ fn buildDebugModeScript(allocator: std.mem.Allocator, freeze_enabled: bool) ![]u
     return std.mem.replaceOwned(u8, allocator, template, "@@FREEZE@@", if (freeze_enabled) "true" else "false");
 }
 
+/// Like extractSimpleJsonString, but correctly un-escapes the string value
+/// (\", \\, \/, \n, \r, \t, \b, \f, \uXXXX) instead of stopping at the first
+/// literal quote byte. Needed whenever the value itself is JSON.stringify'd
+/// JSON (e.g. a Runtime.evaluate result whose value is a stringified
+/// array/object) -- such values always contain escaped quotes, which the
+/// naive scanner truncates on. Non-BMP \u sequences (surrogate pairs) are
+/// decoded independently rather than paired -- acceptable here since this
+/// only ever unescapes kuri's own recorder/export JSON, not arbitrary input.
+fn extractJsonStringValueUnescaped(allocator: std.mem.Allocator, json: []const u8, start: usize, field: []const u8) ?[]const u8 {
+    const field_pos = std.mem.indexOfPos(u8, json, start, field) orelse return null;
+    if (field_pos - start > 1000) return null;
+    const colon = std.mem.indexOfScalarPos(u8, json, field_pos + field.len, ':') orelse return null;
+    var i = colon + 1;
+    while (i < json.len and (json[i] == ' ' or json[i] == '\t' or json[i] == '\n' or json[i] == '\r')) : (i += 1) {}
+    if (i >= json.len or json[i] != '"') return null;
+    i += 1;
+
+    var out: std.ArrayList(u8) = .empty;
+    while (i < json.len) {
+        const c = json[i];
+        if (c == '"') return out.items;
+        if (c != '\\' or i + 1 >= json.len) {
+            out.append(allocator, c) catch return null;
+            i += 1;
+            continue;
+        }
+        const next = json[i + 1];
+        switch (next) {
+            '"', '\\', '/' => {
+                out.append(allocator, next) catch return null;
+                i += 2;
+            },
+            'n' => {
+                out.append(allocator, '\n') catch return null;
+                i += 2;
+            },
+            'r' => {
+                out.append(allocator, '\r') catch return null;
+                i += 2;
+            },
+            't' => {
+                out.append(allocator, '\t') catch return null;
+                i += 2;
+            },
+            'b' => {
+                out.append(allocator, 0x08) catch return null;
+                i += 2;
+            },
+            'f' => {
+                out.append(allocator, 0x0C) catch return null;
+                i += 2;
+            },
+            'u' => {
+                if (i + 6 <= json.len) {
+                    const code = std.fmt.parseInt(u21, json[i + 2 .. i + 6], 16) catch {
+                        out.append(allocator, c) catch return null;
+                        i += 1;
+                        continue;
+                    };
+                    var buf: [4]u8 = undefined;
+                    const len = std.unicode.utf8Encode(code, &buf) catch {
+                        out.append(allocator, c) catch return null;
+                        i += 1;
+                        continue;
+                    };
+                    out.appendSlice(allocator, buf[0..len]) catch return null;
+                    i += 6;
+                } else {
+                    out.append(allocator, c) catch return null;
+                    i += 1;
+                }
+            },
+            else => {
+                out.append(allocator, c) catch return null;
+                i += 1;
+            },
+        }
+    }
+    return null;
+}
+
 fn evalValueString(arena: std.mem.Allocator, client: *CdpClient, expression: []const u8) ?[]const u8 {
     const escaped = jsonEscapeAlloc(arena, expression) orelse return null;
     const params = std.fmt.allocPrint(arena, "{{\"expression\":\"{s}\",\"returnByValue\":true}}", .{escaped}) catch return null;
     const response = client.send(arena, protocol.Methods.runtime_evaluate, params) catch return null;
-    return extractSimpleJsonString(response, 0, "\"value\"");
+    return extractJsonStringValueUnescaped(arena, response, 0, "\"value\"");
 }
 
 fn evalValueObject(arena: std.mem.Allocator, client: *CdpClient, expression: []const u8) ?[]const u8 {
@@ -5943,6 +6251,7 @@ fn handlePerfLcp(request: *std.http.Server.Request, arena: std.mem.Allocator, br
             resp.sendError(request, 502, "Navigation failed");
             return;
         };
+        bumpGenerationLocked(bridge, tab_id);
         _ = client.waitForEvent(arena, "Page.loadEventFired", 50);
     }
 
@@ -6391,6 +6700,7 @@ fn handleBatch(request: *std.http.Server.Request, arena: std.mem.Allocator, brid
                     pos = path_start + 6;
                     continue;
                 };
+                bumpGenerationLocked(bridge, tab_id);
                 results.appendSlice(arena, "{\"status\":200,\"body\":") catch {};
                 results.appendSlice(arena, response) catch {};
                 results.appendSlice(arena, "}") catch {};
@@ -6428,8 +6738,11 @@ fn handleBatch(request: *std.http.Server.Request, arena: std.mem.Allocator, brid
             const action = extractSimpleJsonString(body, path_start, "\"action\"") orelse "click";
             const ref = extractSimpleJsonString(body, path_start, "\"ref\"") orelse "";
             const value = extractSimpleJsonString(body, path_start, "\"value\"");
+            const realistic_param = extractSimpleJsonString(body, path_start, "\"realistic\"");
+            const use_realistic = if (realistic_param) |r| !std.mem.eql(u8, r, "false") else true;
             if (client) |c| {
                 const actions = @import("../cdp/actions.zig");
+                const dispatch = @import("../cdp/dispatch.zig");
                 const kind = actions.ActionKind.fromString(action);
                 if (kind == null) {
                     results.appendSlice(arena, "{\"status\":400,\"error\":\"unknown action\"}") catch {};
@@ -6442,6 +6755,16 @@ fn handleBatch(request: *std.http.Server.Request, arena: std.mem.Allocator, brid
                     };
                     _ = c.send(arena, protocol.Methods.runtime_evaluate, scroll_params) catch {};
                     results.appendSlice(arena, "{\"status\":200,\"body\":{\"ok\":true,\"action\":\"scrolled\"}}") catch {};
+                } else if (kind.? == .press) {
+                    const v = value orelse "";
+                    const press_params = std.fmt.allocPrint(arena, "{{\"expression\":\"document.dispatchEvent(new KeyboardEvent('keydown', {{key: '{s}'}})) || 'pressed'\",\"returnByValue\":true}}", .{v}) catch {
+                        results.appendSlice(arena, "{\"status\":500,\"error\":\"alloc\"}") catch {};
+                        cmd_idx += 1;
+                        pos = path_start + 6;
+                        continue;
+                    };
+                    _ = c.send(arena, protocol.Methods.runtime_evaluate, press_params) catch {};
+                    results.appendSlice(arena, "{\"status\":200,\"body\":{\"ok\":true,\"action\":\"pressed\"}}") catch {};
                 } else {
                     bridge.mu.lockShared();
                     const snap_cache = bridge.snapshots.get(tab_id);
@@ -6449,62 +6772,16 @@ fn handleBatch(request: *std.http.Server.Request, arena: std.mem.Allocator, brid
                     const clean_ref = if (ref.len > 0 and ref[0] == '@') ref[1..] else ref;
                     const bid = if (snap_cache) |sc| sc.refs.get(clean_ref) else null;
                     if (bid) |b| {
-                        const rp = std.fmt.allocPrint(arena, "{{\"backendNodeId\":{d}}}", .{b}) catch {
-                            results.appendSlice(arena, "{\"status\":500,\"error\":\"alloc\"}") catch {};
-                            cmd_idx += 1;
-                            pos = path_start + 6;
-                            continue;
-                        };
-                        const rr = c.send(arena, protocol.Methods.dom_resolve_node, rp) catch {
-                            results.appendSlice(arena, "{\"status\":502,\"error\":\"resolve failed\"}") catch {};
-                            cmd_idx += 1;
-                            pos = path_start + 6;
-                            continue;
-                        };
-                        const oid = extractSimpleJsonString(rr, 0, "\"objectId\"") orelse {
-                            results.appendSlice(arena, "{\"status\":500,\"error\":\"no objectId\"}") catch {};
-                            cmd_idx += 1;
-                            pos = path_start + 6;
-                            continue;
-                        };
-                        if (kind.? == .click or kind.? == .check or kind.? == .uncheck) {
-                            cdpClickHttp(request, arena, c, oid, kind.?);
-                            results.appendSlice(arena, "{\"status\":200,\"body\":{\"ok\":true,\"action\":\"clicked\"}}") catch {};
-                        } else {
-                            const js_fn: []const u8 = switch (kind.?) {
-                                .focus => "function() { this.focus(); return 'focused'; }",
-                                .hover => "function() { this.dispatchEvent(new MouseEvent('mouseover', {bubbles:true})); return 'hovered'; }",
-                                .blur => "function() { this.blur(); return 'blurred'; }",
-                                else => "function() { return 'ok'; }",
-                            };
-                            const escaped_fn = jsonEscapeAlloc(arena, js_fn) orelse {
-                                results.appendSlice(arena, "{\"status\":500,\"error\":\"escape\"}") catch {};
-                                cmd_idx += 1;
-                                pos = path_start + 6;
-                                continue;
-                            };
-                            var call_p: []const u8 = undefined;
-                            if (kind.? == .fill or kind.? == .type) {
-                                const v = value orelse "";
-                                for (v) |ch| {
-                                    const cs = std.fmt.allocPrint(arena, "{c}", .{ch}) catch continue;
-                                    const kp = std.fmt.allocPrint(arena, "{{\"type\":\"keyDown\",\"text\":\"{s}\",\"key\":\"{s}\",\"unmodifiedText\":\"{s}\"}}", .{ cs, cs, cs }) catch continue;
-                                    _ = c.send(arena, protocol.Methods.input_dispatch_key_event, kp) catch continue;
-                                    const up = std.fmt.allocPrint(arena, "{{\"type\":\"keyUp\",\"key\":\"{s}\"}}", .{cs}) catch continue;
-                                    _ = c.send(arena, protocol.Methods.input_dispatch_key_event, up) catch continue;
-                                }
-                                results.appendSlice(arena, "{\"status\":200,\"body\":{\"ok\":true,\"action\":\"filled\"}}") catch {};
-                            } else {
-                                call_p = std.fmt.allocPrint(arena, "{{\"objectId\":\"{s}\",\"functionDeclaration\":\"{s}\",\"returnByValue\":true}}", .{ oid, escaped_fn }) catch {
-                                    results.appendSlice(arena, "{\"status\":500,\"error\":\"alloc\"}") catch {};
-                                    cmd_idx += 1;
-                                    pos = path_start + 6;
-                                    continue;
-                                };
-                                _ = c.send(arena, protocol.Methods.runtime_call_function_on, call_p) catch {};
-                                const escaped_action = jsonEscapeAlloc(arena, action) orelse action;
-                                results.print(arena, "{{\"status\":200,\"body\":{{\"ok\":true,\"action\":\"{s}\"}}}}", .{escaped_action}) catch {};
-                            }
+                        const outcome = dispatch.dispatchActionOnBackendNode(arena, c, b, kind.?, value, use_realistic);
+                        switch (outcome) {
+                            .outcome => |o| {
+                                const escaped_label = jsonEscapeAlloc(arena, o.label) orelse o.label;
+                                results.print(arena, "{{\"status\":200,\"body\":{{\"ok\":true,\"action\":\"{s}\"}}}}", .{escaped_label}) catch {};
+                            },
+                            .err => |e| {
+                                const escaped_msg = jsonEscapeAlloc(arena, e.message) orelse e.message;
+                                results.print(arena, "{{\"status\":{d},\"error\":\"{s}\"}}", .{ e.status, escaped_msg }) catch {};
+                            },
                         }
                     } else {
                         results.appendSlice(arena, "{\"status\":400,\"error\":\"ref not found\"}") catch {};
@@ -6897,13 +7174,16 @@ fn handlePageState(request: *std.http.Server.Request, arena: std.mem.Allocator, 
         \\    images: document.images.length,
         \\    inputs: document.querySelectorAll('input,textarea,select').length
         \\  };
-        \\  return JSON.stringify(s);
+        \\  return s;
         \\})()
     ;
     const escaped = jsonEscapeAlloc(arena, js) orelse {
         resp.sendError(request, 500, "Internal Server Error");
         return;
     };
+    // returnByValue gives us the object inline as CDP JSON, so we can slice it
+    // out directly — no double JSON.stringify (that path double-escaped the
+    // quotes and truncated the body to `{\`).
     const params = std.fmt.allocPrint(arena, "{{\"expression\":\"{s}\",\"returnByValue\":true}}", .{escaped}) catch {
         resp.sendError(request, 500, "Internal Server Error");
         return;
@@ -6912,11 +7192,18 @@ fn handlePageState(request: *std.http.Server.Request, arena: std.mem.Allocator, 
         resp.sendError(request, 502, "CDP command failed");
         return;
     };
-    const val = extractSimpleJsonString(response, 0, "\"value\"") orelse {
-        resp.sendJson(request, response);
-        return;
-    };
-    resp.sendJson(request, val);
+    // Response shape: {"result":{"result":{"type":"object","value":{ ... }}}}
+    // Grab the inner value object by brace-matching.
+    if (std.mem.indexOf(u8, response, "\"value\":")) |vpos| {
+        const brace = std.mem.indexOfScalarPos(u8, response, vpos, '{');
+        if (brace) |b| {
+            if (findJsonObjectEnd(response, b)) |end| {
+                resp.sendJson(request, response[b..end]);
+                return;
+            }
+        }
+    }
+    resp.sendJson(request, response);
 }
 
 fn handleClipboard(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge, mode: []const u8) void {
@@ -8528,7 +8815,63 @@ fn handleRecording(request: *std.http.Server.Request, arena: std.mem.Allocator, 
         const js =
             \\(function() {
             \\  window.__kuri_recording = [];
-            \\  function rec(e) { window.__kuri_recording.push({type:e.type,target:e.target.tagName,timestamp:Date.now(),value:e.target.value||''}); }
+            \\  window.__kuri_last_input_el = null;
+            \\  var TAG_ROLE = { A:'link', BUTTON:'button', SELECT:'combobox', TEXTAREA:'textbox', SUMMARY:'button' };
+            \\  var INPUT_ROLE = { checkbox:'checkbox', radio:'radio', range:'slider', number:'spinbutton', search:'searchbox', submit:'button', button:'button', reset:'button' };
+            \\  function normText(s) { return (s || '').replace(/\s+/g, ' ').trim(); }
+            \\  function computeRole(el) {
+            \\    var explicit = el.getAttribute && el.getAttribute('role');
+            \\    if (explicit) return explicit;
+            \\    if (el.tagName === 'A' && !el.hasAttribute('href')) return 'generic';
+            \\    if (el.tagName === 'INPUT') return INPUT_ROLE[(el.type || 'text').toLowerCase()] || 'textbox';
+            \\    return TAG_ROLE[el.tagName] || el.tagName.toLowerCase();
+            \\  }
+            \\  function computeName(el) {
+            \\    var aria = el.getAttribute && el.getAttribute('aria-label');
+            \\    if (aria) return normText(aria).slice(0, 120);
+            \\    if (el.labels && el.labels.length) return normText(el.labels[0].textContent).slice(0, 120);
+            \\    if (el.id) { var lbl = document.querySelector('label[for="' + CSS.escape(el.id) + '"]'); if (lbl) return normText(lbl.textContent).slice(0, 120); }
+            \\    var wrap = el.closest && el.closest('label'); if (wrap) return normText(wrap.textContent).slice(0, 120);
+            \\    if (el.placeholder) return normText(el.placeholder).slice(0, 120);
+            \\    if (el.alt) return normText(el.alt).slice(0, 120);
+            \\    if (el.title) return normText(el.title).slice(0, 120);
+            \\    return normText(el.innerText || el.textContent || '').slice(0, 120);
+            \\  }
+            \\  function computeNearbyText(el) {
+            \\    var anc = (el.closest && el.closest('li,tr,[role="row"],[role="listitem"]')) || el.parentElement;
+            \\    if (!anc) return '';
+            \\    var own = normText(el.innerText || el.textContent || '');
+            \\    var all = normText(anc.innerText || anc.textContent || '');
+            \\    var idx = all.indexOf(own);
+            \\    return normText(idx >= 0 ? (all.slice(0, idx) + all.slice(idx + own.length)) : all).slice(0, 160);
+            \\  }
+            \\  function computeDomPath(el) {
+            \\    var parts = [], node = el, depth = 0;
+            \\    while (node && node.nodeType === 1 && depth < 6) {
+            \\      var seg = node.tagName.toLowerCase();
+            \\      if (node.id) { parts.unshift(seg + '#' + node.id); break; }
+            \\      var cls = (typeof node.className === 'string' ? node.className.trim().split(/\s+/)[0] : '');
+            \\      parts.unshift(cls ? (seg + '.' + cls) : seg);
+            \\      node = node.parentElement; depth++;
+            \\    }
+            \\    return parts.join('>');
+            \\  }
+            \\  function sig(el) { return { role: computeRole(el), name: computeName(el), nearby_text: computeNearbyText(el), dom_path: computeDomPath(el) }; }
+            \\  function rec(e) {
+            \\    var log = window.__kuri_recording;
+            \\    if (e.type === 'click') {
+            \\      window.__kuri_last_input_el = null;
+            \\      log.push({ type: 'click', sig: sig(e.target), timestamp: Date.now(), value: '' });
+            \\      return;
+            \\    }
+            \\    if (e.target === window.__kuri_last_input_el && log.length) {
+            \\      var last = log[log.length - 1];
+            \\      last.type = e.type; last.value = e.target.value || ''; last.timestamp = Date.now();
+            \\    } else {
+            \\      log.push({ type: e.type, sig: sig(e.target), timestamp: Date.now(), value: e.target.value || '' });
+            \\      window.__kuri_last_input_el = e.target;
+            \\    }
+            \\  }
             \\  document.addEventListener('click', rec, true);
             \\  document.addEventListener('input', rec, true);
             \\  document.addEventListener('change', rec, true);
@@ -8558,19 +8901,7 @@ fn handleRecording(request: *std.http.Server.Request, arena: std.mem.Allocator, 
             \\  return JSON.stringify(rec);
             \\})()
         ;
-        const escaped = jsonEscapeAlloc(arena, js) orelse {
-            resp.sendError(request, 500, "Internal Server Error");
-            return;
-        };
-        const params = std.fmt.allocPrint(arena, "{{\"expression\":\"{s}\",\"returnByValue\":true}}", .{escaped}) catch {
-            resp.sendError(request, 500, "Internal Server Error");
-            return;
-        };
-        const response = client.send(arena, protocol.Methods.runtime_evaluate, params) catch {
-            resp.sendError(request, 502, "CDP command failed");
-            return;
-        };
-        const val = extractSimpleJsonString(response, 0, "\"value\"") orelse "[]";
+        const val = evalValueString(arena, client, js) orelse "[]";
         const body = std.fmt.allocPrint(arena, "{{\"ok\":true,\"action\":\"recording\",\"mode\":\"stop\",\"events\":{s}}}", .{val}) catch {
             resp.sendError(request, 500, "Internal Server Error");
             return;
@@ -8773,6 +9104,7 @@ fn handleDiffUrl(request: *std.http.Server.Request, arena: std.mem.Allocator, br
         resp.sendError(request, 502, "Navigation to url1 failed");
         return;
     };
+    bumpGenerationLocked(bridge, tab_id);
     // Wait for page load
     const wait_js = "(function() { return document.readyState; })()";
     const escaped_wait = jsonEscapeAlloc(arena, wait_js) orelse {
@@ -8802,6 +9134,7 @@ fn handleDiffUrl(request: *std.http.Server.Request, arena: std.mem.Allocator, br
         resp.sendError(request, 502, "Navigation to url2 failed");
         return;
     };
+    bumpGenerationLocked(bridge, tab_id);
     _ = client.send(arena, protocol.Methods.runtime_evaluate, wait_params) catch {};
     const snap2_response = client.send(arena, protocol.Methods.accessibility_get_full_tree, null) catch {
         resp.sendError(request, 502, "Failed to get snapshot for url2");
@@ -9041,83 +9374,6 @@ fn handleScreenshotSom(request: *std.http.Server.Request, arena: std.mem.Allocat
     resp.sendJson(request, body);
 }
 
-// --- Smart Diff (Snapshot Changes) ---
-
-fn handleSnapshotChanges(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
-    const tab_id = requireEffectiveTabId(arena, request, bridge) orelse return;
-    const client = bridge.getCdpClient(tab_id) orelse {
-        resp.sendError(request, 404, "Tab not found");
-        return;
-    };
-    rememberCurrentTab(request, bridge, tab_id);
-
-    // Step 1: Get previous snapshot text from JS-side storage
-    const prev_text = evalValueString(arena, client, "(function() { return window.__kuri_prev_snapshot || ''; })()") orelse "";
-
-    // Step 2: Take new snapshot via a11y tree
-    const raw_response = client.send(arena, protocol.Methods.accessibility_get_full_tree, null) catch {
-        resp.sendError(request, 502, "CDP command failed");
-        return;
-    };
-    const a11y = @import("../snapshot/a11y.zig");
-    const nodes = parseA11yNodes(arena, raw_response) catch {
-        resp.sendError(request, 500, "Failed to parse a11y tree");
-        return;
-    };
-    const snapshot = a11y.buildSnapshot(nodes, .{ .compact = true }, arena) catch {
-        resp.sendError(request, 500, "Failed to build snapshot");
-        return;
-    };
-    const new_text = a11y.formatCompact(snapshot, arena) catch {
-        resp.sendError(request, 500, "Failed to format snapshot");
-        return;
-    };
-
-    // Step 3: Store new snapshot as previous
-    const store_escaped = jsonEscapeAlloc(arena, new_text) orelse {
-        resp.sendError(request, 500, "Internal Server Error");
-        return;
-    };
-    const store_js = std.fmt.allocPrint(arena,
-        \\(function() {{ window.__kuri_prev_snapshot = "{s}"; return "ok"; }})()
-    , .{store_escaped}) catch {
-        resp.sendError(request, 500, "Internal Server Error");
-        return;
-    };
-    _ = evalValueString(arena, client, store_js);
-
-    // Step 4: Diff line by line using JS to avoid Zig ArrayList API issues
-    // We do a simple JS-based diff since both texts are available
-    const escaped_prev = jsonEscapeAlloc(arena, prev_text) orelse {
-        resp.sendError(request, 500, "Internal Server Error");
-        return;
-    };
-    const escaped_new = jsonEscapeAlloc(arena, new_text) orelse {
-        resp.sendError(request, 500, "Internal Server Error");
-        return;
-    };
-    const diff_js = std.fmt.allocPrint(arena,
-        \\(function() {{
-        \\  var prev = "{s}".split("\n").filter(function(l) {{ return l.length > 0; }});
-        \\  var curr = "{s}".split("\n").filter(function(l) {{ return l.length > 0; }});
-        \\  var prevSet = new Set(prev);
-        \\  var currSet = new Set(curr);
-        \\  var added = curr.filter(function(l) {{ return !prevSet.has(l); }});
-        \\  var removed = prev.filter(function(l) {{ return !currSet.has(l); }});
-        \\  var unchanged = curr.filter(function(l) {{ return prevSet.has(l); }}).length;
-        \\  return JSON.stringify({{added:added,removed:removed,unchanged_count:unchanged}});
-        \\}})()
-    , .{ escaped_prev, escaped_new }) catch {
-        resp.sendError(request, 500, "Internal Server Error");
-        return;
-    };
-    const diff_result = evalValueString(arena, client, diff_js) orelse {
-        resp.sendError(request, 502, "Diff computation failed");
-        return;
-    };
-    resp.sendJson(request, diff_result);
-}
-
 // --- Recording Export ---
 
 fn handleRecordingExport(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
@@ -9135,9 +9391,9 @@ fn handleRecordingExport(request: *std.http.Server.Request, arena: std.mem.Alloc
         \\  var commands = [];
         \\  rec.forEach(function(e) {
         \\    if (e.type === 'click') {
-        \\      commands.push({path:'/action',action:'click',ref:e.target});
+        \\      commands.push({path:'/action',action:'click',signature:e.sig});
         \\    } else if (e.type === 'input' || e.type === 'change') {
-        \\      commands.push({path:'/action',action:'fill',ref:e.target,value:e.value||''});
+        \\      commands.push({path:'/action',action:'fill',signature:e.sig,value:e.value||''});
         \\    }
         \\  });
         \\  return JSON.stringify({format:'batch',commands:commands,count:commands.length});
@@ -9148,6 +9404,225 @@ fn handleRecordingExport(request: *std.http.Server.Request, arena: std.mem.Alloc
         return;
     };
     resp.sendJson(request, val);
+}
+
+const ReplayCommand = struct {
+    path: []const u8 = "/action",
+    action: []const u8,
+    signature: @import("../snapshot/replay.zig").Signature = .{ .role = "", .name = "" },
+    value: ?[]const u8 = null,
+};
+
+const ReplayRequest = struct {
+    format: []const u8 = "batch",
+    commands: []ReplayCommand,
+    continue_on_failure: bool = false,
+    limit: ?usize = null,
+};
+
+const ReplayStepResult = struct {
+    index: usize,
+    action: []const u8,
+    status: []const u8, // "ok" | "healed" | "needs_attention"
+    resolved_ref: ?[]const u8 = null,
+    candidate_count: ?usize = null,
+    diff: ?[]const u8 = null,
+    reason: ?[]const u8 = null,
+};
+
+const ReplayReport = struct {
+    ok: bool,
+    total: usize,
+    succeeded: usize,
+    healed: usize,
+    needs_attention: []const usize,
+    steps: []const ReplayStepResult,
+};
+
+const max_replay_steps: usize = 500;
+
+/// click/fill/type/check/uncheck/select/dblclick/press can visibly change the
+/// a11y tree; focus/hover/blur/scroll generally don't. Used only to decide
+/// whether an empty post-action diff is worth flagging as low-confidence --
+/// never to fail a step outright (there's no recorded "expected diff" to
+/// compare against, so this is an observability hint, not verification).
+fn isMutatingActionKind(kind: @import("../cdp/actions.zig").ActionKind) bool {
+    return switch (kind) {
+        .click, .fill, .type, .check, .uncheck, .select, .dblclick, .press => true,
+        .focus, .hover, .blur, .scroll => false,
+    };
+}
+
+fn recordReplayAttention(arena: std.mem.Allocator, steps: *std.ArrayList(ReplayStepResult), needs_attention: *std.ArrayList(usize), i: usize, action: []const u8, reason: []const u8, candidate_count: ?usize) void {
+    steps.append(arena, .{ .index = i, .action = action, .status = "needs_attention", .candidate_count = candidate_count, .reason = reason }) catch {};
+    needs_attention.append(arena, i) catch {};
+}
+
+/// Self-healing 0-token replay: given commands shaped like /recording/export's
+/// output (signature instead of a stale ref), re-resolve each step's element
+/// structurally against a fresh snapshot, act, and report what happened.
+/// No LLM anywhere in this path.
+fn handleReplay(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *Bridge) void {
+    const tab_id = requireEffectiveTabId(arena, request, bridge) orelse return;
+    const client = bridge.getCdpClient(tab_id) orelse {
+        resp.sendError(request, 404, "Tab not found");
+        return;
+    };
+    rememberCurrentTab(request, bridge, tab_id);
+
+    const body = readRequestBody(request, arena) orelse {
+        resp.sendError(request, 400, "Missing request body");
+        return;
+    };
+
+    const parsed = std.json.parseFromSliceLeaky(ReplayRequest, arena, body, .{ .ignore_unknown_fields = true }) catch {
+        resp.sendError(request, 400, "Invalid replay request JSON");
+        return;
+    };
+    if (parsed.commands.len == 0) {
+        resp.sendError(request, 400, "No commands to replay");
+        return;
+    }
+    if (parsed.commands.len > max_replay_steps) {
+        resp.sendError(request, 400, "Too many replay steps (max 500)");
+        return;
+    }
+
+    const a11y = @import("../snapshot/a11y.zig");
+    const replay = @import("../snapshot/replay.zig");
+    const dispatch = @import("../cdp/dispatch.zig");
+    const actions = @import("../cdp/actions.zig");
+
+    // Seed the diff baseline so step 1's diff is a clean delta rather than
+    // "everything as an addition" against whatever /diff/snapshot last
+    // stored. A failure here means the tab is unreachable -- surface that
+    // now rather than failing N times more confusingly in the loop below.
+    _ = computeCompactDiff(arena, bridge, tab_id, client, parsed.limit) catch {
+        resp.sendError(request, 502, "Failed to establish replay baseline (tab unreachable?)");
+        return;
+    };
+
+    var steps: std.ArrayList(ReplayStepResult) = .empty;
+    var needs_attention: std.ArrayList(usize) = .empty;
+    var succeeded: usize = 0;
+    var healed: usize = 0;
+
+    for (parsed.commands, 0..) |cmd, i| {
+        const kind = actions.ActionKind.fromString(cmd.action) orelse {
+            recordReplayAttention(arena, &steps, &needs_attention, i, cmd.action, "unknown action", null);
+            if (!parsed.continue_on_failure) break;
+            continue;
+        };
+
+        // scroll/press are document-scoped and ref-less -- there's no element
+        // signature to resolve, so dispatch them directly (same as
+        // handleAction/handleBatch do before ever touching ref resolution).
+        if (kind == .scroll or kind == .press) {
+            const expr = if (kind == .scroll)
+                std.fmt.allocPrint(arena, "{{\"expression\":\"window.scrollBy(0, 500) || 'scrolled'\",\"returnByValue\":true}}", .{}) catch null
+            else
+                std.fmt.allocPrint(arena, "{{\"expression\":\"document.dispatchEvent(new KeyboardEvent('keydown', {{key: '{s}'}})) || 'pressed'\",\"returnByValue\":true}}", .{cmd.value orelse ""}) catch null;
+            if (expr) |e| _ = client.send(arena, protocol.Methods.runtime_evaluate, e) catch {};
+            const diff = computeCompactDiff(arena, bridge, tab_id, client, parsed.limit) catch null;
+            steps.append(arena, .{ .index = i, .action = cmd.action, .status = "ok", .diff = diff }) catch {};
+            succeeded += 1;
+            continue;
+        }
+
+        // Fresh snapshot for resolution -- same pipeline computeCompactDiff
+        // uses internally, fetched separately here because resolution must
+        // happen BEFORE acting (computeCompactDiff's own fetch happens
+        // after, to verify).
+        const raw_response = client.send(arena, protocol.Methods.accessibility_get_full_tree, null) catch {
+            recordReplayAttention(arena, &steps, &needs_attention, i, cmd.action, "snapshot failed (tab unreachable?)", null);
+            if (!parsed.continue_on_failure) break;
+            continue;
+        };
+        const current = parseA11yNodes(arena, raw_response) catch {
+            recordReplayAttention(arena, &steps, &needs_attention, i, cmd.action, "snapshot parse failed", null);
+            if (!parsed.continue_on_failure) break;
+            continue;
+        };
+
+        // Deliberately NOT buildSnapshot here: its hierarchy mode renormalizes
+        // depth across filtered wrapper nodes (e.g. a <tr> between two <td>s),
+        // which collapses different rows' cells onto the same depth and
+        // breaks the nearby_text boundary walk below. Raw parseA11yNodes
+        // depth is true DOM nesting depth -- exactly what row/group
+        // disambiguation needs -- and resolution never needs buildSnapshot's
+        // ref-string formatting (the resolved node's backend_node_id is used
+        // directly).
+        const resolution = replay.resolveSignature(current, cmd.signature, arena) catch {
+            recordReplayAttention(arena, &steps, &needs_attention, i, cmd.action, "resolution error", null);
+            if (!parsed.continue_on_failure) break;
+            continue;
+        };
+
+        var resolved_node: a11y.A11yNode = undefined;
+        var was_healed: bool = false;
+        switch (resolution) {
+            .unique => |u| {
+                resolved_node = u.node;
+                was_healed = u.healed;
+            },
+            .ambiguous => |cands| {
+                recordReplayAttention(arena, &steps, &needs_attention, i, cmd.action, "ambiguous match", cands.len);
+                if (!parsed.continue_on_failure) break;
+                continue;
+            },
+            .none => {
+                recordReplayAttention(arena, &steps, &needs_attention, i, cmd.action, "no match", 0);
+                if (!parsed.continue_on_failure) break;
+                continue;
+            },
+        }
+
+        const backend_node_id = resolved_node.backend_node_id orelse {
+            recordReplayAttention(arena, &steps, &needs_attention, i, cmd.action, "resolved node has no backend id", null);
+            if (!parsed.continue_on_failure) break;
+            continue;
+        };
+
+        const dispatch_result = dispatch.dispatchActionOnBackendNode(arena, client, backend_node_id, kind, cmd.value, true);
+        switch (dispatch_result) {
+            .err => |e| {
+                recordReplayAttention(arena, &steps, &needs_attention, i, cmd.action, e.message, null);
+                if (!parsed.continue_on_failure) break;
+                continue;
+            },
+            .outcome => {},
+        }
+
+        const diff = computeCompactDiff(arena, bridge, tab_id, client, parsed.limit) catch null;
+        var reason: ?[]const u8 = null;
+        if (isMutatingActionKind(kind) and diff != null and diff.?.len == 0) {
+            reason = "no observable change after a mutating action (low confidence)";
+        }
+        steps.append(arena, .{
+            .index = i,
+            .action = cmd.action,
+            .status = if (was_healed) "healed" else "ok",
+            .resolved_ref = resolved_node.ref,
+            .diff = diff,
+            .reason = reason,
+        }) catch {};
+        succeeded += 1;
+        if (was_healed) healed += 1;
+    }
+
+    const report = ReplayReport{
+        .ok = true,
+        .total = parsed.commands.len,
+        .succeeded = succeeded,
+        .healed = healed,
+        .needs_attention = needs_attention.items,
+        .steps = steps.items,
+    };
+    const body_out = std.json.Stringify.valueAlloc(arena, report, .{}) catch {
+        resp.sendError(request, 500, "Internal Server Error");
+        return;
+    };
+    resp.sendJson(request, body_out);
 }
 
 test "screenshot routes match" {
@@ -9558,13 +10033,14 @@ test "total endpoint count" {
         "/evalhandle",        "/diff/url",
         // Advanced features
                    "/cache/set",          "/cache/get",       "/cache/clear",           "/cache/list",
-        "/screenshot/som",    "/snapshot/changes",    "/recording/export",
+        "/screenshot/som",    "/snapshot/changes",    "/recording/export",    "/replay",
+        "/connect/save",      "/connect/load",        "/connect/list",        "/connect/delete",
         // Collector retrieval endpoints
           "/expose/calls",
     };
     const route_variant_count = @typeInfo(Route).@"enum".field_names.len;
     try std.testing.expectEqual(route_variant_count, routes.len);
-    try std.testing.expectEqual(@as(usize, 148), routes.len);
+    try std.testing.expectEqual(@as(usize, 153), routes.len);
 }
 
 test "buildGetExpression title" {
@@ -10162,4 +10638,67 @@ test "resolveEffectiveTabIdAlloc resolves session across representative handler 
         );
         try std.testing.expect(resolveEffectiveTabIdAlloc(allocator, &request, &bridge) == null);
     }
+}
+test "generation bump invalidates stale refs after navigation" {
+    var bridge = Bridge.init(std.testing.allocator);
+    defer bridge.deinit();
+    const a11y = @import("../snapshot/a11y.zig");
+
+    // First page: one button, ref cache populated at generation 0 ("e42").
+    const nodes1 = [_]a11y.A11yNode{
+        .{ .ref = "e42", .role = "button", .name = "Save", .value = "", .backend_node_id = 42, .depth = 0 },
+    };
+    {
+        bridge.mu.lock();
+        defer bridge.mu.unlock();
+        try refreshRefCacheLocked(&bridge, "tab1", &nodes1);
+    }
+    try std.testing.expectEqual(@as(u32, 0), currentGeneration(&bridge, "tab1"));
+
+    // Navigation happens.
+    bumpGenerationLocked(&bridge, "tab1");
+    try std.testing.expectEqual(@as(u32, 1), currentGeneration(&bridge, "tab1"));
+
+    // New page loaded; CDP happens to reuse backend id 42 for an unrelated
+    // element. A fresh snapshot at generation 1 mints "e1_42" for it, not "e42".
+    const nodes2 = [_]a11y.A11yNode{
+        .{ .ref = "e1_42", .role = "button", .name = "Delete Account", .value = "", .backend_node_id = 42, .depth = 0 },
+    };
+    {
+        bridge.mu.lock();
+        defer bridge.mu.unlock();
+        try refreshRefCacheLocked(&bridge, "tab1", &nodes2);
+    }
+
+    // The pre-navigation ref "e42" must now miss — not silently resolve to
+    // the new page's backend id 42 (which would silently click "Delete
+    // Account" for an agent that acted on a ref it saw before the navigation).
+    bridge.mu.lockShared();
+    const cache = bridge.snapshots.getPtr("tab1");
+    const stale = if (cache) |c| c.refs.get("e42") else null;
+    const fresh = if (cache) |c| c.refs.get("e1_42") else null;
+    bridge.mu.unlockShared();
+    try std.testing.expectEqual(@as(?u32, null), stale);
+    try std.testing.expectEqual(@as(?u32, 42), fresh);
+}
+
+test "refreshRefCacheLocked preserves generation across its own clear()" {
+    var bridge = Bridge.init(std.testing.allocator);
+    defer bridge.deinit();
+    const a11y = @import("../snapshot/a11y.zig");
+
+    bumpGenerationLocked(&bridge, "tab1");
+    bumpGenerationLocked(&bridge, "tab1");
+    try std.testing.expectEqual(@as(u32, 2), currentGeneration(&bridge, "tab1"));
+
+    const nodes = [_]a11y.A11yNode{
+        .{ .ref = "e2_7", .role = "link", .name = "Home", .value = "", .backend_node_id = 7, .depth = 0 },
+    };
+    bridge.mu.lock();
+    try refreshRefCacheLocked(&bridge, "tab1", &nodes);
+    bridge.mu.unlock();
+
+    // A snapshot refresh (which clears and repopulates the ref map) must not
+    // reset the generation counter — only a real navigation may bump it.
+    try std.testing.expectEqual(@as(u32, 2), currentGeneration(&bridge, "tab1"));
 }

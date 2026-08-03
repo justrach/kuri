@@ -1,0 +1,8 @@
+name = "kuri-download-proxy"
+main = "src/index.mjs"
+compatibility_date = "2026-05-14"
+workers_dev = false
+
+routes = [
+  { pattern = "kuri.trilok.ai/download*", zone_name = "trilok.ai" },
+]

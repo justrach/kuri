@@ -44,13 +44,14 @@ Benchmarks must explicitly disclose cache state.
 
 ## Current Browser Baselines
 
-Last refreshed from GitHub on 2026-04-26. Recheck upstream before changing comparative claims.
+Last refreshed from GitHub on 2026-05-26 for Webwright and 2026-04-26 for the other projects. Recheck upstream before changing comparative claims.
 
 | Project | What it is | Current signal | How Kuri compares today |
 |---|---|---|---|
 | Obscura | Rust headless browser engine for agents/scraping | README claims V8, CDP, Puppeteer/Playwright compatibility, stealth mode, and Chrome-replacement metrics. The repo is split into `obscura-dom`, `obscura-net`, `obscura-browser`, `obscura-js`, `obscura-cdp`, and `obscura-cli`; `obscura-js` uses `deno_core` and creates a V8 startup snapshot. | `kuri-browser` is behind on engine completeness, stealth, and broad CDP. It has QuickJS-backed eval and a minimal CDP shim only. Do not claim parity. |
 | Lightpanda | Zig headless browser designed for AI/automation | README says it is beta, uses V8, has DOM APIs, Ajax, cookies, proxy, network interception, CDP/websocket server, Puppeteer support, MCP, and a transparent 933-page crawler benchmark. Its `build.zig.zon` depends on `lightpanda-io/zig-v8-fork`, libcurl, html5ever-related pieces, and other browser infrastructure. | `kuri-browser` is architecturally closer because it is a Zig-native experiment, but it is much smaller: QuickJS, no native layout/paint, minimal CDP, no broad Web API matrix. |
 | Vercel agent-browser | Rust browser automation CLI/daemon for AI agents | It is not a new browser engine. It drives Chrome for Testing or detected Chrome via CDP, has broad CLI actions, snapshots, screenshots, PDF, HAR, sessions/profiles, React/Web Vitals tooling, and benchmarks Node daemon vs Rust daemon in Vercel Sandbox. | Main `kuri` is the closer comparison because both automate Chrome/CDP. `kuri-browser` is not comparable as a Chrome replacement yet. |
+| Microsoft Webwright | Python SWE-style browser agent harness that has the model write and rerun Playwright scripts | README claims state-of-the-art results on Online-Mind2Web and Odysseys with a 100-step budget, plus plugin manifests for Codex and Claude Code. It is a Playwright/Chromium agent loop, not a browser engine or CDP daemon. Last checked `microsoft/Webwright` main at `1236f4d31186610d23badd997917f86712fe8bed` (2026-05-12). | Compare against Kuri only as an agent workflow / browser-tool substrate. Do not compare Webwright's task-success scores to `kuri-browser` native rendering or to Kuri token-output microbenchmarks unless the workload, model, judge, cache policy, and step budget match. |
 
 Source URLs to recheck:
 
@@ -59,12 +60,14 @@ Source URLs to recheck:
 - https://github.com/lightpanda-io/demo/blob/main/BENCHMARKS.md
 - https://github.com/vercel-labs/agent-browser
 - https://github.com/vercel-labs/agent-browser/tree/main/benchmarks
+- https://github.com/microsoft/Webwright
 
 ## Competitive Comparison Rules
 
 - Obscura comparison must separate upstream claims from local reproduction. Its README currently does not provide enough hardware/cache/run detail for its headline table to be treated as verified here.
 - Lightpanda comparison may cite its benchmark protocol because it publishes hardware, Chrome version, commit, page count, measurement tools, and commands. Still disclose that the upstream benchmark is their environment unless rerun locally.
 - Agent-browser comparison must not be framed as native-browser parity. It benchmarks daemon overhead while still using Chrome, so compare it to Kuri's Chrome/CDP HTTP-agent path, not to `kuri-browser` native rendering.
+- Webwright comparison must distinguish observation-payload measurements from full agent success. A Playwright `aria_snapshot()` capture is a Webwright-style substrate baseline, not the Webwright LLM loop; full comparison requires the same task set, model, judge, step budget, browser engine, cache policy, and repeated runs.
 - For any new comparison table, include a `Not Comparable Yet` row when workloads differ.
 - If a score increases because a fallback path was added, report both native-only and fallback-backed interpretation.
 
