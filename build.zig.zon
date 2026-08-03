@@ -7,9 +7,6 @@
             .hash = "quickjs_ng-0.0.0-0cZnA8XHAwCc95T1GAebWrw-SGEwp1Y0fUAmilP8xGuS",
         },
         .kuri_mobile = .{ .path = "kuri-mobile" },
-        // Local sibling library: encrypted secret/connection vault used by the
-        // `kuri connect` feature for persisted, encrypted browser logins.
-        .nanostore = .{ .path = "../nanostore" },
     },
     .fingerprint = 0xb63ec72d77641494,
     .minimum_zig_version = "0.17.0-dev.813+2153f8143",

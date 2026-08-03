@@ -4,6 +4,9 @@ All notable changes to kuri are documented here.
 
 ## [Unreleased]
 
+### Removed
+- **`connect` feature and nanostore dependency** — the `/connect/*` routes, `kuri-agent connect`, `kuri-connect-broker`, and relay-fetch mode shipped in v0.5.1 are removed from main. They depended on the private `justrach/nanostore` sibling library, which made every build of kuri require a private checkout plus a `NANOSTORE_PAT` secret in CI, and its pinned commit did not compile on the project's Zig 0.17.0-dev toolchain. Building kuri now needs only this repo. `KURI_VAULT_PASSPHRASE`, `KURI_RELAY`, and `KURI_BROKER*` no longer have any effect.
+
 ## [0.5.1] — 2026-07-31
 
 ### Features

@@ -11,14 +11,6 @@ pub fn build(b: *std.Build) void {
     const build_options = b.addOptions();
     build_options.addOption([]const u8, "version", version);
 
-    // nanostore: encrypted secret/connection vault (sibling library), used by
-    // the `kuri connect` feature for persisted, encrypted browser logins.
-    const nanostore_dep = b.dependency("nanostore", .{
-        .target = target,
-        .optimize = optimize,
-    });
-    const nanostore_mod = nanostore_dep.module("nanostore");
-
     // Main executable
     const exe = b.addExecutable(.{
         .name = "kuri",
@@ -30,7 +22,6 @@ pub fn build(b: *std.Build) void {
         }),
     });
     exe.root_module.addOptions("build_options", build_options);
-    exe.root_module.addImport("nanostore", nanostore_mod);
 
     b.installArtifact(exe);
 
@@ -51,7 +42,6 @@ pub fn build(b: *std.Build) void {
         }),
     });
     unit_tests.root_module.addOptions("build_options", build_options);
-    unit_tests.root_module.addImport("nanostore", nanostore_mod);
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&b.addRunArtifact(unit_tests).step);
 
@@ -179,7 +169,6 @@ pub fn build(b: *std.Build) void {
         }),
     });
     agent_exe.root_module.addOptions("build_options", build_options);
-    agent_exe.root_module.addImport("nanostore", nanostore_mod);
     b.installArtifact(agent_exe);
     const run_agent = b.addRunArtifact(agent_exe);
     run_agent.step.dependOn(b.getInstallStep());
@@ -216,27 +205,6 @@ pub fn build(b: *std.Build) void {
     run_mcp.addPassthruArgs();
     const mcp_step = b.step("mcp", "Run kuri-mcp MCP server");
     mcp_step.dependOn(&run_mcp.step);
-
-    // kuri-connect-broker: key-holding broker daemon for the `connect` feature.
-    // Holds KURI_VAULT_PASSPHRASE so the agent never does, and exposes only
-    // inject/list/save/delete over a token-gated loopback API.
-    const broker_exe = b.addExecutable(.{
-        .name = "kuri-connect-broker",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/connect_broker.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-        }),
-    });
-    broker_exe.root_module.addOptions("build_options", build_options);
-    broker_exe.root_module.addImport("nanostore", nanostore_mod);
-    b.installArtifact(broker_exe);
-    const run_broker = b.addRunArtifact(broker_exe);
-    run_broker.step.dependOn(b.getInstallStep());
-    run_broker.addPassthruArgs();
-    const broker_step = b.step("broker", "Run kuri-connect-broker daemon");
-    broker_step.dependOn(&run_broker.step);
 
     // kuri-gateway: managed-service control plane (Track 1). Spawns/leases one
     // `kuri` worker (its own Chrome) per session, exposes an async task API, and

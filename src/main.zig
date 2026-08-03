@@ -325,7 +325,6 @@ test {
     _ = @import("test/integration.zig");
     _ = @import("storage/local.zig");
     _ = @import("storage/auth_profiles.zig");
-    _ = @import("storage/connect_store.zig");
     _ = @import("util/tls.zig");
     _ = @import("update.zig");
 }

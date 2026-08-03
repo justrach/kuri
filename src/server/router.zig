@@ -19,7 +19,6 @@ const BindingCallRecord = @import("../cdp/client.zig").BindingCallRecord;
 const NetworkRecord = @import("../cdp/client.zig").NetworkRecord;
 const jsonscan = @import("../cdp/jsonscan.zig");
 const auth_profiles = @import("../storage/auth_profiles.zig");
-const connect_store = @import("../storage/connect_store.zig");
 const url_validator = @import("../crawler/validator.zig");
 const telemetry = @import("../telemetry.zig");
 
@@ -120,10 +119,6 @@ pub const Route = enum {
     har_stop,
     har_status,
     har_replay,
-    connect_save,
-    connect_load,
-    connect_list,
-    connect_delete,
     replay,
     close,
     cookies,
@@ -276,10 +271,6 @@ pub const route_table = std.StaticStringMap(Route).initComptime(.{
     .{ "/har/stop", .har_stop },
     .{ "/har/status", .har_status },
     .{ "/har/replay", .har_replay },
-    .{ "/connect/save", .connect_save },
-    .{ "/connect/load", .connect_load },
-    .{ "/connect/list", .connect_list },
-    .{ "/connect/delete", .connect_delete },
     .{ "/replay", .replay },
     .{ "/close", .close },
     .{ "/cookies", .cookies },
@@ -441,10 +432,6 @@ fn route(request: *std.http.Server.Request, arena: std.mem.Allocator, bridge: *B
         .har_stop => handleHarStop(request, arena, bridge),
         .har_status => handleHarStatus(request, arena, bridge),
         .har_replay => handleHarReplay(request, arena, bridge),
-        .connect_save => handleConnectSave(request, arena, bridge, cfg),
-        .connect_load => handleConnectLoad(request, arena, bridge, cfg),
-        .connect_list => handleConnectList(request, arena, cfg),
-        .connect_delete => handleConnectDelete(request, arena, cfg),
         .replay => handleReplay(request, arena, bridge),
         .close => handleClose(request, arena, bridge),
         .cookies => handleCookies(request, arena, bridge),
@@ -3490,224 +3477,6 @@ fn handleAuthProfileDelete(
     };
     const escaped_name = jsonEscapeAlloc(arena, name) orelse {
         resp.sendError(request, 500, "Failed to escape profile name");
-        return;
-    };
-    const body = std.fmt.allocPrint(arena, "{{\"status\":\"deleted\",\"name\":\"{s}\"}}", .{escaped_name}) catch {
-        resp.sendError(request, 500, "Internal Server Error");
-        return;
-    };
-    resp.sendJson(request, body);
-}
-
-// ---------------------------------------------------------------------------
-// `connect` feature: persisted, encrypted browser logins backed by nanostore.
-// Captures the same cookies + localStorage + sessionStorage snapshot as the
-// auth-profile handlers, but stores it AES-256-GCM-encrypted via connect_store.
-// ---------------------------------------------------------------------------
-
-fn handleConnectSave(
-    request: *std.http.Server.Request,
-    arena: std.mem.Allocator,
-    bridge: *Bridge,
-    cfg: Config,
-) void {
-    const target = request.head.target;
-    const tab_id = getQueryParam(target, "tab_id") orelse {
-        resp.sendError(request, 400, "Missing tab_id parameter");
-        return;
-    };
-    const name = getQueryParam(target, "name") orelse {
-        resp.sendError(request, 400, "Missing name parameter");
-        return;
-    };
-    const client = bridge.getCdpClient(tab_id) orelse {
-        resp.sendError(request, 404, "Tab not found");
-        return;
-    };
-
-    const origin = evalValueString(arena, client, "location.origin") orelse {
-        resp.sendError(request, 502, "Failed to determine page origin");
-        return;
-    };
-    const cookies_response = client.send(arena, protocol.Methods.network_get_cookies, null) catch {
-        resp.sendError(request, 502, "Failed to collect cookies");
-        return;
-    };
-    const cookies_json = extractJsonArrayField(cookies_response, "\"cookies\"") orelse {
-        resp.sendError(request, 502, "Failed to parse cookies");
-        return;
-    };
-    const local_storage = evalValueObject(
-        arena,
-        client,
-        "Object.fromEntries(Object.entries(localStorage))",
-    ) orelse "{}";
-    const session_storage = evalValueObject(
-        arena,
-        client,
-        "Object.fromEntries(Object.entries(sessionStorage))",
-    ) orelse "{}";
-    const escaped_name = jsonEscapeAlloc(arena, name) orelse {
-        resp.sendError(request, 500, "Failed to escape connection name");
-        return;
-    };
-    const escaped_origin = jsonEscapeAlloc(arena, origin) orelse {
-        resp.sendError(request, 500, "Failed to escape connection origin");
-        return;
-    };
-    const payload = std.fmt.allocPrint(
-        arena,
-        "{{\"version\":1,\"name\":\"{s}\",\"origin\":\"{s}\",\"saved_at\":{d},\"cookies\":{s},\"local_storage\":{s},\"session_storage\":{s}}}",
-        .{ escaped_name, escaped_origin, compat.timestampSeconds(), cookies_json, local_storage, session_storage },
-    ) catch {
-        resp.sendError(request, 500, "Failed to build connection payload");
-        return;
-    };
-
-    connect_store.saveSession(arena, cfg.state_dir, cfg.vault_passphrase, name, origin, payload) catch |err| {
-        resp.sendError(request, 500, @errorName(err));
-        return;
-    };
-    const body = std.fmt.allocPrint(
-        arena,
-        "{{\"status\":\"saved\",\"name\":\"{s}\",\"origin\":\"{s}\",\"encrypted\":true}}",
-        .{ escaped_name, escaped_origin },
-    ) catch {
-        resp.sendError(request, 500, "Internal Server Error");
-        return;
-    };
-    resp.sendJson(request, body);
-}
-
-fn handleConnectLoad(
-    request: *std.http.Server.Request,
-    arena: std.mem.Allocator,
-    bridge: *Bridge,
-    cfg: Config,
-) void {
-    const target = request.head.target;
-    const tab_id = getQueryParam(target, "tab_id") orelse {
-        resp.sendError(request, 400, "Missing tab_id parameter");
-        return;
-    };
-    const name = getQueryParam(target, "name") orelse {
-        resp.sendError(request, 400, "Missing name parameter");
-        return;
-    };
-    const client = bridge.getCdpClient(tab_id) orelse {
-        resp.sendError(request, 404, "Tab not found");
-        return;
-    };
-
-    const payload = connect_store.loadSession(arena, cfg.state_dir, cfg.vault_passphrase, name) catch |err| {
-        resp.sendError(request, 404, @errorName(err));
-        return;
-    };
-    const origin = extractSimpleJsonString(payload, 0, "\"origin\"") orelse {
-        resp.sendError(request, 500, "Invalid connection payload");
-        return;
-    };
-    const cookies_json = extractJsonArrayField(payload, "\"cookies\"") orelse "[]";
-    const local_storage = extractJsonObjectField(payload, "\"local_storage\"") orelse "{}";
-    const session_storage = extractJsonObjectField(payload, "\"session_storage\"") orelse "{}";
-
-    const current_origin = evalValueString(arena, client, "location.origin");
-    if (current_origin == null or !std.mem.eql(u8, current_origin.?, origin)) {
-        const nav_params = std.fmt.allocPrint(arena, "{{\"url\":\"{s}\"}}", .{origin}) catch {
-            resp.sendError(request, 500, "Failed to build navigation parameters");
-            return;
-        };
-        _ = client.send(arena, protocol.Methods.page_navigate, nav_params) catch {
-            resp.sendError(request, 502, "Failed to navigate to connection origin");
-            return;
-        };
-        bumpGenerationLocked(bridge, tab_id);
-        _ = client.waitForEvent(arena, "Page.loadEventFired", 1_000);
-    }
-
-    const set_cookies = std.fmt.allocPrint(arena, "{{\"cookies\":{s}}}", .{cookies_json}) catch {
-        resp.sendError(request, 500, "Failed to build cookie restore payload");
-        return;
-    };
-    _ = client.send(arena, protocol.Methods.network_set_cookies, set_cookies) catch {
-        resp.sendError(request, 502, "Failed to restore cookies");
-        return;
-    };
-    if (!applyStorageSnapshot(arena, client, "localStorage", local_storage)) {
-        resp.sendError(request, 502, "Failed to restore localStorage");
-        return;
-    }
-    if (!applyStorageSnapshot(arena, client, "sessionStorage", session_storage)) {
-        resp.sendError(request, 502, "Failed to restore sessionStorage");
-        return;
-    }
-    const escaped_name = jsonEscapeAlloc(arena, name) orelse {
-        resp.sendError(request, 500, "Failed to escape connection name");
-        return;
-    };
-    const escaped_origin = jsonEscapeAlloc(arena, origin) orelse {
-        resp.sendError(request, 500, "Failed to escape connection origin");
-        return;
-    };
-    const body = std.fmt.allocPrint(
-        arena,
-        "{{\"status\":\"loaded\",\"name\":\"{s}\",\"origin\":\"{s}\"}}",
-        .{ escaped_name, escaped_origin },
-    ) catch {
-        resp.sendError(request, 500, "Internal Server Error");
-        return;
-    };
-    resp.sendJson(request, body);
-}
-
-fn handleConnectList(
-    request: *std.http.Server.Request,
-    arena: std.mem.Allocator,
-    cfg: Config,
-) void {
-    const names = connect_store.listSessions(arena, cfg.state_dir, cfg.vault_passphrase) catch |err| {
-        resp.sendError(request, 500, @errorName(err));
-        return;
-    };
-    var json_buf: std.ArrayList(u8) = .empty;
-    json_buf.appendSlice(arena, "{\"connections\":[") catch {
-        resp.sendError(request, 500, "Internal Server Error");
-        return;
-    };
-    for (names, 0..) |n, i| {
-        if (i > 0) json_buf.appendSlice(arena, ",") catch {};
-        const escaped = jsonEscapeAlloc(arena, n) orelse {
-            resp.sendError(request, 500, "Failed to encode connection name");
-            return;
-        };
-        json_buf.print(arena, "\"{s}\"", .{escaped}) catch {
-            resp.sendError(request, 500, "Internal Server Error");
-            return;
-        };
-    }
-    json_buf.appendSlice(arena, "]}") catch {
-        resp.sendError(request, 500, "Internal Server Error");
-        return;
-    };
-    resp.sendJson(request, json_buf.items);
-}
-
-fn handleConnectDelete(
-    request: *std.http.Server.Request,
-    arena: std.mem.Allocator,
-    cfg: Config,
-) void {
-    const target = request.head.target;
-    const name = getQueryParam(target, "name") orelse {
-        resp.sendError(request, 400, "Missing name parameter");
-        return;
-    };
-    connect_store.deleteSession(arena, cfg.state_dir, cfg.vault_passphrase, name) catch |err| {
-        resp.sendError(request, 404, @errorName(err));
-        return;
-    };
-    const escaped_name = jsonEscapeAlloc(arena, name) orelse {
-        resp.sendError(request, 500, "Failed to escape connection name");
         return;
     };
     const body = std.fmt.allocPrint(arena, "{{\"status\":\"deleted\",\"name\":\"{s}\"}}", .{escaped_name}) catch {
@@ -10034,13 +9803,12 @@ test "total endpoint count" {
         // Advanced features
                    "/cache/set",          "/cache/get",       "/cache/clear",           "/cache/list",
         "/screenshot/som",    "/snapshot/changes",    "/recording/export",    "/replay",
-        "/connect/save",      "/connect/load",        "/connect/list",        "/connect/delete",
         // Collector retrieval endpoints
           "/expose/calls",
     };
     const route_variant_count = @typeInfo(Route).@"enum".field_names.len;
     try std.testing.expectEqual(route_variant_count, routes.len);
-    try std.testing.expectEqual(@as(usize, 153), routes.len);
+    try std.testing.expectEqual(@as(usize, 149), routes.len);
 }
 
 test "buildGetExpression title" {

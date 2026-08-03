@@ -15,7 +15,6 @@ const CdpClient = @import("cdp/client.zig").CdpClient;
 const protocol = @import("cdp/protocol.zig");
 const a11y = @import("snapshot/a11y.zig");
 const util_json = @import("util/json.zig");
-const connect_store = @import("storage/connect_store.zig");
 
 const SESSION_FILE = ".kuri/session.json";
 const DEFAULT_CDP_PORT: u16 = 9222;
@@ -118,19 +117,6 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
-    // `fetch` via the nanostore relay needs no browser tab — handle it here,
-    // before the tab guard, so kuri can make authenticated API calls headlessly.
-    // Session headers (set via `set-header`) may carry sealed nano_sk_ tokens;
-    // the key-holding relay swaps them for real secrets on allowlisted hosts.
-    if (std.mem.eql(u8, cmd, "fetch")) {
-        if (compat.getenv("KURI_RELAY")) |relay| {
-            if (rest.len < 2) fatal("fetch: requires <method> <url> [--data <json>]\n", .{});
-            const fdata = parseFetchData(rest[2..]);
-            try cmdFetchViaRelay(arena, &session, relay, rest[0], rest[1], fdata);
-            return;
-        }
-    }
-
     if (session.cdp_url.len == 0) {
         jsonError("no tab attached. Run `kuri-agent use <ws_url>`", .{});
         std.process.exit(1);
@@ -224,8 +210,6 @@ pub fn main(init: std.process.Init) !void {
         try cmdWaitForTab(arena, port, &session);
     } else if (std.mem.eql(u8, cmd, "stealth")) {
         try cmdStealth(arena, &client);
-    } else if (std.mem.eql(u8, cmd, "connect")) {
-        try cmdConnect(arena, &client, session.cdp_url, rest);
     } else {
         fatal("unknown command '{s}'. Run kuri-agent with no args for help.", .{cmd});
     }
@@ -1286,40 +1270,6 @@ fn httpPostJson(arena: std.mem.Allocator, url: []const u8, body: []const u8) ![]
     return rbody.items;
 }
 
-/// `fetch` via the nanostore relay: build a {url,method,headers,body} spec from
-/// the session's extra headers (which carry sealed tokens) and POST it to the
-/// relay, which swaps sealed->real for allowlisted hosts and makes the real call.
-fn cmdFetchViaRelay(arena: std.mem.Allocator, session: *Session, relay: []const u8, method: []const u8, url: []const u8, data: ?[]const u8) !void {
-    var spec: std.ArrayList(u8) = .empty;
-    try spec.appendSlice(arena, "{\"url\":\"");
-    try spec.appendSlice(arena, try escapeForJson(arena, url));
-    try spec.appendSlice(arena, "\",\"method\":\"");
-    try spec.appendSlice(arena, try escapeForJson(arena, method));
-    try spec.appendSlice(arena, "\",\"headers\":{");
-    var it = session.extra_headers.iterator();
-    var first = true;
-    while (it.next()) |e| {
-        if (!first) try spec.appendSlice(arena, ",");
-        first = false;
-        try spec.print(arena, "\"{s}\":\"{s}\"", .{ try escapeForJson(arena, e.key_ptr.*), try escapeForJson(arena, e.value_ptr.*) });
-    }
-    try spec.appendSlice(arena, "}");
-    if (data) |d| {
-        try spec.appendSlice(arena, ",\"body\":\"");
-        try spec.appendSlice(arena, try escapeForJson(arena, d));
-        try spec.appendSlice(arena, "\"");
-    }
-    try spec.appendSlice(arena, "}");
-
-    const fetch_url = try std.fmt.allocPrint(arena, "http://{s}/fetch", .{relay});
-    const resp = httpPostJson(arena, fetch_url, spec.items) catch |err| {
-        jsonError("relay fetch failed: {s}", .{@errorName(err)});
-        std.process.exit(1);
-    };
-    compat.writeToStdout(resp);
-    compat.writeToStdout("\n");
-}
-
 fn cmdFetch(arena: std.mem.Allocator, client: *CdpClient, method: []const u8, url: []const u8, data: ?[]const u8) !void {
     var js: std.ArrayList(u8) = .empty;
     js.appendSlice(arena, "(async()=>{") catch {};
@@ -1601,212 +1551,6 @@ fn extractString(json: []const u8, start: usize, field: []const u8) ?[]const u8 
     return json[i..end];
 }
 
-// --- connect feature helpers (CDP capture/restore + nanostore storage) ------
-
-/// Build CDP Runtime.evaluate params for `expr` with returnByValue=true.
-fn evalParams(arena: std.mem.Allocator, expr: []const u8) []const u8 {
-    const escaped = escapeForJson(arena, expr) catch expr;
-    return std.fmt.allocPrint(arena, "{{\"expression\":\"{s}\",\"returnByValue\":true}}", .{escaped}) catch "{}";
-}
-
-/// Evaluate `expr` and return its string `value` from the CDP response.
-fn evalStringValue(arena: std.mem.Allocator, client: *CdpClient, expr: []const u8) ?[]const u8 {
-    const resp = client.send(arena, protocol.Methods.runtime_evaluate, evalParams(arena, expr)) catch return null;
-    return extractString(resp, 0, "\"value\"");
-}
-
-/// Return the balanced {…} or […] span immediately after `key` in `s`,
-/// respecting JSON string literals. Used to lift the cookies array / storage
-/// objects out of a CDP response without a full JSON parse.
-fn extractBalancedAfter(s: []const u8, key: []const u8) ?[]const u8 {
-    const kpos = std.mem.indexOf(u8, s, key) orelse return null;
-    var i = kpos + key.len;
-    while (i < s.len and s[i] != '{' and s[i] != '[') : (i += 1) {}
-    if (i >= s.len) return null;
-    const open = s[i];
-    const close: u8 = if (open == '{') '}' else ']';
-    var depth: usize = 0;
-    var in_str = false;
-    var esc = false;
-    var j = i;
-    while (j < s.len) : (j += 1) {
-        const c = s[j];
-        if (in_str) {
-            if (esc) {
-                esc = false;
-            } else if (c == '\\') {
-                esc = true;
-            } else if (c == '"') {
-                in_str = false;
-            }
-        } else if (c == '"') {
-            in_str = true;
-        } else if (c == open) {
-            depth += 1;
-        } else if (c == close) {
-            depth -= 1;
-            if (depth == 0) return s[i .. j + 1];
-        }
-    }
-    return null;
-}
-
-/// Restore a storage area (localStorage/sessionStorage) from a JSON object.
-fn restoreStorageSnapshot(arena: std.mem.Allocator, client: *CdpClient, which: []const u8, obj_json: []const u8) void {
-    const js = std.fmt.allocPrint(
-        arena,
-        "(()=>{{const o={s};Object.keys(o).forEach(k=>{s}.setItem(k,o[k]));}})()",
-        .{ obj_json, which },
-    ) catch return;
-    _ = client.send(arena, protocol.Methods.runtime_evaluate, evalParams(arena, js)) catch {};
-}
-
-/// `connect save|load|list|delete <name>` — persist/replay an encrypted browser
-/// login via nanostore. Shares the same vault (.kuri/connections.ns +
-/// KURI_VAULT_PASSPHRASE) as the server's /connect routes, so the two interoperate.
-/// Issue a GET to the broker and return the response body.
-fn brokerGet(arena: std.mem.Allocator, url: []const u8) ![]const u8 {
-    var client: std.http.Client = .{ .allocator = arena, .io = std.Io.Threaded.global_single_threaded.io() };
-    defer client.deinit();
-    const uri = try std.Uri.parse(url);
-    var req = try client.request(.GET, uri, .{ .redirect_behavior = .unhandled });
-    defer req.deinit();
-    try req.sendBodiless();
-    var response = try req.receiveHead(&.{});
-    var body: std.ArrayList(u8) = .empty;
-    var transfer_buf: [8192]u8 = undefined;
-    var decompress: std.http.Decompress = undefined;
-    var decompress_buf: [std.compress.flate.max_window_len]u8 = undefined;
-    const reader = response.readerDecompressing(&transfer_buf, &decompress, &decompress_buf);
-    try reader.appendRemainingUnlimited(arena, &body);
-    return body.items;
-}
-
-/// Route a `connect` op through the key-holding broker (this process never sees
-/// the passphrase). `cdp_url` is our own tab, which the broker injects into.
-fn connectViaBroker(arena: std.mem.Allocator, addr: []const u8, tok: []const u8, cdp_url: []const u8, sub: []const u8, rest: []const []const u8) !void {
-    var url: []const u8 = undefined;
-    if (std.mem.eql(u8, sub, "list")) {
-        url = try std.fmt.allocPrint(arena, "http://{s}/list?token={s}", .{ addr, tok });
-    } else if (std.mem.eql(u8, sub, "delete")) {
-        if (rest.len < 2) fatal("connect delete: requires <name>\n", .{});
-        url = try std.fmt.allocPrint(arena, "http://{s}/delete?token={s}&service={s}", .{ addr, tok, rest[1] });
-    } else if (std.mem.eql(u8, sub, "save") or std.mem.eql(u8, sub, "load")) {
-        if (rest.len < 2) fatal("connect {s}: requires <name>\n", .{sub});
-        url = try std.fmt.allocPrint(arena, "http://{s}/{s}?token={s}&service={s}&cdp={s}", .{ addr, sub, tok, rest[1], cdp_url });
-    } else {
-        fatal("connect: unknown subcommand '{s}' (use save|load|list|delete)\n", .{sub});
-    }
-    const body = brokerGet(arena, url) catch |err| {
-        jsonError("broker request failed: {s}", .{@errorName(err)});
-        std.process.exit(1);
-    };
-    compat.writeToStdout(body);
-    compat.writeToStdout("\n");
-}
-
-fn cmdConnect(arena: std.mem.Allocator, client: *CdpClient, cdp_url: []const u8, rest: []const []const u8) !void {
-    if (rest.len < 1) fatal("connect: requires <save|load|list|delete> [name]\n", .{});
-    const sub = rest[0];
-
-    // Broker mode: if a key-holding broker is configured, route through it so
-    // this agent process never touches the vault passphrase.
-    if (compat.getenv("KURI_BROKER_ADDR")) |addr| {
-        if (compat.getenv("KURI_BROKER_TOKEN")) |tok| {
-            try connectViaBroker(arena, addr, tok, cdp_url, sub, rest);
-            return;
-        }
-    }
-
-    const state_dir = compat.getenv("STATE_DIR") orelse ".kuri";
-    const passphrase = compat.getenv("KURI_VAULT_PASSPHRASE");
-
-    if (std.mem.eql(u8, sub, "list")) {
-        const names = connect_store.listSessions(arena, state_dir, passphrase) catch |err| {
-            jsonError("connect list failed: {s}", .{@errorName(err)});
-            std.process.exit(1);
-        };
-        var buf: std.ArrayList(u8) = .empty;
-        buf.appendSlice(arena, "{\"connections\":[") catch {};
-        for (names, 0..) |n, i| {
-            if (i > 0) buf.appendSlice(arena, ",") catch {};
-            buf.print(arena, "\"{s}\"", .{n}) catch {};
-        }
-        buf.appendSlice(arena, "]}\n") catch {};
-        compat.writeToStdout(buf.items);
-        return;
-    }
-    if (std.mem.eql(u8, sub, "delete")) {
-        if (rest.len < 2) fatal("connect delete: requires <name>\n", .{});
-        connect_store.deleteSession(arena, state_dir, passphrase, rest[1]) catch |err| {
-            jsonError("connect delete failed: {s}", .{@errorName(err)});
-            std.process.exit(1);
-        };
-        const out = try std.fmt.allocPrint(arena, "{{\"ok\":true,\"deleted\":\"{s}\"}}\n", .{rest[1]});
-        compat.writeToStdout(out);
-        return;
-    }
-    if (rest.len < 2) fatal("connect {s}: requires <name>\n", .{sub});
-    const name = rest[1];
-
-    if (std.mem.eql(u8, sub, "save")) {
-        const origin = evalStringValue(arena, client, "location.origin") orelse "";
-        const cookies_resp = client.send(arena, protocol.Methods.network_get_cookies, null) catch |err| {
-            jsonError("getCookies failed: {s}", .{@errorName(err)});
-            std.process.exit(1);
-        };
-        const cookies = extractBalancedAfter(cookies_resp, "\"cookies\"") orelse "[]";
-        const ls_resp = client.send(arena, protocol.Methods.runtime_evaluate, evalParams(arena, "Object.fromEntries(Object.entries(localStorage))")) catch "";
-        const local_storage = extractBalancedAfter(ls_resp, "\"value\"") orelse "{}";
-        const ss_resp = client.send(arena, protocol.Methods.runtime_evaluate, evalParams(arena, "Object.fromEntries(Object.entries(sessionStorage))")) catch "";
-        const session_storage = extractBalancedAfter(ss_resp, "\"value\"") orelse "{}";
-
-        const esc_name = try escapeForJson(arena, name);
-        const esc_origin = try escapeForJson(arena, origin);
-        const payload = try std.fmt.allocPrint(
-            arena,
-            "{{\"version\":1,\"name\":\"{s}\",\"origin\":\"{s}\",\"saved_at\":{d},\"cookies\":{s},\"local_storage\":{s},\"session_storage\":{s}}}",
-            .{ esc_name, esc_origin, compat.timestampSeconds(), cookies, local_storage, session_storage },
-        );
-        connect_store.saveSession(arena, state_dir, passphrase, name, origin, payload) catch |err| {
-            jsonError("connect save failed: {s}", .{@errorName(err)});
-            std.process.exit(1);
-        };
-        const out = try std.fmt.allocPrint(arena, "{{\"ok\":true,\"saved\":\"{s}\",\"origin\":\"{s}\",\"encrypted\":true}}\n", .{ esc_name, esc_origin });
-        compat.writeToStdout(out);
-        return;
-    }
-
-    if (std.mem.eql(u8, sub, "load")) {
-        const payload = connect_store.loadSession(arena, state_dir, passphrase, name) catch |err| {
-            jsonError("connect load failed: {s}", .{@errorName(err)});
-            std.process.exit(1);
-        };
-        const origin = extractString(payload, 0, "\"origin\"") orelse "";
-        const cookies = extractBalancedAfter(payload, "\"cookies\"") orelse "[]";
-        const local_storage = extractBalancedAfter(payload, "\"local_storage\"") orelse "{}";
-        const session_storage = extractBalancedAfter(payload, "\"session_storage\"") orelse "{}";
-
-        if (origin.len > 0) {
-            const esc = try escapeForJson(arena, origin);
-            const nav = try std.fmt.allocPrint(arena, "{{\"url\":\"{s}\"}}", .{esc});
-            _ = client.send(arena, protocol.Methods.page_navigate, nav) catch {};
-            compat.threadSleep(1_000_000_000);
-        }
-        const set_params = try std.fmt.allocPrint(arena, "{{\"cookies\":{s}}}", .{cookies});
-        _ = client.send(arena, protocol.Methods.network_set_cookies, set_params) catch {};
-        restoreStorageSnapshot(arena, client, "localStorage", local_storage);
-        restoreStorageSnapshot(arena, client, "sessionStorage", session_storage);
-
-        const out = try std.fmt.allocPrint(arena, "{{\"ok\":true,\"loaded\":\"{s}\",\"origin\":\"{s}\"}}\n", .{ name, origin });
-        compat.writeToStdout(out);
-        return;
-    }
-
-    fatal("connect: unknown subcommand '{s}' (use save|load|list|delete)\n", .{sub});
-}
-
-/// Parse CDP a11y tree response into A11yNode slice.
 /// Single-pass parser — scans the JSON once instead of indexOf per field.
 fn parseA11yNodes(arena: std.mem.Allocator, raw_json: []const u8) ![]const a11y.A11yNode {
     var nodes: std.ArrayList(a11y.A11yNode) = .empty;
