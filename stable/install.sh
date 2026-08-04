@@ -82,7 +82,11 @@ tar -xzf "$TMP/kuri.tar.gz" -C "$TMP"
 # ── Install binaries ──────────────────────────────────────────────────────────
 mkdir -p "$INSTALL_DIR"
 
-BINS="kuri kuri-agent kuri-fetch kuri-browse"
+# kuri-mobile must be here: `kuri android`/`kuri ios` exec it as a *sibling*
+# binary, so omitting it leaves those subcommands failing with "failed to exec"
+# on an otherwise successful install. It shipped in the tarball from v0.4.6 but
+# was missing from this list until v0.4.12.
+BINS="kuri kuri-agent kuri-fetch kuri-browse kuri-mobile"
 INSTALLED=""
 for BIN in $BINS; do
   if [ -f "$TMP/$BIN" ]; then

@@ -1,0 +1,33 @@
+{
+  "channel": "stable",
+  "version": "v0.6.0",
+  "commit": "4494cadaf7e94085bff8d79f0c8b6efbb24b0613",
+  "published_at": "2026-08-04T02:20:48Z",
+  "install_url": "https://raw.githubusercontent.com/justrach/kuri/release-channel/stable/install.sh",
+  "assets": {
+    "aarch64-linux": {
+      "url": "https://raw.githubusercontent.com/justrach/kuri/release-channel/stable/v0.6.0/kuri-v0.6.0-aarch64-linux.tar.gz",
+      "sha256": "cc355403b8d18b9817bb60ce280463e7f27cab5fc6b2eaa656d5b0b89e3b698a",
+      "size": 16960845,
+      "notarized": false
+    },
+    "aarch64-macos": {
+      "url": "https://raw.githubusercontent.com/justrach/kuri/release-channel/stable/v0.6.0/kuri-v0.6.0-aarch64-macos.tar.gz",
+      "sha256": "946d1a47a0db600444c527226b6c257692926294bd2c397de6c259c415472507",
+      "size": 3332386,
+      "notarized": false
+    },
+    "x86_64-linux": {
+      "url": "https://raw.githubusercontent.com/justrach/kuri/release-channel/stable/v0.6.0/kuri-v0.6.0-x86_64-linux.tar.gz",
+      "sha256": "f78b9a2d3f952ed33fcfdf6dadebdb220c2cb4447a6a7d40ab79e19f0b1aee01",
+      "size": 17384850,
+      "notarized": false
+    },
+    "x86_64-macos": {
+      "url": "https://raw.githubusercontent.com/justrach/kuri/release-channel/stable/v0.6.0/kuri-v0.6.0-x86_64-macos.tar.gz",
+      "sha256": "25a30af3a5f5b4d7824fd683457846ac86cbc6bf7456aef5e6354c2d61b0bd3a",
+      "size": 3505355,
+      "notarized": false
+    }
+  }
+}
