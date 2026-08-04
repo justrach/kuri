@@ -140,7 +140,7 @@ pub const Registry = struct {
     /// is also what mainstream clients request.
     pub const initialize_result = "{\"protocolVersion\":\"" ++ mcp.PROTOCOL_VERSION ++
         "\",\"capabilities\":{\"tools\":{\"listChanged\":false},\"logging\":{}}," ++
-        "\"serverInfo\":{\"name\":\"kuri-mobile\",\"title\":\"kuri mobile device driver\",\"version\":\"0.4.14\"}," ++
+        "\"serverInfo\":{\"name\":\"kuri-mobile\",\"title\":\"kuri mobile device driver\",\"version\":\"0.6.0\"}," ++
         "\"instructions\":\"Drive iOS simulators and Android devices: lifecycle, Xcode build, observation, input. Every tool takes {\\\"args\\\":[...]} — the raw CLI tokens its description documents.\"}";
 
     pub fn parse(name: []const u8) ?usize {

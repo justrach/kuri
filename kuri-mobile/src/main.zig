@@ -60,7 +60,7 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
     if (std.mem.eql(u8, sub, "--version")) {
-        try writeStdout("kuri-mobile 0.4.14\n");
+        try writeStdout("kuri-mobile 0.6.0\n");
         return;
     }
 

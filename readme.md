@@ -5,7 +5,7 @@
 <h1 align="center">Kuri 🌰</h1>
 
 <p align="center">
-  <a href="https://kuri.trilok.ai/download/latest.json"><img src="https://img.shields.io/badge/stable-v0.5.1-brightgreen?style=flat-square" alt="Stable release"></a>
+  <a href="https://kuri.trilok.ai/download/latest.json"><img src="https://img.shields.io/badge/stable-v0.6.0-brightgreen?style=flat-square" alt="Stable release"></a>
   <a href="https://github.com/justrach/kuri/blob/main/LICENSE"><img src="https://img.shields.io/github/license/justrach/kuri?style=flat-square" alt="License"></a>
   <img src="https://img.shields.io/badge/zig-0.16.0-f7a41d?style=flat-square" alt="Zig">
   <img src="https://img.shields.io/badge/node__modules-0_files-brightgreen?style=flat-square" alt="node_modules">
@@ -20,7 +20,7 @@ curl -fsSL https://kuri.trilok.ai/download | sh
 
 macOS arm64/x86_64 and Linux x86_64/arm64. Single binary, no runtime deps.
 
-Direct downloads: [macOS arm64](https://kuri.trilok.ai/download/v0.5.1/kuri-v0.5.1-aarch64-macos.tar.gz) · [macOS x86_64](https://kuri.trilok.ai/download/v0.5.1/kuri-v0.5.1-x86_64-macos.tar.gz) · [Linux x86_64](https://kuri.trilok.ai/download/v0.5.1/kuri-v0.5.1-x86_64-linux.tar.gz) · [Linux arm64](https://kuri.trilok.ai/download/v0.5.1/kuri-v0.5.1-aarch64-linux.tar.gz)
+Direct downloads: [macOS arm64](https://kuri.trilok.ai/download/v0.6.0/kuri-v0.6.0-aarch64-macos.tar.gz) · [macOS x86_64](https://kuri.trilok.ai/download/v0.6.0/kuri-v0.6.0-x86_64-macos.tar.gz) · [Linux x86_64](https://kuri.trilok.ai/download/v0.6.0/kuri-v0.6.0-x86_64-linux.tar.gz) · [Linux arm64](https://kuri.trilok.ai/download/v0.6.0/kuri-v0.6.0-aarch64-linux.tar.gz)
 
 ---
 

@@ -1,6 +1,6 @@
 .{
     .name = .kuri_mobile,
-    .version = "0.4.14",
+    .version = "0.6.0",
     .dependencies = .{
         .mcp_zig = .{
             .url = "git+https://github.com/justrach/mcp-zig#b819109276f3a0e24788354c8cc1d073e62c2d78",
