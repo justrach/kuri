@@ -14,12 +14,15 @@ Everything in this section is a real gap, in rough order of how much it costs.
 ### 1. No MCP or HTTP transport — CLI only
 
 *Update 2026-08: closed, the way this section predicted. `kuri-mobile mcp`
-serves MCP stdio (newline JSON-RPC); `tools/list` is generated from the two
-platform tool tables plus `doctor` (79 tools), and `tools/call` re-execs the
-binary so stdout stays the protocol's. Measured on an M-series laptop against
-XcodeBuildMCP 2.7.0: ready-to-serve in ~5 ms vs ~415 ms, `tools/list` in
-~1 ms vs ~25 ms, and a warm incremental `build-run` of the same project
-~2.2 s vs ~2.9–3.1 s through their `build_run_sim`.*
+serves MCP stdio via the [mcp-zig](https://github.com/justrach/mcp-zig)
+library — kuri supplies only a comptime registry generated from the two
+platform tool tables plus `doctor` (79 tools); protocol machinery (version
+negotiation, logging, notifications, the stateless 2026-07-28 mode) is the
+dependency's. `tools/call` re-execs the binary so stdout stays the
+protocol's. Measured on an M-series laptop against XcodeBuildMCP 2.7.0:
+ready-to-serve in ~9 ms vs ~414 ms, `tools/list` in ~0.4 ms vs ~10-25 ms
+(the list is a comptime constant), and a warm incremental `build-run` of the
+same project ~2.2 s vs ~2.9–3.1 s through their `build_run_sim`.*
 
 XcodeBuildMCP is an MCP server (plus a CLI and a background daemon with session
 state). kuri-mobile was a CLI and nothing else, so every action paid a process

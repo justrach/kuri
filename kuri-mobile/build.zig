@@ -17,12 +17,18 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    // MCP protocol machinery (JSON-RPC loop, version negotiation, transports)
+    // comes from mcp-zig; kuri only supplies the tool registry.
+    const mcp_dep = b.dependency("mcp_zig", .{ .target = target, .optimize = optimize });
+    const mcp_module = mcp_dep.module("mcp");
+
     const root_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
     });
+    root_mod.addImport("mcp", mcp_module);
 
     // CGEvent (tap/swipe) and AXUIElement live in ApplicationServices on macOS.
     linkAppleFrameworks(b, root_mod, target);
@@ -45,6 +51,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
+    test_mod.addImport("mcp", mcp_module);
     linkAppleFrameworks(b, test_mod, target);
     const unit_tests = b.addTest(.{ .root_module = test_mod });
     const test_step = b.step("test", "Run unit tests");

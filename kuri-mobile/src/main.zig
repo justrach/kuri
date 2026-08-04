@@ -15,7 +15,7 @@ const doctor = @import("doctor.zig");
 const mcp_server = @import("mcp_server.zig");
 const io = @import("common/io.zig");
 
-pub fn main(init: std.process.Init.Minimal) !void {
+pub fn main(init: std.process.Init) !void {
     var gpa_impl: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa_impl.deinit();
     const gpa = gpa_impl.allocator();
@@ -24,7 +24,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     defer arena_impl.deinit();
     const arena = arena_impl.allocator();
 
-    const argv = try init.args.toSlice(arena);
+    const argv = try init.minimal.args.toSlice(arena);
 
     if (argv.len < 2) {
         try printUsage();
@@ -50,7 +50,8 @@ pub fn main(init: std.process.Init.Minimal) !void {
         return;
     }
     if (std.mem.eql(u8, sub, "mcp")) {
-        const code = mcp_server.run(gpa, argv[0]) catch |err| return reportError(err);
+        mcp_server.self_exe = argv[0];
+        const code = mcp_server.run(gpa, init.io) catch |err| return reportError(err);
         if (code != 0) std.process.exit(code);
         return;
     }
