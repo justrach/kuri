@@ -9,6 +9,8 @@ const sim_input = @import("sim_input.zig");
 const sim_window = @import("sim_window.zig");
 const sim_ax = @import("sim_ax.zig");
 const xcode = @import("xcode.zig");
+const xcodebuild = @import("xcodebuild.zig");
+const defaults = @import("defaults.zig");
 const tools = @import("tools.zig");
 const io = @import("../common/io.zig");
 const uitree = @import("../common/uitree.zig");
@@ -39,6 +41,10 @@ const Opts = struct {
     /// delivered to the process by pid, so stealing the user's foreground
     /// window is neither necessary nor acceptable.
     activate: bool = false,
+    /// Xcode scheme for the build commands.
+    scheme: ?[]const u8 = null,
+    /// Build configuration; the build commands default to Debug.
+    configuration: ?[]const u8 = null,
 };
 
 /// Consume a recognized flag at `rest[idx]`, returning how many tokens it
@@ -85,7 +91,9 @@ fn takeFlag(opts: *Opts, rest: []const []const u8, idx: usize) !?usize {
         std.mem.eql(u8, name, "predicate") or
         std.mem.eql(u8, name, "timeout") or
         std.mem.eql(u8, name, "pid") or
-        std.mem.eql(u8, name, "label");
+        std.mem.eql(u8, name, "label") or
+        std.mem.eql(u8, name, "scheme") or
+        std.mem.eql(u8, name, "configuration");
     if (!needs_value) return null;
     if (idx + 1 >= rest.len) return error.MissingFlagValue;
     const val = rest[idx + 1];
@@ -104,6 +112,10 @@ fn takeFlag(opts: *Opts, rest: []const []const u8, idx: usize) !?usize {
         opts.timeout_ms = try std.fmt.parseInt(u64, val, 10);
     } else if (std.mem.eql(u8, name, "pid")) {
         opts.pid = try std.fmt.parseInt(i64, val, 10);
+    } else if (std.mem.eql(u8, name, "scheme")) {
+        opts.scheme = val;
+    } else if (std.mem.eql(u8, name, "configuration")) {
+        opts.configuration = val;
     }
     return 2;
 }
@@ -311,6 +323,14 @@ pub fn run(gpa: std.mem.Allocator, args: []const []const u8) !u8 {
         io.writeStdout(out);
         return 0;
     }
+
+    if (std.mem.eql(u8, sub, "list-schemes")) return cmdListSchemes(gpa, cmd_args);
+    if (std.mem.eql(u8, sub, "build")) return cmdBuild(gpa, opts, cmd_args);
+    if (std.mem.eql(u8, sub, "build-run") or std.mem.eql(u8, sub, "build_run")) return cmdBuildRun(gpa, opts, cmd_args);
+    if (std.mem.eql(u8, sub, "test")) return cmdTest(gpa, opts, cmd_args);
+    if (std.mem.eql(u8, sub, "product")) return cmdProduct(gpa, opts, cmd_args);
+    if (std.mem.eql(u8, sub, "clean")) return cmdClean(gpa, opts, cmd_args);
+    if (std.mem.eql(u8, sub, "defaults")) return cmdDefaults(gpa, cmd_args);
 
     if (std.mem.eql(u8, sub, "tap")) return cmdTap(gpa, opts, cmd_args);
     if (std.mem.eql(u8, sub, "doubletap") or std.mem.eql(u8, sub, "dbltap")) return cmdDoubleTap(gpa, opts, cmd_args);
@@ -751,6 +771,175 @@ fn cmdLog(gpa: std.mem.Allocator, opts: Opts, args: []const []const u8) !u8 {
     defer gpa.free(out);
     io.writeStdout(out);
     return 0;
+}
+
+// --- xcode build -------------------------------------------------------------
+
+/// The build-family inputs after merging explicit values with session
+/// defaults. Owns the loaded defaults; the resolved slices point into either
+/// argv or those defaults, so they live as long as this does.
+const BuildInputs = struct {
+    d: defaults.Defaults,
+    container: []const u8,
+    scheme: []const u8,
+    configuration: []const u8,
+    udid: ?[]const u8,
+
+    fn deinit(self: BuildInputs, gpa: std.mem.Allocator) void {
+        self.d.deinit(gpa);
+    }
+};
+
+/// Explicit argument/flag first, session default second, a named error
+/// third. `need_scheme` lets `list-schemes` share the container resolution
+/// without demanding a scheme it doesn't use.
+fn resolveBuildInputs(
+    gpa: std.mem.Allocator,
+    opts: Opts,
+    args: []const []const u8,
+    need_scheme: bool,
+) !?BuildInputs {
+    var d = try defaults.load(gpa);
+    errdefer d.deinit(gpa);
+
+    const container = if (args.len >= 1) args[0] else d.project orelse {
+        _ = errMissing("path.xcodeproj|path.xcworkspace (or `defaults set project ...`)");
+        d.deinit(gpa);
+        return null;
+    };
+    var scheme: []const u8 = "";
+    if (need_scheme) {
+        scheme = opts.scheme orelse d.scheme orelse {
+            _ = errMissing("--scheme (or `defaults set scheme ...`)");
+            d.deinit(gpa);
+            return null;
+        };
+    }
+    return .{
+        .d = d,
+        .container = container,
+        .scheme = scheme,
+        .configuration = opts.configuration orelse d.configuration orelse "Debug",
+        .udid = opts.udid orelse d.udid,
+    };
+}
+
+fn cmdListSchemes(gpa: std.mem.Allocator, args: []const []const u8) !u8 {
+    const in = (try resolveBuildInputs(gpa, .{}, args, false)) orelse return 2;
+    defer in.deinit(gpa);
+    const out = try xcodebuild.listSchemes(gpa, in.container);
+    defer gpa.free(out);
+    io.writeStdout(out);
+    return 0;
+}
+
+fn cmdBuild(gpa: std.mem.Allocator, opts: Opts, args: []const []const u8) !u8 {
+    const in = (try resolveBuildInputs(gpa, opts, args, true)) orelse return 2;
+    defer in.deinit(gpa);
+    const built = try xcodebuild.buildForSim(gpa, in.container, in.scheme, in.configuration);
+    defer built.deinit(gpa);
+    var arena_impl = std.heap.ArenaAllocator.init(gpa);
+    defer arena_impl.deinit();
+    io.printStdout(arena_impl.allocator(), "app={s}\nbundle={s}\n", .{ built.app_path, built.bundle_id });
+    return 0;
+}
+
+/// XcodeBuildMCP's `build_run_sim`, the tool its docs say agents reach for
+/// most: build, install on the booted simulator, launch — one command.
+fn cmdBuildRun(gpa: std.mem.Allocator, opts: Opts, args: []const []const u8) !u8 {
+    if (!opts.simulator) {
+        io.writeStderr("build-run targets the iOS Simulator; running on a physical device needs signing and is not supported. Omit --device.\n");
+        return 3;
+    }
+    const in = (try resolveBuildInputs(gpa, opts, args, true)) orelse return 2;
+    defer in.deinit(gpa);
+    const built = try xcodebuild.buildForSim(gpa, in.container, in.scheme, in.configuration);
+    defer built.deinit(gpa);
+
+    const r = try resolveUdid(gpa, in.udid);
+    defer r.deinit(gpa);
+    const sim = simctl.Sim.init(r.udid);
+    try sim.install(gpa, built.app_path);
+    try sim.launch(gpa, built.bundle_id);
+
+    var arena_impl = std.heap.ArenaAllocator.init(gpa);
+    defer arena_impl.deinit();
+    io.printStdout(arena_impl.allocator(), "app={s}\nbundle={s}\nlaunched={s}\n", .{
+        built.app_path,
+        built.bundle_id,
+        r.udid,
+    });
+    return 0;
+}
+
+/// `xcodebuild test` against the booted (or named) simulator.
+fn cmdTest(gpa: std.mem.Allocator, opts: Opts, args: []const []const u8) !u8 {
+    const in = (try resolveBuildInputs(gpa, opts, args, true)) orelse return 2;
+    defer in.deinit(gpa);
+    const r = try resolveUdid(gpa, in.udid);
+    defer r.deinit(gpa);
+    const ok = try xcodebuild.testForSim(gpa, in.container, in.scheme, in.configuration, r.udid);
+    return if (ok) 0 else 1;
+}
+
+/// Where the product lands and its bundle id, without building.
+fn cmdProduct(gpa: std.mem.Allocator, opts: Opts, args: []const []const u8) !u8 {
+    const in = (try resolveBuildInputs(gpa, opts, args, true)) orelse return 2;
+    defer in.deinit(gpa);
+    const built = try xcodebuild.resolveProduct(gpa, in.container, in.scheme, in.configuration);
+    defer built.deinit(gpa);
+    var arena_impl = std.heap.ArenaAllocator.init(gpa);
+    defer arena_impl.deinit();
+    io.printStdout(arena_impl.allocator(), "app={s}\nbundle={s}\n", .{ built.app_path, built.bundle_id });
+    return 0;
+}
+
+fn cmdClean(gpa: std.mem.Allocator, opts: Opts, args: []const []const u8) !u8 {
+    const in = (try resolveBuildInputs(gpa, opts, args, true)) orelse return 2;
+    defer in.deinit(gpa);
+    try xcodebuild.clean(gpa, in.container, in.scheme, in.configuration);
+    return 0;
+}
+
+// --- session defaults --------------------------------------------------------
+
+fn cmdDefaults(gpa: std.mem.Allocator, args: []const []const u8) !u8 {
+    var arena_impl = std.heap.ArenaAllocator.init(gpa);
+    defer arena_impl.deinit();
+    const arena = arena_impl.allocator();
+
+    if (args.len == 0 or std.mem.eql(u8, args[0], "show")) {
+        const d = try defaults.load(gpa);
+        defer d.deinit(gpa);
+        const text = try defaults.serialize(gpa, d);
+        defer gpa.free(text);
+        if (text.len == 0) io.writeStdout("no defaults set\n") else io.writeStdout(text);
+        return 0;
+    }
+    if (std.mem.eql(u8, args[0], "set")) {
+        if (args.len < 3) return errMissing("<key> <value>");
+        defaults.set(gpa, args[1], args[2]) catch |err| switch (err) {
+            error.UnknownKey => {
+                io.printStderr(arena, "unknown key: {s} (known: project, scheme, configuration, udid)\n", .{args[1]});
+                return 2;
+            },
+            else => return err,
+        };
+        return 0;
+    }
+    if (std.mem.eql(u8, args[0], "clear")) {
+        if (args.len >= 2) {
+            defaults.clearKey(gpa, args[1]) catch |err| switch (err) {
+                error.UnknownKey => {
+                    io.printStderr(arena, "unknown key: {s} (known: project, scheme, configuration, udid)\n", .{args[1]});
+                    return 2;
+                },
+                else => return err,
+            };
+        } else try defaults.clearAll(gpa);
+        return 0;
+    }
+    return errMissing("<set|show|clear>");
 }
 
 // --- real-device lifecycle --------------------------------------------------

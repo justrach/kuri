@@ -28,7 +28,7 @@ Only aggregate, non-identifying signal:
 | `http.server.request.duration_ns` | `1234567` | per-request latency |
 | `http.response.body.size` | `4096` | response size in bytes |
 | `error` | `false` | status ≥ 400 |
-| `service.version` | `0.5.1` | kuri version |
+| `service.version` | `0.6.0` | kuri version |
 | `os.type` / `host.arch` | `macos` / `aarch64` | platform |
 | `service.instance.id` | random 128-bit hex | per-install id, so distinct installs can be counted |
 

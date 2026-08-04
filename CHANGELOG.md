@@ -2,7 +2,12 @@
 
 All notable changes to kuri are documented here.
 
-## [Unreleased]
+## [0.6.0] — 2026-08-04
+
+### Features
+- **Xcode build commands in kuri-mobile** — `ios list-schemes`, `build`, `build-run`, `test`, `product`, and `clean` delegate to xcodebuild through the existing toolchain resolution, so they work even when `xcode-select` points at CommandLineTools. `build-run` goes from source to a running simulator app in one command: build, resolve the product, install on the booted simulator, launch.
+- **Session defaults** — `ios defaults set|show|clear` persists `project`, `scheme`, `configuration`, and `udid` so the build-family commands can be invoked with no arguments. Explicit flags and positionals always win, and no other command consults the stored values.
+- **MCP server** — `kuri-mobile mcp` serves every iOS and Android command plus `doctor` (79 tools) over MCP stdio, built on the [mcp-zig](https://github.com/justrach/mcp-zig) library. The tool registry is generated at comptime from the same tables that render the CLI help, so new commands appear as MCP tools with no extra work. Measured against XcodeBuildMCP 2.7.0 driving the same project: ready to serve in ~9 ms vs ~414 ms, `tools/list` in ~0.4 ms vs ~10–25 ms, warm incremental build-run ~2.2 s vs ~2.9–3.1 s.
 
 ### Removed
 - **`connect` feature and nanostore dependency** — the `/connect/*` routes, `kuri-agent connect`, `kuri-connect-broker`, and relay-fetch mode shipped in v0.5.1 are removed from main. They depended on the private `justrach/nanostore` sibling library, which made every build of kuri require a private checkout plus a `NANOSTORE_PAT` secret in CI, and its pinned commit did not compile on the project's Zig 0.17.0-dev toolchain. Building kuri now needs only this repo. `KURI_VAULT_PASSPHRASE`, `KURI_RELAY`, and `KURI_BROKER*` no longer have any effect.

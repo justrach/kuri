@@ -13,17 +13,35 @@ Everything in this section is a real gap, in rough order of how much it costs.
 
 ### 1. No MCP or HTTP transport — CLI only
 
-XcodeBuildMCP is an MCP server (plus a CLI and a background daemon with session
-state). kuri-mobile is a CLI and nothing else, so every action pays a process
-spawn and there is no session.
+*Update 2026-08: closed, the way this section predicted. `kuri-mobile mcp`
+serves MCP stdio via the [mcp-zig](https://github.com/justrach/mcp-zig)
+library — kuri supplies only a comptime registry generated from the two
+platform tool tables plus `doctor` (79 tools); protocol machinery (version
+negotiation, logging, notifications, the stateless 2026-07-28 mode) is the
+dependency's. `tools/call` re-execs the binary so stdout stays the
+protocol's. Measured on an M-series laptop against XcodeBuildMCP 2.7.0:
+ready-to-serve in ~9 ms vs ~414 ms, `tools/list` in ~0.4 ms vs ~10-25 ms
+(the list is a comptime constant), and a warm incremental `build-run` of the
+same project ~2.2 s vs ~2.9–3.1 s through their `build_run_sim`.*
 
-This is the largest structural gap. `common/toolinfo.zig` already holds the full
-command surface as data and renders `--json`, so a server could be generated
-from it rather than hand-written.
+XcodeBuildMCP is an MCP server (plus a CLI and a background daemon with session
+state). kuri-mobile was a CLI and nothing else, so every action paid a process
+spawn and there was no session.
+
+This was the largest structural gap. `common/toolinfo.zig` already held the full
+command surface as data and rendered `--json`, which is exactly what the MCP
+server is now generated from.
 
 ### 2. The entire build system
 
-kuri-mobile has **none** of this, and adding it would be a different project:
+*Update 2026-08: the driver-adjacent slice now exists — `list-schemes`,
+`build`, `build-run` (their `build_run_sim`), `test` (their `test_sim`),
+`product` (their `get_sim_app_path` + `get_app_bundle_id`), and `clean` live
+in `ios/xcodebuild.zig` and the shared tool table. Coverage reports, macOS
+targets, scaffolding, and Swift Package tooling remain out of scope on
+purpose.*
+
+kuri-mobile has **none** of the rest, and adding it would be a different project:
 
 | Area | XcodeBuildMCP |
 |---|---|
@@ -51,9 +69,13 @@ They build, launch, stop and test macOS apps. kuri-mobile is iOS + Android only.
 
 ### 5. Session defaults
 
+*Update 2026-08: closed. `ios defaults set|show|clear` persists
+project/scheme/configuration/udid (one flat file, `KURI_MOBILE_DEFAULTS` to
+relocate it); the build-family commands fall back to them, explicit flags
+always win, and no other command consults them.*
+
 `session_set_defaults` lets a caller set scheme/project/device once and omit
-them afterwards. kuri-mobile repeats `--udid` on every invocation. Cheap to add
-and a real ergonomic difference for an agent.
+them afterwards. kuri-mobile used to repeat `--udid` on every invocation.
 
 ### 6. Xcode IDE bridge
 

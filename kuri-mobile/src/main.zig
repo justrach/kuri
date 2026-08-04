@@ -12,9 +12,10 @@ const std = @import("std");
 const android_cli = @import("android/cli.zig");
 const ios_cli = @import("ios/cli.zig");
 const doctor = @import("doctor.zig");
+const mcp_server = @import("mcp_server.zig");
 const io = @import("common/io.zig");
 
-pub fn main(init: std.process.Init.Minimal) !void {
+pub fn main(init: std.process.Init) !void {
     var gpa_impl: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa_impl.deinit();
     const gpa = gpa_impl.allocator();
@@ -23,7 +24,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     defer arena_impl.deinit();
     const arena = arena_impl.allocator();
 
-    const argv = try init.args.toSlice(arena);
+    const argv = try init.minimal.args.toSlice(arena);
 
     if (argv.len < 2) {
         try printUsage();
@@ -48,12 +49,18 @@ pub fn main(init: std.process.Init.Minimal) !void {
         if (code != 0) std.process.exit(code);
         return;
     }
+    if (std.mem.eql(u8, sub, "mcp")) {
+        mcp_server.self_exe = argv[0];
+        const code = mcp_server.run(gpa, init.io) catch |err| return reportError(err);
+        if (code != 0) std.process.exit(code);
+        return;
+    }
     if (std.mem.eql(u8, sub, "--help") or std.mem.eql(u8, sub, "-h") or std.mem.eql(u8, sub, "help")) {
         try printUsage();
         return;
     }
     if (std.mem.eql(u8, sub, "--version")) {
-        try writeStdout("kuri-mobile 0.4.14\n");
+        try writeStdout("kuri-mobile 0.6.0\n");
         return;
     }
 
@@ -71,6 +78,9 @@ fn printUsage() !void {
         \\
         \\Diagnostics:
         \\  doctor    check toolchain, accessibility grant, simulators and adb
+        \\
+        \\Integration:
+        \\  mcp       serve every command as an MCP tool over stdio (newline JSON-RPC)
         \\
         \\Run `kuri-mobile <platform>` with no args for per-platform help.
         \\
@@ -143,4 +153,5 @@ test {
     _ = @import("ios/tools.zig");
     _ = @import("android/tools.zig");
     _ = @import("common/toolinfo.zig");
+    _ = @import("mcp_server.zig");
 }
