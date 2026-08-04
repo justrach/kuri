@@ -23,7 +23,14 @@ from it rather than hand-written.
 
 ### 2. The entire build system
 
-kuri-mobile has **none** of this, and adding it would be a different project:
+*Update 2026-08: the driver-adjacent slice now exists — `list-schemes`,
+`build`, `build-run` (their `build_run_sim`), `test` (their `test_sim`),
+`product` (their `get_sim_app_path` + `get_app_bundle_id`), and `clean` live
+in `ios/xcodebuild.zig` and the shared tool table. Coverage reports, macOS
+targets, scaffolding, and Swift Package tooling remain out of scope on
+purpose.*
+
+kuri-mobile has **none** of the rest, and adding it would be a different project:
 
 | Area | XcodeBuildMCP |
 |---|---|
@@ -51,9 +58,13 @@ They build, launch, stop and test macOS apps. kuri-mobile is iOS + Android only.
 
 ### 5. Session defaults
 
+*Update 2026-08: closed. `ios defaults set|show|clear` persists
+project/scheme/configuration/udid (one flat file, `KURI_MOBILE_DEFAULTS` to
+relocate it); the build-family commands fall back to them, explicit flags
+always win, and no other command consults them.*
+
 `session_set_defaults` lets a caller set scheme/project/device once and omit
-them afterwards. kuri-mobile repeats `--udid` on every invocation. Cheap to add
-and a real ergonomic difference for an agent.
+them afterwards. kuri-mobile used to repeat `--udid` on every invocation.
 
 ### 6. Xcode IDE bridge
 

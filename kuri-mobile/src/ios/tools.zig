@@ -113,6 +113,65 @@ pub const all = [_]Tool{
         .scope = .virtual,
     },
 
+    // --- xcode build --------------------------------------------------------
+    .{
+        .name = "list-schemes",
+        .args = "[path.xcodeproj|path.xcworkspace]",
+        .summary = "list the schemes, targets and configurations xcodebuild sees",
+        .category = "build",
+        .scope = .virtual,
+    },
+    .{
+        .name = "build",
+        .args = "[path.xcodeproj|path.xcworkspace]",
+        .flags = &.{ "--scheme", "--configuration" },
+        .summary = "build the scheme for the iOS Simulator; prints app= and bundle= of the product",
+        .category = "build",
+        .scope = .virtual,
+    },
+    .{
+        .name = "build-run",
+        .aliases = &.{"build_run"},
+        .args = "[path.xcodeproj|path.xcworkspace]",
+        .flags = &.{ "--scheme", "--configuration", "--udid" },
+        .summary = "build, install on the booted simulator and launch, in one command",
+        .category = "build",
+        .scope = .virtual,
+    },
+    .{
+        .name = "test",
+        .args = "[path.xcodeproj|path.xcworkspace]",
+        .flags = &.{ "--scheme", "--configuration", "--udid" },
+        .summary = "run the scheme's tests on the booted simulator (xcodebuild test)",
+        .category = "build",
+        .scope = .virtual,
+    },
+    .{
+        .name = "product",
+        .args = "[path.xcodeproj|path.xcworkspace]",
+        .flags = &.{ "--scheme", "--configuration" },
+        .summary = "print app= and bundle= for the scheme without building",
+        .category = "build",
+        .scope = .virtual,
+    },
+    .{
+        .name = "clean",
+        .args = "[path.xcodeproj|path.xcworkspace]",
+        .flags = &.{ "--scheme", "--configuration" },
+        .summary = "remove the scheme's build products (xcodebuild clean)",
+        .category = "build",
+        .scope = .virtual,
+    },
+
+    // --- session defaults ---------------------------------------------------
+    .{
+        .name = "defaults",
+        .args = "<set <key> <value>|show|clear [key]>",
+        .summary = "persist project/scheme/configuration/udid so build commands can omit them",
+        .category = "session",
+        .scope = .both,
+    },
+
     // --- observation --------------------------------------------------------
     .{
         .name = "screenshot",
@@ -329,6 +388,8 @@ pub const all = [_]Tool{
 const categories = [_]toolinfo.Category{
     .{ .key = "meta", .title = "Discovery" },
     .{ .key = "lifecycle", .title = "Device & app lifecycle" },
+    .{ .key = "build", .title = "Xcode build (runs on the host; the product targets the iOS Simulator)" },
+    .{ .key = "session", .title = "Session defaults (fill omitted build-command values; explicit flags win)" },
     .{ .key = "observe", .title = "Observation" },
     // The background note is part of the contract, not a footnote: callers
     // need to know these can run while someone else is using the machine.
