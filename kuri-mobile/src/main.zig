@@ -12,6 +12,7 @@ const std = @import("std");
 const android_cli = @import("android/cli.zig");
 const ios_cli = @import("ios/cli.zig");
 const doctor = @import("doctor.zig");
+const mcp_server = @import("mcp_server.zig");
 const io = @import("common/io.zig");
 
 pub fn main(init: std.process.Init.Minimal) !void {
@@ -48,6 +49,11 @@ pub fn main(init: std.process.Init.Minimal) !void {
         if (code != 0) std.process.exit(code);
         return;
     }
+    if (std.mem.eql(u8, sub, "mcp")) {
+        const code = mcp_server.run(gpa, argv[0]) catch |err| return reportError(err);
+        if (code != 0) std.process.exit(code);
+        return;
+    }
     if (std.mem.eql(u8, sub, "--help") or std.mem.eql(u8, sub, "-h") or std.mem.eql(u8, sub, "help")) {
         try printUsage();
         return;
@@ -71,6 +77,9 @@ fn printUsage() !void {
         \\
         \\Diagnostics:
         \\  doctor    check toolchain, accessibility grant, simulators and adb
+        \\
+        \\Integration:
+        \\  mcp       serve every command as an MCP tool over stdio (newline JSON-RPC)
         \\
         \\Run `kuri-mobile <platform>` with no args for per-platform help.
         \\
@@ -143,4 +152,5 @@ test {
     _ = @import("ios/tools.zig");
     _ = @import("android/tools.zig");
     _ = @import("common/toolinfo.zig");
+    _ = @import("mcp_server.zig");
 }

@@ -13,13 +13,21 @@ Everything in this section is a real gap, in rough order of how much it costs.
 
 ### 1. No MCP or HTTP transport — CLI only
 
-XcodeBuildMCP is an MCP server (plus a CLI and a background daemon with session
-state). kuri-mobile is a CLI and nothing else, so every action pays a process
-spawn and there is no session.
+*Update 2026-08: closed, the way this section predicted. `kuri-mobile mcp`
+serves MCP stdio (newline JSON-RPC); `tools/list` is generated from the two
+platform tool tables plus `doctor` (79 tools), and `tools/call` re-execs the
+binary so stdout stays the protocol's. Measured on an M-series laptop against
+XcodeBuildMCP 2.7.0: ready-to-serve in ~5 ms vs ~415 ms, `tools/list` in
+~1 ms vs ~25 ms, and a warm incremental `build-run` of the same project
+~2.2 s vs ~2.9–3.1 s through their `build_run_sim`.*
 
-This is the largest structural gap. `common/toolinfo.zig` already holds the full
-command surface as data and renders `--json`, so a server could be generated
-from it rather than hand-written.
+XcodeBuildMCP is an MCP server (plus a CLI and a background daemon with session
+state). kuri-mobile was a CLI and nothing else, so every action paid a process
+spawn and there was no session.
+
+This was the largest structural gap. `common/toolinfo.zig` already held the full
+command surface as data and rendered `--json`, which is exactly what the MCP
+server is now generated from.
 
 ### 2. The entire build system
 

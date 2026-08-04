@@ -100,7 +100,7 @@ pub fn renderText(
     return out.toOwnedSlice(gpa);
 }
 
-fn appendJsonString(gpa: std.mem.Allocator, out: *std.ArrayList(u8), s: []const u8) !void {
+pub fn appendJsonString(gpa: std.mem.Allocator, out: *std.ArrayList(u8), s: []const u8) !void {
     try out.append(gpa, '"');
     for (s) |ch| switch (ch) {
         '"' => try out.appendSlice(gpa, "\\\""),
