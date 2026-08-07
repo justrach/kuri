@@ -25,6 +25,23 @@ pub fn build(b: *std.Build) void {
 
     b.installArtifact(exe);
 
+    // Stateless FFI shared library — embed kuri's fetch/render path in-process
+    // (no server, no Bridge). Pure-Zig deps (validator/markdown) + spawned curl;
+    // needs no quickjs / curl-impersonate linkage. Built with `zig build ffi`.
+    const ffi_lib = b.addLibrary(.{
+        .name = "kuri_ffi",
+        .linkage = .dynamic,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/ffi.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    const ffi_install = b.addInstallArtifact(ffi_lib, .{});
+    const ffi_step = b.step("ffi", "Build the stateless FFI shared library (libkuri_ffi)");
+    ffi_step.dependOn(&ffi_install.step);
+
     // Run step
     const run_exe = b.addRunArtifact(exe);
     run_exe.step.dependOn(b.getInstallStep());
