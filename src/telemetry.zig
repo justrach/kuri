@@ -252,11 +252,18 @@ pub fn recordSessionStart() void {
     record(&g_telem, .{ .kind = .session_start, .time_ns = compat.nanoTimestamp() });
 }
 
+/// Liveness probes (Docker/k8s `httpGet`, `curl /health`) hit /health every
+/// few seconds; recording them would bury real usage, so they are skipped.
+fn isProbeRoute(route: []const u8) bool {
+    return std.mem.eql(u8, route, "/health");
+}
+
 /// Record one HTTP request. `route` must be the path with the query string
 /// already stripped (the dispatcher's clean_path) — never the raw target.
 pub fn recordRequest(route: []const u8, method: []const u8, status: u16, latency_ns: i64, response_bytes: u32, is_error: bool) void {
     const self = &g_telem;
     if (!self.enabled) return;
+    if (isProbeRoute(route)) return;
 
     var ev = Event{
         .kind = .http_request,
@@ -478,6 +485,12 @@ test "disabled telemetry record is a no-op" {
     recordSessionStart();
     recordRequest("/navigate", "GET", 200, 123, 456, false);
     try std.testing.expectEqual(@as(u32, 0), g_telem.head.load(.monotonic));
+}
+
+test "health probes are not recorded as requests" {
+    try std.testing.expect(isProbeRoute("/health"));
+    try std.testing.expect(!isProbeRoute("/navigate"));
+    try std.testing.expect(!isProbeRoute("/healthz"));
 }
 
 test "formatLogRecord emits kuri.telemetry.v1 logRecord for a request" {
