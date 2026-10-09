@@ -2,6 +2,11 @@
 
 All notable changes to kuri are documented here.
 
+## [0.6.1] — 2026-10-09
+
+### Fixes
+- **Telemetry skips `/health`** — container liveness probes (Docker/k8s `httpGet`, `curl /health`) call `/health` every few seconds, so they made up almost every recorded request. They are no longer recorded; every other route is recorded as before.
+
 ## [0.6.0] — 2026-08-04
 
 ### Features
